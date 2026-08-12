@@ -1,0 +1,22 @@
+# Virtual environments
+venv_backend/
+venv_dashboard/
+**/venv_backend/
+**/venv_dashboard/
+
+# Environment secrets (CRITICAL: Do not upload credentials)
+.env
+**/.env
+
+# Python caching & system files
+__pycache__/
+**/__pycache__/
+*.pyc
+.DS_Store
+**/.DS_Store
+
+# Tool specific folders
+.gemini/
+**/.gemini/
+.idea/
+.vscode/

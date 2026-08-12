@@ -190,14 +190,27 @@ if menu == "💰 资产负债中心":
         
         # 4. 资产占比饼图
         st.subheader("📊 家庭资产配置透视")
-        asset_types = {
-            'cash': '👛 防御资产 (活期钱包)',
-            'savings': '🛡️ 安全资产 (定期储蓄)',
-            'investment': '🚀 进攻资产 (理财投资)'
-        }
         
-        pie_data = assets_df.groupby('account_type')['balance_cny'].sum().reset_index()
-        pie_data['label'] = pie_data['account_type'].map(asset_types)
+        # 重新定义资产风险三色谱分类
+        def categorize_asset_risk(row):
+            acc_name = row['account_name']
+            acc_type = row['account_type']
+            if acc_type == 'cash':
+                return '👛 流动性资产 (活期钱包/借记卡)'
+            elif acc_type == 'savings':
+                return '🛡️ 防守型资产 (定期存款/国债/柜台债)'
+            elif acc_type == 'investment':
+                # 高风险/权益类资产归入“进攻型资产”
+                if acc_name in ['Broker_Stocks', 'Alipay_Advanced_Investment']:
+                    return '🚀 进攻型资产 (股票/进阶投资)'
+                else:
+                    # 银行理财、支付宝稳健理财等中低风险理财归入“防守型资产”
+                    return '🛡️ 防守型资产 (定期存款/国债/柜台债)'
+            return '其他'
+        
+        pie_df = assets_df.copy()
+        pie_df['label'] = pie_df.apply(categorize_asset_risk, axis=1)
+        pie_data = pie_df.groupby('label')['balance_cny'].sum().reset_index()
         
         if pie_data['balance_cny'].sum() == 0:
             st.info("资产余额全为 0，暂不显示配置饼图。")

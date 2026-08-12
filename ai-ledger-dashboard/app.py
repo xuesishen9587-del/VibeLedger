@@ -191,21 +191,21 @@ if menu == "💰 资产负债中心":
         # 4. 资产占比饼图
         st.subheader("📊 家庭资产配置透视")
         
-        # 重新定义资产风险三色谱分类
+        # 重新定义资产风险四级梯度分类
         def categorize_asset_risk(row):
             acc_name = row['account_name']
             acc_type = row['account_type']
             if acc_type == 'cash':
-                return '👛 流动性资产 (活期钱包/借记卡)'
+                return '👛 活期资产 (活期钱包/借记卡)'
             elif acc_type == 'savings':
-                return '🛡️ 防守型资产 (定期存款/国债/柜台债)'
+                return '🛡️ 低风险资产 (定期存款/国债/柜台债)'
             elif acc_type == 'investment':
-                # 高风险/权益类资产归入“进攻型资产”
+                # 中高风险/权益类投资资产
                 if acc_name in ['Broker_Stocks', 'Alipay_Advanced_Investment']:
-                    return '🚀 进攻型资产 (股票/进阶投资)'
+                    return '🚀 中高风险资产 (股票/进阶投资)'
                 else:
-                    # 银行理财、支付宝稳健理财等中低风险理财归入“防守型资产”
-                    return '🛡️ 防守型资产 (定期存款/国债/柜台债)'
+                    # 中低风险资产（银行理财、支付宝稳健理财等）
+                    return '⚖️ 中低风险资产 (银行理财/稳健理财)'
             return '其他'
         
         pie_df = assets_df.copy()

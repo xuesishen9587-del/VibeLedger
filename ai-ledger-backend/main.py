@@ -93,7 +93,12 @@ STRICT RULES ON TRANSACTION TYPE:
 1. EXPENSE: Standard consumption receipts (e.g. WeChat Pay/Alipay merchant payment). Required: 'from_account' (source wallet/card), 'to_account' must be null.
 2. INCOME: Earnings (salary slips, bank interest notices, transfers received). Required: 'to_account' (destination wallet/card), 'from_account' must be null. Choose the correct category (e.g., Salary for salary, Interest_Income/Stable_Investment_Income/Advanced_Investment_Income for investment returns, Gift_Social_Income for red packets received, Professional_Fees for writing/lecturing/consulting).
 3. TRANSFER: Repayments (debit card to credit card), bank transfers between owned cards. Required: both 'from_account' and 'to_account'. Set category to 'Balance_Correction'.
-4. ADJUSTMENT: Screenshots showing the current balance of one or more accounts (e.g. Bank card overview page showing "Current Balance: ¥10,000" or Alipay asset screen). Required: set 'transaction_type' to 'adjustment', set 'category' to 'Balance_Correction', and populate the 'adjustments' list with all visible accounts and their summed absolute balances according to the bank-specific aggregation rules below.
+4. ADJUSTMENT: Screenshots showing the current balance of one or more accounts. Required: set 'transaction_type' to 'adjustment', set 'category' to 'Balance_Correction', and populate the 'adjustments' list with all visible accounts and their absolute balances.
+
+CREDIT CARD LIABILITY ADJUSTMENT RULE (CRITICAL):
+For credit card accounts (e.g., Huabei, ABC_CUP_Credit, ICBC_CUP_Credit, BOC_CUP_Credit, ICBC_Visa_Credit, CCB_Visa_Credit):
+- If the screenshot or note shows an outstanding balance, a bill to pay, or debt (e.g. "欠款 ¥3,000", "应还款 3,000", "已用额度 3,000"), the value in the adjustments list MUST be output as a NEGATIVE number (e.g. -3000.00).
+- Credit card balances represent liabilities and must be negative or zero. Do not record debt as a positive asset balance.
 
 ACCOUNT DICTIONARY matching rules:
 Map any identified payment method or bank name to one of:
@@ -123,6 +128,8 @@ BANK-SPECIFIC NOMENCLATURE & AGGREGATION RULES FOR ADJUSTMENTS:
    - "稳健理财" -> "Alipay_Stable_Wealth"
    - "进阶理财" -> "Alipay_Advanced_Investment"
    - IGNORE "总资产" (Total Assets).
+5. Brokerage Stocks (Broker_Stocks) Screen:
+   - Identify "账户资产", "总资产" or "资产总值" (which includes stock market value + cash) instead of just "证券市值" (stock value only) to record as the balance for "Broker_Stocks".
 
 INSTALLMENT DETECTIONS:
 If the user note contains "分期 N期" (e.g., "分期 12期" or "分期 3期"), set 'is_installment' = true and extract the number of months into 'installment_months'.

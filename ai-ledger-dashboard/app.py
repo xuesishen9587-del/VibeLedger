@@ -101,9 +101,12 @@ if menu == "💰 资产负债中心":
         total_assets = assets_df['balance_cny'].sum()
         
         credit_df = df_acc[df_acc['account_type'] == 'credit']
-        total_liabilities = abs(credit_df['balance_cny'].sum())
+        # 负债总额为所有负数余额的绝对值之和
+        total_liabilities = abs(credit_df[credit_df['balance_cny'] < 0]['balance_cny'].sum())
+        # 信用卡多还产生的溢缴款（正数）作为资产累加
+        credit_overpayment = credit_df[credit_df['balance_cny'] > 0]['balance_cny'].sum()
         
-        net_assets = total_assets - total_liabilities
+        net_assets = total_assets + credit_overpayment - total_liabilities
         
         # 1. 顶层 KPI
         col_kpi1, col_kpi2, col_kpi3 = st.columns(3)

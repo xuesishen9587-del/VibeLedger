@@ -29,16 +29,22 @@ VALID_ACCOUNTS = Literal[
     "Huabei", "ABC_CUP_Credit", "ICBC_CUP_Credit", "BOC_CUP_Credit", "ICBC_Visa_Credit", "CCB_Visa_Credit",
     # savings
     "ICBC_Savings", "BOC_Savings", "BOB_Savings", "Kunlun_Savings",
-    # investment
-    "Alipay_Investment", "Broker_Stocks", "ICBC_Wealth", "BOC_Wealth", "BOB_Wealth"
+    # investment (Alipay_Investment has been split into Stable and Advanced)
+    "Alipay_Stable_Wealth", "Alipay_Advanced_Investment", "Broker_Stocks", "ICBC_Wealth", "BOC_Wealth", "BOB_Wealth"
 ]
 
 # 定义支持的交易分类字典
 VALID_CATEGORIES = Literal[
+    # 日常支出分类
     "Grocery", "Dine", "Child", "Home & Utilities", "Digital & Gadgets", 
     "Clothing", "Beauty", "Transportation", "Health", "Education", 
     "Gift & Socials", "Parents", "Fun & Games", "Trips & Occasions",
-    "Investment_Income", "Balance_Correction", "FX_Loss"
+    # 主动收入分类
+    "Salary", "Reimbursement", "Gift_Social_Income", "Professional_Fees", "Other_Income",
+    # 投资理财收益分类 (根据资产风险类型细化)
+    "Interest_Income", "Stable_Investment_Income", "Advanced_Investment_Income",
+    # 系统与特殊调整分类
+    "Balance_Correction", "FX_Loss"
 ]
 
 # 1. 快捷指令请求体模型
@@ -77,7 +83,7 @@ You are a precise financial accounting assistant. Your job is to analyze a finan
 
 STRICT RULES ON TRANSACTION TYPE:
 1. EXPENSE: Standard consumption receipts (e.g. WeChat Pay/Alipay merchant payment). Required: 'from_account' (source wallet/card), 'to_account' must be null.
-2. INCOME: Earnings (salary slips, bank interest notices, transfers received). Required: 'to_account' (destination wallet/card), 'from_account' must be null.
+2. INCOME: Earnings (salary slips, bank interest notices, transfers received). Required: 'to_account' (destination wallet/card), 'from_account' must be null. Choose the correct category (e.g., Salary for salary, Interest_Income/Stable_Investment_Income/Advanced_Investment_Income for investment returns, Gift_Social_Income for red packets received, Professional_Fees for writing/lecturing/consulting).
 3. TRANSFER: Repayments (debit card to credit card), bank transfers between owned cards. Required: both 'from_account' and 'to_account'. Set category to 'Balance_Correction'.
 4. ADJUSTMENT: Screenshots showing the current balance of an account (e.g. Bank card overview page showing "Current Balance: ¥10,000" or Alipay asset screen). Required: set 'transaction_type' to 'adjustment', set 'to_account' to the account name, set 'amount' to the actual absolute balance, set 'category' to 'Balance_Correction'.
 
@@ -86,7 +92,7 @@ Map any identified payment method or bank name to one of:
 - cash: WeChat_Pay, Alipay_Cash, ICBC_Debit, BOC_Debit, BOB_Debit, ABC_Debit
 - credit: Huabei, ABC_CUP_Credit, ICBC_CUP_Credit, BOC_CUP_Credit, ICBC_Visa_Credit, CCB_Visa_Credit
 - savings: ICBC_Savings, BOC_Savings, BOB_Savings, Kunlun_Savings
-- investment: Alipay_Investment, Broker_Stocks, ICBC_Wealth, BOC_Wealth, BOB_Wealth
+- investment: Alipay_Stable_Wealth (for low risk wealth management), Alipay_Advanced_Investment (for high risk mutual funds/stocks on Alipay), Broker_Stocks, ICBC_Wealth, BOC_Wealth, BOB_Wealth
 
 INSTALLMENT DETECTIONS:
 If the user note contains "分期 N期" (e.g., "分期 12期" or "分期 3期"), set 'is_installment' = true and extract the number of months into 'installment_months'.

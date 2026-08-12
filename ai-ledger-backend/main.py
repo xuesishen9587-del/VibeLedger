@@ -97,7 +97,7 @@ STRICT RULES ON TRANSACTION TYPE:
 
 CREDIT CARD LIABILITY ADJUSTMENT RULE (CRITICAL):
 For credit card accounts (e.g., Huabei, ABC_CUP_Credit, ICBC_CUP_Credit, BOC_CUP_Credit, ICBC_Visa_Credit, CCB_Visa_Credit):
-- If the screenshot or note shows an outstanding balance, a bill to pay, or debt (e.g. "欠款 ¥3,000", "应还款 3,000", "已用额度 3,000"), the value in the adjustments list MUST be output as a NEGATIVE number (e.g. -3000.00).
+- If the screenshot or note shows an outstanding balance, a bill to pay, or debt (e.g. "全部待还 3,000", "欠款 ¥3,000", "应还款 3,000", "已用额度 3,000"), the value in the adjustments list MUST be output as a NEGATIVE number (e.g. -3000.00).
 - Credit card balances represent liabilities and must be negative or zero. Do not record debt as a positive asset balance.
 
 ACCOUNT DICTIONARY matching rules:

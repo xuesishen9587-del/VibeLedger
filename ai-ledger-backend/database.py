@@ -208,33 +208,54 @@ def insert_record(date, amount, original_currency, from_account, to_account, tra
 def apply_adjustment(account_name, target_balance, date, remarks):
     """
     上帝平账逻辑 (adjustment)
-    计算真实绝对水位与数据库当前水位差值，差值自动作差补齐一条 Balance_Correction 流水
+    计算真实绝对水位与数据库当前水位差值，差值自动作差补齐流水。
+    对于 investment 类型的账户且非初始设定(当前余额不为 0)，差值直接记为对应投资收益类型的 income，金额可正可负。
     """
     conn = get_db_connection()
     cur = conn.cursor()
     
     try:
-        bal, curr = get_account_balance_and_currency(cur, account_name)
+        # 获取账户当前类型
+        cur.execute(f"SELECT account_type, current_balance, currency FROM {ACCOUNTS_TABLE} WHERE account_name = %s;", (account_name,))
+        res = cur.fetchone()
+        if not res:
+            raise ValueError(f"账户 '{account_name}' 不存在")
+        
+        acc_type = res['account_type']
+        bal = float(res['current_balance'])
+        curr = res['currency']
+        
         diff = float(target_balance) - bal
         
         if diff == 0:
             print(f"账户 {account_name} 余额一致，无需调平")
             return
             
-        # 插入一笔调平流水记录
-        # 如果 diff > 0 (数据库少记了)，相当于多了一笔 income，记 to_account = account_name
-        # 如果 diff < 0 (数据库多记了)，相当于多了一笔 expense，记 from_account = account_name
-        from_acc = account_name if diff < 0 else None
-        to_acc = account_name if diff > 0 else None
-        tx_type = 'adjustment'
-        category = 'Balance_Correction'
+        # 判定是否为投资收益账务自动转为收入
+        if acc_type == 'investment' and bal != 0.00:
+            # 区分稳健理财与进阶投资收益
+            if account_name in ['Broker_Stocks', 'Alipay_Advanced_Investment']:
+                category = 'Advanced_Investment_Income'
+            else:
+                category = 'Stable_Investment_Income'
+            
+            tx_type = 'income'
+            from_acc = None
+            to_acc = account_name
+            amount = diff  # 保留正负号
+        else:
+            # 初始化或普通现金、储蓄卡、信用卡平账
+            from_acc = account_name if diff < 0 else None
+            to_acc = account_name if diff > 0 else None
+            tx_type = 'adjustment'
+            category = 'Balance_Correction'
+            amount = abs(diff)
         
-        # 流水更新
         sql_insert = f"""
             INSERT INTO {TRANSACTIONS_TABLE} (date, amount, original_currency, from_account, to_account, transaction_type, category, remarks)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s);
         """
-        cur.execute(sql_insert, (date, abs(diff), curr, from_acc, to_acc, tx_type, category, remarks))
+        cur.execute(sql_insert, (date, amount, curr, from_acc, to_acc, tx_type, category, remarks))
         
         # 强制将账户余额设定为最新目标余额
         update_account_balance(cur, account_name, target_balance)

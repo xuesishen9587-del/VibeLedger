@@ -150,11 +150,22 @@ def insert_single_transaction_in_tx(cur, date, amount, original_currency, from_a
 import re
 
 def insert_record(date, amount, original_currency, from_account, to_account, transaction_type, category, remarks, is_installment=False, installment_months=1):
-    """向云端数据库插入交易记录，同时处理信用卡分期逻辑"""
+    """向云端数据库插入交易记录，同时处理信用卡分期逻辑（带防重入校验）"""
     conn = get_db_connection()
     cur = conn.cursor()
     
     try:
+        # 防重入校验：检查是否已存在完全一样的交易明细
+        cur.execute(f"""
+            SELECT id FROM {TRANSACTIONS_TABLE}
+            WHERE date = %s AND amount = %s AND original_currency = %s
+              AND (from_account = %s OR (from_account IS NULL AND %s IS NULL))
+              AND (to_account = %s OR (to_account IS NULL AND %s IS NULL))
+              AND transaction_type = %s AND category = %s AND remarks = %s;
+        """, (date, amount, original_currency, from_account, from_account, to_account, to_account, transaction_type, category, remarks))
+        
+        if cur.fetchone():
+            raise ValueError("DUPLICATE_TRANSACTION")
         # 处理信用卡分期逻辑
         if is_installment and installment_months > 1:
             # 方案一：录入时，把 N 期总额在各期以 amount/N 插入数据库（每次插入均会驱动余额扣减，最终合力扣减总额）

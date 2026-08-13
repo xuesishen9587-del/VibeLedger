@@ -233,6 +233,11 @@ async def record_transaction(payload: RecordRequest):
         }
         
     except Exception as e:
+        if str(e) == "DUPLICATE_TRANSACTION":
+            return {
+                "status": "success",
+                "message": "检测到完全重复的交易记录，已自动去重并跳过入库。"
+            }
         print("====== [ERROR] FastAPI 后端发生崩溃 ======")
         traceback.print_exc()
         print("=========================================")

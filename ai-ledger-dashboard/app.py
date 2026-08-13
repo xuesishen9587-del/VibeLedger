@@ -28,7 +28,7 @@ USD_CNY_RATE = get_usd_cny_rate()
 def format_reconciled_time(ts):
     try:
         if pd.notna(ts):
-            return pd.to_datetime(ts).strftime("%m-%d %H:%M")
+            return pd.to_datetime(ts).strftime("%Y-%m-%d")
     except Exception:
         pass
     return "未对账"
@@ -323,12 +323,12 @@ elif menu == "📊 收支统计中心":
         st.divider()
         
         # 优化点 1：历史趋势变动图支持分类筛选
-        st.subheader("📈 历史收支与消费分类趋势变动图")
+        st.subheader("📈 历史收支分类趋势变动图")
         
         # 趋势展示维度选择
         trend_dimension = st.selectbox(
             "趋势展示维度", 
-            options=["📊 总收入 vs 总支出趋势", "🎨 指定消费分类趋势"]
+            options=["📊 总收入 vs 总支出趋势", "🎨 指定收支分类趋势"]
         )
         
         if trend_dimension == "📊 总收入 vs 总支出趋势":
@@ -355,19 +355,19 @@ elif menu == "📊 收支统计中心":
                 legend_title="收支类型",
                 hovermode="x unified"
             )
+            fig_trend.update_xaxes(rangeslider_visible=True)
             st.plotly_chart(fig_trend, use_container_width=True)
             
         else:
-            # 筛选出属于支出的分类
-            all_expense_records = df[df['transaction_type'] == 'expense']
-            available_categories = sorted(all_expense_records['category'].unique())
+            # 筛选出属于所有交易的分类
+            available_categories = sorted(df['category'].unique())
             
             if not available_categories:
-                st.info("暂无历史消费支出数据，无法生成分类趋势图。")
+                st.info("暂无历史收支数据，无法生成分类趋势图。")
             else:
-                # 允许多选或者单选需要对比的支出类型
+                # 允许多选或者单选需要对比的收支类型
                 selected_trend_cats = st.multiselect(
-                    "选择需要展示趋势的消费分类", 
+                    "选择需要展示趋势的收支分类", 
                     options=available_categories, 
                     default=available_categories[:3] if len(available_categories) >= 3 else available_categories
                 )
@@ -376,7 +376,7 @@ elif menu == "📊 收支统计中心":
                     st.warning("请选择至少一个分类以渲染趋势图。")
                 else:
                     # 按月份和选定分类进行聚合
-                    cat_trend_df = all_expense_records[all_expense_records['category'].isin(selected_trend_cats)]
+                    cat_trend_df = df[df['category'].isin(selected_trend_cats)]
                     cat_trend_grouped = cat_trend_df.groupby(['year_month', 'category'])['amount'].sum().reset_index()
                     # 排序确保折线正常
                     cat_trend_grouped = cat_trend_grouped.sort_values('year_month')
@@ -387,9 +387,10 @@ elif menu == "📊 收支统计中心":
                         y='amount', 
                         color='category',
                         markers=True,
-                        labels={'year_month': '月份', 'amount': '月度消费额 (元)', 'category': '消费分类'}
+                        labels={'year_month': '月份', 'amount': '月度额度 (元)', 'category': '收支分类'}
                     )
                     fig_cat_trend.update_layout(hovermode="x unified")
+                    fig_cat_trend.update_xaxes(rangeslider_visible=True)
                     st.plotly_chart(fig_cat_trend, use_container_width=True)
         
         st.divider()

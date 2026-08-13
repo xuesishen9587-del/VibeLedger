@@ -177,7 +177,7 @@ async def record_transaction(payload: RecordRequest):
             
         # 根据交易类型分流处理落库
         if parsed_data.transaction_type == 'adjustment':
-            # 上帝平账逻辑：根据绝对数值水位调平（支持多账户列表）
+            # 余额对账逻辑：根据绝对数值水位调平（支持多账户列表）
             adjusted_details = []
             if parsed_data.adjustments and len(parsed_data.adjustments) > 0:
                 for adj in parsed_data.adjustments:
@@ -188,7 +188,7 @@ async def record_transaction(payload: RecordRequest):
                         remarks=parsed_data.remarks
                     )
                     adjusted_details.append(f"【{adj.account}】为 ￥{adj.balance:.2f} 元")
-                msg = f"成功上帝批量平账：" + "，".join(adjusted_details) + "。"
+                msg = f"账户余额批量校准成功：" + "，".join(adjusted_details) + "。"
             elif parsed_data.to_account and parsed_data.amount is not None:
                 database.apply_adjustment(
                     account_name=parsed_data.to_account,
@@ -196,7 +196,7 @@ async def record_transaction(payload: RecordRequest):
                     date=parsed_data.date,
                     remarks=parsed_data.remarks
                 )
-                msg = f"成功上帝单账户平账：【{parsed_data.to_account}】当前水位校准为 ￥{parsed_data.amount:.2f} 元。"
+                msg = f"账户余额对账成功：【{parsed_data.to_account}】当前水位校准为 ￥{parsed_data.amount:.2f} 元。"
             else:
                 raise HTTPException(status_code=422, detail="Adjustment type requires either adjustments list or to_account and amount.")
         else:

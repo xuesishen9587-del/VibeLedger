@@ -42,7 +42,7 @@ def update_account_balance(cur, account_name, new_balance):
 
 def apply_adjustment(account_name, target_balance, date, remarks):
     """
-    上帝平账逻辑 (adjustment)
+    对账校准逻辑 (adjustment)
     计算真实绝对水位与数据库当前水位差值，差值自动作差补齐流水。
     对于 investment 类型的账户且非初始设定(当前余额不为 0)，差值直接记为对应投资收益类型的 income，金额可正可负。
     """

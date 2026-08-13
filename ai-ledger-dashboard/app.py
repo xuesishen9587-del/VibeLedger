@@ -25,17 +25,25 @@ def get_usd_cny_rate():
 
 USD_CNY_RATE = get_usd_cny_rate()
 
-# --- 侧边栏导航与手动平账 ---
-st.sidebar.title("🏦 Vibe Finance 2.0")
-st.sidebar.markdown("智能多模态家庭资产负债中心")
+def format_reconciled_time(ts):
+    try:
+        if pd.notna(ts):
+            return pd.to_datetime(ts).strftime("%m-%d %H:%M")
+    except Exception:
+        pass
+    return "未对账"
+
+# --- 侧边栏导航与手动对账 ---
+st.sidebar.title("🏦 Vibe Ledger")
+st.sidebar.markdown("智能多模态家庭账本")
 
 # 多页面路由
 menu = st.sidebar.radio("功能中心", ["💰 资产负债中心", "📊 收支统计中心"])
 
-# 展示侧边栏平账表单
+# 展示侧边栏对账表单
 st.sidebar.divider()
-st.sidebar.subheader("上帝调平 (手动平账)")
-st.sidebar.caption("💡 提示：您可以使用本表单手动调平账户，也可以继续使用 iPhone 快捷指令轻敲背板上传账户余额截图进行自动识别调平，两者完全兼容！")
+st.sidebar.subheader("账户余额校准 (手动对账)")
+st.sidebar.caption("💡 提示：您可以使用本表单手动核对校准账户，也可以继续使用 iPhone 快捷指令轻敲背板上传账户余额截图进行自动对账，两者完全兼容！")
 
 accounts_list = []
 try:
@@ -46,20 +54,20 @@ except Exception:
 
 if accounts_list:
     with st.sidebar.form("adjustment_form", clear_on_submit=True):
-        adj_account = st.selectbox("选择要调平的账户", options=accounts_list)
+        adj_account = st.selectbox("选择要对账的账户", options=accounts_list)
         adj_balance = st.number_input("该账户当下真实余额", min_value=-999999.0, max_value=999999.0, step=100.0)
-        adj_remarks = st.text_input("备注", value="手动上帝调平")
-        submit_btn = st.form_submit_button("一键平账")
+        adj_remarks = st.text_input("备注", value="手动对账校准")
+        submit_btn = st.form_submit_button("一键核对校准")
         
         if submit_btn:
             try:
                 today_str = datetime.now().strftime("%Y-%m-%d")
                 apply_adjustment(adj_account, adj_balance, today_str, adj_remarks)
-                st.sidebar.success(f"🎉 调平成功！{adj_account} 余额已更新为 ￥{adj_balance:,.2f}")
+                st.sidebar.success(f"🎉 对账校准成功！{adj_account} 余额已更新为 ￥{adj_balance:,.2f}")
                 st.cache_data.clear()
                 st.rerun()
             except Exception as ex:
-                st.sidebar.error(f"❌ 调平失败: {ex}")
+                st.sidebar.error(f"❌ 对账校准失败: {ex}")
 else:
     st.sidebar.info("💡 等待数据库连接配置完成后，将在此显示可用账户列表。")
 
@@ -83,8 +91,7 @@ df_acc, df_tx = load_data()
 # 页面 1: 💰 资产负债中心
 # ==============================================================================
 if menu == "💰 资产负债中心":
-    # 优化点 2：将标题中的“负债”二字去掉
-    st.title("💰 家庭财富与资产控制中心")
+    st.title("🐱 猫之家 · 资产控制中心 🐱")
     st.markdown("监控家庭各大类别账户净资产及信用卡分期应还情况")
     
     if df_acc.empty:
@@ -129,27 +136,27 @@ if menu == "💰 资产负债中心":
                 st.markdown(f"**分类汇总: ￥{cash_sub['balance_cny'].sum():,.2f}**")
                 for _, r in cash_sub.iterrows():
                     curr_sym = "$" if r['currency'] == 'USD' else "￥"
-                    st.write(f"- {r['account_name']}: `{curr_sym}{float(r['current_balance']):,.2f}`")
+                    st.write(f"- {r['account_name']}: `{curr_sym}{float(r['current_balance']):,.2f}` *(校准于 {format_reconciled_time(r.get('updated_at'))})*")
             
-            with st.expander("🛡️ 储蓄存款 (银行定期/大额存单)", expanded=True):
+            with st.expander("🛡️ 储蓄存款 (银行定期/大额存单/国债)", expanded=True):
                 save_sub = df_acc[df_acc['account_type'] == 'savings']
                 st.markdown(f"**分类汇总: ￥{save_sub['balance_cny'].sum():,.2f}**")
                 for _, r in save_sub.iterrows():
-                    st.write(f"- {r['account_name']}: `￥{float(r['current_balance']):,.2f}`")
+                    st.write(f"- {r['account_name']}: `￥{float(r['current_balance']):,.2f}` *(校准于 {format_reconciled_time(r.get('updated_at'))})*")
                     
         with col_b:
             with st.expander("📈 投资资产 (股票/基金/定期理财)", expanded=True):
                 inv_sub = df_acc[df_acc['account_type'] == 'investment']
                 st.markdown(f"**分类汇总: ￥{inv_sub['balance_cny'].sum():,.2f}**")
                 for _, r in inv_sub.iterrows():
-                    st.write(f"- {r['account_name']}: `￥{float(r['current_balance']):,.2f}`")
+                    st.write(f"- {r['account_name']}: `￥{float(r['current_balance']):,.2f}` *(校准于 {format_reconciled_time(r.get('updated_at'))})*")
             
             with st.expander("💳 信用负债 (信用卡/花呗额度占用)", expanded=True):
                 credit_sub = df_acc[df_acc['account_type'] == 'credit']
                 st.markdown(f"**分类汇总: ￥{credit_sub['balance_cny'].sum():,.2f}**")
                 for _, r in credit_sub.iterrows():
                     curr_sym = "$" if r['currency'] == 'USD' else "￥"
-                    st.write(f"- {r['account_name']}: `{curr_sym}{float(r['current_balance']):,.2f}`")
+                    st.write(f"- {r['account_name']}: `{curr_sym}{float(r['current_balance']):,.2f}` *(校准于 {format_reconciled_time(r.get('updated_at'))})*")
 
         st.divider()
         
@@ -222,7 +229,7 @@ if menu == "💰 资产负债中心":
                 pie_data, values='balance_cny', names='label',
                 hole=0.4, color_discrete_sequence=px.colors.qualitative.Set2
             )
-            fig_pie.update_traces(textposition='inside', textinfo='percent+label')
+            fig_pie.update_traces(textposition='outside', textfont_size=14, textinfo='percent+label')
             st.plotly_chart(fig_pie, use_container_width=True)
 
 
@@ -297,6 +304,7 @@ elif menu == "📊 收支统计中心":
                     month_exp_group, values='amount', names='category',
                     hole=0.3, color_discrete_sequence=px.colors.qualitative.Pastel
                 )
+                fig_exp_pie.update_traces(textposition='outside', textfont_size=14, textinfo='percent+label')
                 st.plotly_chart(fig_exp_pie, use_container_width=True)
                 
         with col_chart2:
@@ -309,6 +317,7 @@ elif menu == "📊 收支统计中心":
                     month_inc_group, values='amount', names='category',
                     hole=0.3, color_discrete_sequence=px.colors.qualitative.Safe
                 )
+                fig_inc_pie.update_traces(textposition='outside', textfont_size=14, textinfo='percent+label')
                 st.plotly_chart(fig_inc_pie, use_container_width=True)
                 
         st.divider()

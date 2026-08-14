@@ -40,18 +40,110 @@ def update_account_balance(cur, account_name, new_balance):
         (new_balance, account_name)
     )
 
-def apply_adjustment(account_name, target_balance, date, remarks):
+def safe_replace_day(date_obj, target_day: int):
+    """安全地替换日期对象的 Day，如果目标天数超出了该月最大天数则自动限制为该月最后一天"""
+    import calendar
+    _, last_day = calendar.monthrange(date_obj.year, date_obj.month)
+    return date_obj.replace(day=min(target_day, last_day))
+
+def get_credit_card_statement_info(cur, account_name, today_date_str_or_obj):
+    """
+    计算指定信用卡的账单数据：
+    - statement_balance: 已出账单金额
+    - repaid_amount: 本期已还金额
+    - remaining_due: 本期剩余应还
+    - unbilled_balance: 未出账单消费
+    """
+    cur.execute(
+        f"SELECT billing_day, due_day FROM {ACCOUNTS_TABLE} WHERE account_name = %s AND account_type = 'credit';",
+        (account_name,)
+    )
+    acc = cur.fetchone()
+    if not acc or acc['billing_day'] is None or acc['due_day'] is None:
+        return {
+            "statement_balance": 0.0,
+            "repaid_amount": 0.0,
+            "remaining_due": 0.0,
+            "unbilled_balance": 0.0
+        }
+        
+    b_day = int(acc['billing_day'])
+    d_day = int(acc['due_day'])
+    
+    if isinstance(today_date_str_or_obj, str):
+        today = datetime.strptime(today_date_str_or_obj, "%Y-%m-%d").date()
+    else:
+        today = today_date_str_or_obj
+        
+    # 寻找最近 of 已出账单日 S
+    if today.day >= b_day:
+        statement_date = safe_replace_day(today, b_day)
+    else:
+        statement_date = today - relativedelta(months=1)
+        statement_date = safe_replace_day(statement_date, b_day)
+        
+    # 账单区间：[S - 1 month + 1 day, S]
+    cycle_end = statement_date
+    cycle_start = (cycle_end - relativedelta(months=1)) + relativedelta(days=1)
+    
+    # 还款日：根据 d_day 是否大于 b_day 确定是同月还是下月
+    if d_day > b_day:
+        due_date = safe_replace_day(statement_date, d_day)
+    else:
+        due_date = statement_date + relativedelta(months=1)
+        due_date = safe_replace_day(due_date, d_day)
+        
+    repay_start = cycle_end + relativedelta(days=1)
+    repay_end = due_date
+    
+    # 查询账单区间内该卡的消费总额 (expense)
+    cur.execute(f"""
+        SELECT SUM(amount) as total FROM {TRANSACTIONS_TABLE}
+        WHERE from_account = %s AND transaction_type = 'expense'
+          AND date >= %s AND date <= %s;
+    """, (account_name, cycle_start, cycle_end))
+    res_exp = cur.fetchone()
+    statement_balance = float(res_exp['total']) if res_exp and res_exp['total'] is not None else 0.0
+    
+    # 查询还款窗口内已还金额 (transfer to card)
+    cur.execute(f"""
+        SELECT SUM(amount) as total FROM {TRANSACTIONS_TABLE}
+        WHERE to_account = %s AND transaction_type = 'transfer'
+          AND date >= %s AND date <= %s;
+    """, (account_name, repay_start, repay_end))
+    res_repay = cur.fetchone()
+    repaid_amount = float(res_repay['total']) if res_repay and res_repay['total'] is not None else 0.0
+    
+    remaining_due = max(0.0, statement_balance - repaid_amount)
+    
+    # 查询未出账单消费
+    unbilled_start = cycle_end + relativedelta(days=1)
+    cur.execute(f"""
+        SELECT SUM(amount) as total FROM {TRANSACTIONS_TABLE}
+        WHERE from_account = %s AND transaction_type = 'expense'
+          AND date >= %s AND date <= %s;
+    """, (account_name, unbilled_start, today))
+    res_unbilled = cur.fetchone()
+    unbilled_balance = float(res_unbilled['total']) if res_unbilled and res_unbilled['total'] is not None else 0.0
+    
+    return {
+        "statement_balance": statement_balance,
+        "repaid_amount": repaid_amount,
+        "remaining_due": remaining_due,
+        "unbilled_balance": unbilled_balance
+    }
+
+def apply_adjustment(account_name, target_balance, date, remarks, idempotency_key=None):
     """
     对账校准逻辑 (adjustment)
-    计算真实绝对水位与数据库当前水位差值，差值自动作差补齐流水。
-    对于 investment 类型的账户且非初始设定(当前余额不为 0)，差值直接记为对应投资收益类型的 income，金额可正可负。
+    对于 investment 类型的账户且非初始设定(当前余额不为 0)，差值直接记为对应投资收益类型的 adjustment。
     """
     conn = get_db_connection()
     cur = conn.cursor()
     
     try:
         # 获取账户当前类型
-        cur.execute(f"SELECT account_type, current_balance, currency FROM {ACCOUNTS_TABLE} WHERE account_name = %s;", (account_name,))
+        cur.execute(f"SELECT account_type, current_balance, currency FROM {ACCOUNTS_TABLE} WHERE account_name = %s FOR UPDATE;", (account_name,))
         res = cur.fetchone()
         if not res:
             raise ValueError(f"账户 '{account_name}' 不存在")
@@ -74,7 +166,7 @@ def apply_adjustment(account_name, target_balance, date, remarks):
             else:
                 category = 'Stable_Investment_Income'
             
-            tx_type = 'income'
+            tx_type = 'adjustment'
             from_acc = None
             to_acc = account_name
             amount = diff  # 保留正负号
@@ -85,15 +177,29 @@ def apply_adjustment(account_name, target_balance, date, remarks):
             tx_type = 'adjustment'
             category = 'Balance_Correction'
             amount = abs(diff)
+            
+        sub_key = f"{idempotency_key}_adj_{account_name}" if idempotency_key else None
         
         sql_insert = f"""
-            INSERT INTO {TRANSACTIONS_TABLE} (date, amount, original_currency, from_account, to_account, transaction_type, category, remarks)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s);
+            INSERT INTO {TRANSACTIONS_TABLE} (
+                date, amount, original_currency, from_account, to_account, 
+                transaction_type, category, remarks, idempotency_key, parent_idempotency_key,
+                from_amount, from_currency, to_amount, to_currency, fx_rate
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
         """
-        cur.execute(sql_insert, (date, amount, curr, from_acc, to_acc, tx_type, category, remarks))
+        cur.execute(
+            sql_insert, 
+            (
+                date, amount, curr, from_acc, to_acc, tx_type, category, remarks, 
+                sub_key, idempotency_key, amount, curr, amount, curr, 1.000000
+            )
+        )
         
         # 强制将账户余额设定为最新目标余额
-        update_account_balance(cur, account_name, target_balance)
+        cur.execute(
+            f"UPDATE {ACCOUNTS_TABLE} SET current_balance = %s, updated_at = CURRENT_TIMESTAMP WHERE account_name = %s;",
+            (target_balance, account_name)
+        )
         
         conn.commit()
     except Exception as e:

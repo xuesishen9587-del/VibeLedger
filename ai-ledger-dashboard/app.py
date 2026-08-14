@@ -5,10 +5,40 @@ import plotly.graph_objects as go
 from datetime import datetime
 import urllib.request
 import json
-from database import fetch_all_accounts, fetch_all_records, apply_adjustment
+from database import fetch_all_accounts, fetch_all_records, apply_adjustment, get_credit_card_statement_info
 
 # --- 页面全局设置 ---
 st.set_page_config(page_title="Vibe Finance Center 2.0", page_icon="🏦", layout="wide")
+
+# --- 注入自定义 CSS 以减小页面间距并优化移动端显示 ---
+st.markdown("""
+    <style>
+    /* 减小页面主体容器的上下左右 padding */
+    .block-container {
+        padding-top: 1rem !important;
+        padding-bottom: 1rem !important;
+        padding-left: 1.2rem !important;
+        padding-right: 1.2rem !important;
+    }
+    /* 减小 Streamlit 默认小部件之间的底边距 */
+    div.element-container {
+        margin-bottom: 0.4rem !important;
+    }
+    /* 紧凑化 Metric 指标卡片 */
+    div[data-testid="stMetric"] {
+        padding: 0.4rem 0.8rem !important;
+        border-radius: 6px;
+        background-color: rgba(240, 242, 246, 0.1);
+        border: 1px solid rgba(0,0,0,0.05);
+    }
+    div[data-testid="stMetricValue"] {
+        font-size: 1.5rem !important;
+    }
+    div[data-testid="stMetricLabel"] {
+        font-size: 0.85rem !important;
+    }
+    </style>
+""", unsafe_allow_html=True)
 
 # --- 汇率 API (缓存 1 小时) ---
 @st.cache_data(ttl=3600)
@@ -38,7 +68,7 @@ st.sidebar.title("🏦 Vibe Ledger")
 st.sidebar.markdown("智能多模态家庭账本")
 
 # 多页面路由
-menu = st.sidebar.radio("功能中心", ["💰 资产负债中心", "📊 收支统计中心"])
+menu = st.sidebar.radio("功能中心", ["💰 资产负债中心", "📊 收支统计中心", "📅 年度统计中心"])
 
 # 展示侧边栏对账表单
 st.sidebar.divider()
@@ -79,6 +109,10 @@ def load_data():
         raw_transactions = fetch_all_records()
         df_acc = pd.DataFrame(raw_accounts) if raw_accounts else pd.DataFrame()
         df_tx = pd.DataFrame(raw_transactions) if raw_transactions else pd.DataFrame()
+        if not df_tx.empty:
+            # 兼容投资盈亏：在统计口径下将投资收益分类的对账（adjustment）视作收入（income）
+            is_inv_income = df_tx['category'].isin(['Advanced_Investment_Income', 'Stable_Investment_Income'])
+            df_tx.loc[is_inv_income & (df_tx['transaction_type'] == 'adjustment'), 'transaction_type'] = 'income'
         return df_acc, df_tx
     except Exception as e:
         st.error(f"🔌 数据库连接异常: {e}")
@@ -136,65 +170,111 @@ if menu == "💰 资产负债中心":
                 st.markdown(f"**分类汇总: ￥{cash_sub['balance_cny'].sum():,.2f}**")
                 for _, r in cash_sub.iterrows():
                     curr_sym = "$" if r['currency'] == 'USD' else "￥"
-                    st.write(f"- {r['account_name']}: `{curr_sym}{float(r['current_balance']):,.2f}` *(校准于 {format_reconciled_time(r.get('updated_at'))})*")
+                    st.write(f"- {r['account_name']}: `{curr_sym}{float(r['current_balance']):,.2f}` *({format_reconciled_time(r.get('updated_at'))})*")
             
             with st.expander("🛡️ 储蓄存款 (银行定期/大额存单/国债)", expanded=True):
                 save_sub = df_acc[df_acc['account_type'] == 'savings']
                 st.markdown(f"**分类汇总: ￥{save_sub['balance_cny'].sum():,.2f}**")
                 for _, r in save_sub.iterrows():
-                    st.write(f"- {r['account_name']}: `￥{float(r['current_balance']):,.2f}` *(校准于 {format_reconciled_time(r.get('updated_at'))})*")
+                    st.write(f"- {r['account_name']}: `￥{float(r['current_balance']):,.2f}` *({format_reconciled_time(r.get('updated_at'))})*")
                     
         with col_b:
             with st.expander("📈 投资资产 (股票/基金/定期理财)", expanded=True):
                 inv_sub = df_acc[df_acc['account_type'] == 'investment']
                 st.markdown(f"**分类汇总: ￥{inv_sub['balance_cny'].sum():,.2f}**")
                 for _, r in inv_sub.iterrows():
-                    st.write(f"- {r['account_name']}: `￥{float(r['current_balance']):,.2f}` *(校准于 {format_reconciled_time(r.get('updated_at'))})*")
+                    st.write(f"- {r['account_name']}: `￥{float(r['current_balance']):,.2f}` *({format_reconciled_time(r.get('updated_at'))})*")
             
             with st.expander("💳 信用负债 (信用卡/花呗额度占用)", expanded=True):
                 credit_sub = df_acc[df_acc['account_type'] == 'credit']
                 st.markdown(f"**分类汇总: ￥{credit_sub['balance_cny'].sum():,.2f}**")
                 for _, r in credit_sub.iterrows():
                     curr_sym = "$" if r['currency'] == 'USD' else "￥"
-                    st.write(f"- {r['account_name']}: `{curr_sym}{float(r['current_balance']):,.2f}` *(校准于 {format_reconciled_time(r.get('updated_at'))})*")
+                    st.write(f"- {r['account_name']}: `{curr_sym}{float(r['current_balance']):,.2f}` *({format_reconciled_time(r.get('updated_at'))})*")
 
         st.divider()
         
-        # 3. 信用卡分期与应还分析
-        st.subheader("💳 信用卡与分期透视")
-        if df_tx.empty:
-            st.caption("暂无交易流水分析分期账单")
+        # 3. 信用卡还款透视
+        st.subheader("💳 信用卡还款计划")
+        if df_acc.empty:
+            st.caption("暂无可用账户数据。")
         else:
-            df_tx_clean = df_tx.copy()
-            df_tx_clean['date'] = pd.to_datetime(df_tx_clean['date'])
-            df_tx_clean['amount'] = df_tx_clean['amount'].astype(float)
-            
-            credit_card_names = credit_df['account_name'].tolist()
-            cc_txs = df_tx_clean[df_tx_clean['from_account'].isin(credit_card_names)]
-            
-            if cc_txs.empty:
-                st.info("当前无信用卡消费流水记录。")
+            credit_cards = df_acc[df_acc['account_type'] == 'credit']
+            if credit_cards.empty:
+                st.info("当前无信用卡账户记录。")
             else:
-                today = pd.Timestamp(datetime.now().date())
-                payable_txs = cc_txs[cc_txs['date'] <= today]
-                total_payable = payable_txs['amount'].sum()
-                
-                future_txs = cc_txs[cc_txs['date'] > today]
-                total_future = future_txs['amount'].sum()
-                
-                col_c1, col_c2 = st.columns(2)
-                with col_c1:
-                    st.info(f"**本期应还款总额 (已入账): ￥{total_payable:,.2f}**")
-                    st.dataframe(
-                        payable_txs[['date', 'from_account', 'amount', 'remarks']].style.format({'amount': '￥{:.2f}'}),
-                        use_container_width=True, hide_index=True
-                    )
-                with col_c2:
-                    st.warning(f"**未来待出账单 (未来分期未入账): ￥{total_future:,.2f}**")
-                    st.dataframe(
-                        future_txs[['date', 'from_account', 'amount', 'remarks']].style.format({'amount': '￥{:.2f}'}),
-                        use_container_width=True, hide_index=True
-                    )
+                conn = None
+                try:
+                    from database import get_db_connection
+                    conn = get_db_connection()
+                    cur = conn.cursor()
+                    
+                    cc_data_list = []
+                    today_str = datetime.now().strftime("%Y-%m-%d")
+                    total_remaining_due = 0.0
+                    total_unbilled = 0.0
+                    
+                    for _, card in credit_cards.iterrows():
+                        card_name = card['account_name']
+                        stmt_info = get_credit_card_statement_info(cur, card_name, today_str)
+                        
+                        # 确保账单日和还款日转换为整型字符串，避免 .0 小数显示
+                        b_val = card.get('billing_day')
+                        d_val = card.get('due_day')
+                        b_str = f"每月 {int(b_val)} 号" if pd.notna(b_val) else "-"
+                        d_str = f"每月 {int(d_val)} 号" if pd.notna(d_val) else "-"
+                        
+                        remaining_due = stmt_info['remaining_due']
+                        unbilled_val = stmt_info['unbilled_balance']
+                        
+                        total_remaining_due += remaining_due
+                        total_unbilled += unbilled_val
+                        
+                        cc_data_list.append({
+                            "账户名称": card_name,
+                            "账单日": b_str,
+                            "还款日": d_str,
+                            "本期应还": f"￥{remaining_due:,.2f}",
+                            "未出账单": f"￥{unbilled_val:,.2f}"
+                        })
+                    
+                    cur.close()
+                    conn.close()
+                    
+                    # 左右分布：左侧表格，右侧指标统计（所有信用卡汇总）
+                    col_cc_tbl, col_cc_summary = st.columns([3, 1])
+                    
+                    with col_cc_tbl:
+                        df_cc_report = pd.DataFrame(cc_data_list)
+                        st.dataframe(df_cc_report, use_container_width=True, hide_index=True)
+                        
+                    with col_cc_summary:
+                        st.metric(label="📊 信用卡总本期应还", value=f"￥{total_remaining_due:,.2f}")
+                        st.metric(label="💸 信用卡总未出账单", value=f"￥{total_unbilled:,.2f}")
+                        
+                except Exception as ex:
+                    st.error(f"无法获取信用卡详细账单周期信息: {ex}")
+                    if conn:
+                        conn.close()
+                        
+                # 保留对未来未入账分期流水的透视
+                st.write("📋 未来待出账单 (分期计划未来期次):")
+                if not df_tx.empty:
+                    df_tx_clean = df_tx.copy()
+                    df_tx_clean['date'] = pd.to_datetime(df_tx_clean['date'])
+                    df_tx_clean['amount'] = df_tx_clean['amount'].astype(float)
+                    credit_card_names = credit_cards['account_name'].tolist()
+                    cc_txs = df_tx_clean[df_tx_clean['from_account'].isin(credit_card_names)]
+                    
+                    today = pd.Timestamp(datetime.now().date())
+                    future_txs = cc_txs[cc_txs['date'] > today].sort_values('date')
+                    if future_txs.empty:
+                        st.caption("暂无未来期次的分期记录。")
+                    else:
+                        st.dataframe(
+                            future_txs[['date', 'from_account', 'amount', 'remarks']].style.format({'amount': '￥{:.2f}'}),
+                            use_container_width=True, hide_index=True
+                        )
 
         st.divider()
         
@@ -416,3 +496,102 @@ elif menu == "📊 收支统计中心":
             display_month_df.style.format({'amount': '￥{:.2f}'}),
             use_container_width=True, hide_index=True
         )
+
+# ==============================================================================
+# 页面 3: 📅 年度统计中心
+# ==============================================================================
+elif menu == "📅 年度统计中心":
+    st.title("📅 年度财务收支分析")
+    st.markdown("以年为维度聚合家庭资金流水，展示总收入/支出构成比例与历史变化趋势")
+    
+    if df_tx.empty:
+        st.info("💡 目前数据库中还没有账单记录，暂无年度数据可供统计。")
+    else:
+        df = df_tx.copy()
+        df['amount'] = df['amount'].astype(float)
+        df['date'] = pd.to_datetime(df['date'])
+        df['year'] = df['date'].dt.year
+        df['month'] = df['date'].dt.month
+        df['year_month'] = df['date'].dt.strftime("%Y-%m")
+        
+        # 1. 年份选择器
+        available_years = sorted(df['year'].unique(), reverse=True)
+        selected_year = st.selectbox("选择要分析的年份", options=available_years)
+        
+        # 筛选选定年份的数据
+        year_df = df[df['year'] == selected_year]
+        
+        # 2. 年度总计 KPI
+        year_income = year_df[year_df['transaction_type'] == 'income']['amount'].sum()
+        year_expense = year_df[year_df['transaction_type'] == 'expense']['amount'].sum()
+        year_net = year_income - year_expense
+        
+        col_y1, col_y2, col_y3 = st.columns(3)
+        with col_y1:
+            st.metric(label=f"{selected_year}年度累计总收入", value=f"￥{year_income:,.2f}")
+        with col_y2:
+            st.metric(label=f"{selected_year}年度累计总支出", value=f"￥{year_expense:,.2f}", delta_color="inverse")
+        with col_y3:
+            st.metric(label=f"{selected_year}年度净结余", value=f"￥{year_net:,.2f}", delta=f"{'结余盈利' if year_net>=0 else '年度赤字'}")
+            
+        st.divider()
+        
+        # 3. 年度收支构成饼图
+        col_chart1, col_chart2 = st.columns(2)
+        
+        with col_chart1:
+            st.subheader("🍕 年度支出构成 (分类)")
+            year_exp_group = year_df[year_df['transaction_type'] == 'expense'].groupby('category')['amount'].sum().reset_index()
+            if year_exp_group.empty:
+                st.caption("该年度无支出数据")
+            else:
+                fig_exp_pie = px.pie(
+                    year_exp_group, values='amount', names='category',
+                    hole=0.3, color_discrete_sequence=px.colors.qualitative.Pastel
+                )
+                fig_exp_pie.update_traces(textposition='outside', textfont_size=14, textinfo='percent+label')
+                st.plotly_chart(fig_exp_pie, use_container_width=True)
+                
+        with col_chart2:
+            st.subheader("🍕 年度收入/增值构成 (分类)")
+            year_inc_group = year_df[year_df['transaction_type'] == 'income'].groupby('category')['amount'].sum().reset_index()
+            if year_inc_group.empty:
+                st.caption("该年度无收入数据")
+            else:
+                fig_inc_pie = px.pie(
+                    year_inc_group, values='amount', names='category',
+                    hole=0.3, color_discrete_sequence=px.colors.qualitative.Safe
+                )
+                fig_inc_pie.update_traces(textposition='outside', textfont_size=14, textinfo='percent+label')
+                st.plotly_chart(fig_inc_pie, use_container_width=True)
+                
+        st.divider()
+        
+        # 4. 月度收支对比柱状图
+        st.subheader("📊 年度内各月收支趋势")
+        # 按照 YYYY-MM 格式分组
+        monthly_trend = year_df.groupby(['year_month', 'transaction_type'])['amount'].sum().unstack(fill_value=0.0).reset_index()
+        
+        # 确保包含 income 和 expense 两个列
+        if 'income' not in monthly_trend.columns:
+            monthly_trend['income'] = 0.0
+        if 'expense' not in monthly_trend.columns:
+            monthly_trend['expense'] = 0.0
+            
+        fig_monthly_trend = go.Figure()
+        fig_monthly_trend.add_trace(go.Bar(
+            x=monthly_trend['year_month'], y=monthly_trend['income'],
+            name='月度收入', marker_color='#2ecc71'
+        ))
+        fig_monthly_trend.add_trace(go.Bar(
+            x=monthly_trend['year_month'], y=monthly_trend['expense'],
+            name='月度支出', marker_color='#e74c3c'
+        ))
+        fig_monthly_trend.update_layout(
+            barmode='group',
+            xaxis_title="月份",
+            yaxis_title="金额 (元)",
+            legend_title="收支类型",
+            hovermode="x unified"
+        )
+        st.plotly_chart(fig_monthly_trend, use_container_width=True)

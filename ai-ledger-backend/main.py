@@ -51,6 +51,7 @@ VALID_CATEGORIES = Literal[
 class RecordRequest(BaseModel):
     image: str = Field(..., description="Base64 encoded string of the screenshot")
     note: str = Field("", description="User manual notes added via shortcut prompt")
+    idempotency_key: Optional[str] = Field(None, description="Optional client-generated UUID/key to enforce idempotency")
 
 class AccountBalance(BaseModel):
     account: VALID_ACCOUNTS = Field(..., description="The account name to be adjusted.")
@@ -142,6 +143,17 @@ async def record_transaction(payload: RecordRequest):
     if not client:
         raise HTTPException(status_code=500, detail="Gemini API Key is not configured on the server.")
     
+    # 1. 优先进行系统级幂等校验 (Issue 01 Tier 1)
+    if payload.idempotency_key:
+        try:
+            if database.check_idempotency_key_exists(payload.idempotency_key):
+                return {
+                    "status": "success",
+                    "message": "检测到重复请求，已幂等跳过并返回成功。"
+                }
+        except Exception as e:
+            print(f"⚠️ 校验幂等键时出错: {e}")
+            
     try:
         # 解码 base64 图像
         image_bytes = base64.b64decode(payload.image)
@@ -185,7 +197,8 @@ async def record_transaction(payload: RecordRequest):
                         account_name=adj.account,
                         target_balance=adj.balance,
                         date=parsed_data.date,
-                        remarks=parsed_data.remarks
+                        remarks=parsed_data.remarks,
+                        idempotency_key=payload.idempotency_key
                     )
                     adjusted_details.append(f"【{adj.account}】为 ￥{adj.balance:.2f} 元")
                 msg = f"账户余额批量校准成功：" + "，".join(adjusted_details) + "。"
@@ -194,7 +207,8 @@ async def record_transaction(payload: RecordRequest):
                     account_name=parsed_data.to_account,
                     target_balance=parsed_data.amount,
                     date=parsed_data.date,
-                    remarks=parsed_data.remarks
+                    remarks=parsed_data.remarks,
+                    idempotency_key=payload.idempotency_key
                 )
                 msg = f"账户余额对账成功：【{parsed_data.to_account}】当前水位校准为 ￥{parsed_data.amount:.2f} 元。"
             else:
@@ -213,7 +227,8 @@ async def record_transaction(payload: RecordRequest):
                 category=parsed_data.category,
                 remarks=parsed_data.remarks,
                 is_installment=parsed_data.is_installment,
-                installment_months=parsed_data.installment_months
+                installment_months=parsed_data.installment_months,
+                idempotency_key=payload.idempotency_key
             )
             
             # 格式化成功返回消息
@@ -238,6 +253,12 @@ async def record_transaction(payload: RecordRequest):
                 "status": "success",
                 "message": "检测到完全重复的交易记录，已自动去重并跳过入库。"
             }
+        if str(e) == "CROSS_CURRENCY_MISSING_INFO":
+            raise HTTPException(
+                status_code=400, 
+                detail="检测到跨币种转账交易，但转出/转入金额信息不完整（且无法通过账单自动推导）。"
+                       "请确保备注中指明了扣除的具体人民币数额或所还外币数额（例如：实际扣款725元 / 还清信用卡）。"
+            )
         print("====== [ERROR] FastAPI 后端发生崩溃 ======")
         traceback.print_exc()
         print("=========================================")

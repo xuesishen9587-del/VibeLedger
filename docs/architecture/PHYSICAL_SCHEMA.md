@@ -909,7 +909,7 @@ Future committed transactions are forbidden. Scheduling is separate.
 | `account_currency` | CHAR(3) | NOT NULL |
 | `total_periods` | SMALLINT | NOT NULL |
 | `first_statement_month` | DATE | nullable |
-| `status` | TEXT | NOT NULL default `active`; see below |
+| `status` | TEXT | NOT NULL default `pending_first_bill`; see below |
 | `source_request_id` | UUID | FK -> ingestion_requests, nullable |
 | `created_at` | TIMESTAMPTZ | NOT NULL default now() |
 | `updated_at` | TIMESTAMPTZ | NOT NULL default now() |
@@ -931,6 +931,15 @@ CHECK (original_currency ~ '^[A-Z]{3}$');
 CHECK (account_currency ~ '^[A-Z]{3}$');
 CHECK (status IN ('pending_first_bill', 'active', 'completed', 'cancelled'));
 ```
+
+Lifecycle invariants:
+
+- newly captured installment plan starts as `pending_first_bill`;
+- first successful `recognize_installment` atomic commit transitions plan to `active`;
+- subsequent periods maintain `active` status;
+- billing the final scheduled period transitions plan to `completed`;
+- a `completed` plan must have zero remaining `scheduled` periods;
+- a `cancelled` plan cannot recognize new installment expenses.
 
 ---
 

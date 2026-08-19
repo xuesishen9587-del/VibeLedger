@@ -714,12 +714,12 @@ Expense-only structured output includes `payment_mode`:
 
 If `installment`:
 - extracts `total_amount`, `currency`, `total_periods`, `merchant`, `from_account`;
-- high-confidence capture atomically creates `ingestion_request` + `installment_plan` + `installment_periods` schedules + audit log;
+- high-confidence capture atomically creates `ingestion_request` + `installment_plan` (`status = 'pending_first_bill'`) + `installment_periods` schedules (`status = 'scheduled'`) + audit log;
 - creates **NO transaction** and **NO `account_state` balance mutation**;
-- returns replayable plan summary (`installment_plan_id`, `total_periods`, `display_summary`);
+- returns replayable plan summary (`installment_plan_id`, `plan_status = 'pending_first_bill'`, `total_periods`, `display_summary`);
 - low-confidence installment capture enters `needs_confirmation`.
 
-> Note: Statement billing recognition (`recognize_installment`) remains part of reconciliation / Statement phases and is NOT executed in Phase 3.
+> Note: Statement billing recognition (`recognize_installment`) transitions plan status (`pending_first_bill -> active`, and `active -> completed` on final period) in subsequent reconciliation/Statement phases and is NOT executed in Phase 3.
 
 ## Idempotency
 

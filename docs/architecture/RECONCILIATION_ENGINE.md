@@ -533,12 +533,18 @@ Original-currency / extra evidence      10
 ## 11.1 Amount score
 
 ```text
-exact selected-account authoritative amount    40
-exact original-currency amount                 35
-estimated settlement plausibly close (<=5%)   30
-estimated settlement moderately close (<=10%)  20
-estimated settlement deviation > 20%           0 (and blocks auto-match)
-no comparable amount                           0
+exact selected-account authoritative amount     40
+exact original-currency amount                  35
+
+estimated settlement deviation <= 5%            35
+estimated settlement deviation >5% and <=10%    25
+estimated settlement deviation >10% and <=20%   10
+estimated settlement deviation >20%              0
+                                                  + block automatic match
+                                                  + needs_review
+                                                  + SETTLEMENT_DEVIATION_SUSPICIOUS
+
+no comparable amount                              0
 ```
 
 If both settlement and original evidence agree:
@@ -1101,7 +1107,7 @@ Future installment periods are schedules, not transactions.
 For credit-card Statements, before creating a new ordinary expense candidate, search:
 
 ```text
-active installment_plans
+installment_plans.status IN ('pending_first_bill', 'active')
 scheduled installment_periods
 selected credit account
 expected recognition month
@@ -1115,17 +1121,24 @@ If unique:
 candidate = recognize_installment
 ```
 
-Commit:
+Atomic commit applies the full state transition:
 
 ```text
 create expense transaction for this billed period
-mark installment_period billed
-link statement line
+mark installment_period.status = 'billed'
+link statement line (installment_periods.statement_line_id = statement_line.id)
+link expense transaction (installment_periods.expense_transaction_id = transaction.id)
+
+plan status transition:
+  if plan.status == 'pending_first_bill' (first billed period):
+    plan.status := 'active'
+  if this is the final scheduled period:
+    plan.status := 'completed'
 ```
 
 The first period begins when first seen on the card Statement.
 
-The final period absorbs rounding remainder.
+The final period absorbs rounding remainder so total recognized expense matches plan principal.
 
 Do not create future expense transactions.
 
@@ -1159,12 +1172,23 @@ Statement:
 ```text
 Tokyo Shop
 settlement = 68.20 USD
+transaction date = D+2
+```
+
+Score calculation (unique mutual-best candidate):
+
+```text
+  35 estimated settlement (68.20 vs 68.90 is 1.0% deviation <= 5%)
++ 16 date (+2 days)
++ 20 strong merchant similarity
++ 10 type compatibility
+= 81 (>= AUTO_MATCH_SCORE 80, auto-matchable)
 ```
 
 If date and merchant strongly identify a unique transaction:
 
 ```text
-match candidate accepted
+match candidate auto-matched and accepted
 ```
 
 Atomic commit patches authoritative settlement fields:

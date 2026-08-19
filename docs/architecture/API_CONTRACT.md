@@ -450,19 +450,20 @@ When the screenshot represents an installment purchase:
   "status": "committed",
   "request_id": "uuid",
   "installment_plan_id": "uuid",
+  "plan_status": "pending_first_bill",
   "payment_mode": "installment",
   "total_amount": "12000.00",
   "currency": "CNY",
   "total_periods": 12,
   "merchant": "Apple",
-  "display_summary": "¥12,000.00 · Apple (12期分期计划已建立)\nICBC Visa\n2026-08-19"
+  "display_summary": "¥12,000.00 · Apple (12期分期计划已建立，待首期账单确认)\nICBC Visa\n2026-08-19"
 }
 ```
 
 Note:
-- Creates `installment_plans` and 12 `installment_periods` schedule rows.
+- Creates `installment_plans` (with initial `status = 'pending_first_bill'`) and 12 `installment_periods` schedule rows.
 - No future `transactions` or immediate account debt mutations are created.
-- The first expense transaction is recognized when the first installment appears on the Statement.
+- The first expense transaction is recognized when the first installment appears on the Statement (transitioning plan to `active`).
 
 ---
 
@@ -1653,6 +1654,12 @@ Response:
 
 Future scheduled periods are not transactions until billed.
 
+Plan status lifecycle:
+- `pending_first_bill`: Initial state upon Shortcut capture before any Statement billing.
+- `active`: Transitioned upon first Statement recognition of period 1.
+- `completed`: Transitioned when final scheduled period is recognized as billed (zero scheduled periods remain).
+- `cancelled`: Plan cancelled prior to completion; cannot recognize new installment expenses.
+
 Product v1 has no early-payoff endpoint.
 
 ---
@@ -2053,10 +2060,14 @@ Client logic SHOULD branch on `code`, not human-readable `message`.
 
 ### 31.1 Ingestion `needs_confirmation` triggers
 Ingestion requests (e.g. Shortcut expenses) require user confirmation before financial commit when:
-- account is unresolved or multiple account aliases match;
+- account cannot be uniquely resolved or multiple account candidates match;
 - cross-currency transfer is missing one of its two actual legs;
-- AI extraction confidence is low;
-- new merchant or ambiguous category requires human confirmation.
+- amount or currency is unclear;
+- category is unresolved or extraction confidence is insufficient;
+- deterministic validation conflicts;
+- user explicitly requests confirmation/correction before commit.
+
+> Note: A previously unseen/new merchant alone MUST NEVER force confirmation. High-confidence expenses with new merchants auto-commit normally.
 
 ### 31.2 Reconciliation `needs_review` triggers
 Reconciliation batches and candidates require human review when:

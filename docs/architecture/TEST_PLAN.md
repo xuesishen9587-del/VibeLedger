@@ -1238,6 +1238,12 @@ Expected:
 
 ```text
 matches via merchant/date/type and plausibly close estimated settlement (<=5% variance)
+Score breakdown:
+  35 estimated settlement (68.20 vs 68.90 is 1.0% deviation <= 5%)
++ 16 date (+2 days)
++ 20 strong merchant similarity
++ 10 type compatibility
+= 81 (>= AUTO_MATCH_SCORE 80, auto-matchable)
 differing settlement amount is NOT treated as an AMOUNT_CONFLICT
 account_leg_status -> authoritative
 from_amount -> 68.20 USD
@@ -1493,50 +1499,88 @@ no auto-link
 
 # 26. Installment Tests
 
+## Plan creation lifecycle
+
 Plan:
 
 ```text
-12000 / 12
+12000 / 12 on credit card
 ```
 
 Expected schedule:
 
 ```text
-12 installment_period rows
+installment_plans.status = 'pending_first_bill'
+12 installment_period rows with status = 'scheduled'
 0 future financial transaction rows
+0 premature balance mutations
 ```
+
+## Statement recognition lifecycle
 
 First Statement:
 
 ```text
-1000 billed
+1000 billed on Statement 1
 ```
 
 Expected:
 
 ```text
-only period 1 becomes expense
+Statement matcher queries plans with status IN ('pending_first_bill', 'active')
+period 1 becomes expense transaction
+installment_period 1 status -> 'billed'
+installment_plans.status transitions: 'pending_first_bill' -> 'active'
 ```
 
-Second Statement:
+Middle Statement (Months 2..11):
 
 ```text
-period 2 billed
+1000 billed on Statement 2..11
 ```
 
 Expected:
 
 ```text
-period 2 becomes expense
+period N becomes expense transaction
+installment_period N status -> 'billed'
+installment_plans.status remains 'active'
 ```
 
-Rounding example:
+Final Statement (Month 12):
+
+```text
+1000 billed on Statement 12
+```
+
+Expected:
+
+```text
+period 12 becomes expense transaction
+installment_period 12 status -> 'billed'
+installment_plans.status transitions: 'active' -> 'completed'
+completed plan has 0 remaining 'scheduled' periods
+```
+
+## Cancelled plan invariant
+
+Given plan with status = 'cancelled':
+
+```text
+Statement matcher skips cancelled plan
+cannot recognize new installment expense
+```
+
+## Rounding remainder absorption
+
+Example:
 
 ```text
 10000 / 3
+period 1 = 3333.33
+period 2 = 3333.33
+period 3 = 3333.34 (absorbs exact remainder so sum equals 10000.00)
 ```
-
-Ensure final period absorbs exact remainder.
 
 ---
 
@@ -1851,21 +1895,37 @@ net worth
 
 ## Cash-flow
 
+Household cash flow and expense reporting formula:
+$$\text{Household Expense} = \text{ordinary expense} + \text{fee} - \text{applicable refunds}$$
+
 Must include:
 
 ```text
-cash_income
-expense
-refund effect
+cash_income (cash inflows)
+expense (ordinary household outflows)
+fee (household cash fee outflows, requires expense category)
+refund effect (reduces total household expense)
 ```
 
 Must exclude:
 
 ```text
-transfer
-opening_balance
-reconciliation_adjustment
-investment_pnl
+transfer (internal liquidity movement)
+opening_balance (ledger baseline)
+reconciliation_adjustment (calibration residual)
+investment_pnl (valuation changes tracked in net worth)
+```
+
+Deterministic verification example:
+
+```text
+ordinary expense = 1000 CNY
+fee              =   20 CNY
+refund           =  100 CNY
+cash_income      = 5000 CNY
+
+reported household expense = 1000 + 20 - 100 = 920 CNY
+reported net cash flow     = 5000 - 920 = +4080 CNY
 ```
 
 ---

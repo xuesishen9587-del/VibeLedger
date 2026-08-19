@@ -462,59 +462,42 @@ This is particularly important for foreign-currency credit-card spending.
 
 ---
 
-## 10.3 No directly comparable amount
+## 10.3 Foreign-card estimated settlement matching
 
-A Shortcut may capture:
-
-```text
-10,000 JPY purchase
-```
-
-before the card Statement later settles it as:
+A Shortcut captures:
 
 ```text
-68.20 USD
+original_amount    = 10,000 JPY
+from_amount        = 68.90 USD (estimated using current/T-1 reference FX)
+account_leg_status = estimated
 ```
 
-If the existing transaction contains:
+The card Statement later settles it as:
 
 ```text
-original_amount = 10,000 JPY
-from_amount     = NULL
+68.20 USD authoritative settlement
 ```
 
-and the Statement contains only:
+When matching against a transaction with `account_leg_status = 'estimated'`:
+- The Statement authoritative settlement differing from the estimated amount is **expected behavior**, NOT a hard amount conflict;
+- The estimated amount serves as plausibility evidence;
+- If the settlement amount is within plausible FX variance (e.g. $\le 5\%$ deviation), it contributes meaningful amount evidence;
+- If the settlement amount is wildly inconsistent (e.g. $>20\%$ deviation or inverted magnitude), automatic matching is blocked and the candidate is flagged for human review (`needs_review` / `SETTLEMENT_DEVIATION_SUSPICIOUS`);
+- If the Statement line provides an explicit original amount that contradicts the captured original amount (e.g., Statement says 12,000 JPY instead of 10,000 JPY), this creates a hard `ORIGINAL_AMOUNT_CONFLICT` $\to$ `needs_review`.
 
-```text
-68.20 USD settlement
-```
-
-the candidate MUST NOT be rejected merely because no directly comparable amount exists.
-
-It may still be matched using:
-
-```text
-account
-date
-merchant/description
-transaction type
-```
-
-but requires stronger non-amount evidence.
-
-If committed, Statement settlement data may fill the previously unknown account-leg settlement amount and freeze historical reporting FX.
+When committed, Statement settlement data replaces the estimated account-leg amount with the authoritative bank settlement, applies the signed projection delta to `account_state`, and freezes historical reporting FX.
 
 ---
 
-## 10.4 Contradictory comparable amount
+## 10.4 Authoritative amount conflict
 
-If both sides contain directly comparable amounts and they differ beyond the minor-unit tolerance:
+If both sides contain comparable **authoritative** amounts (e.g. `account_leg_status = 'authoritative'`, or domestic same-currency amounts) and they differ beyond the minor-unit tolerance:
 
 ```text
 candidate = rejected
 ```
 
-Do not use merchant similarity to override an explicit amount contradiction.
+Do not use merchant similarity to override an explicit authoritative amount contradiction.
 
 ---
 
@@ -550,8 +533,11 @@ Original-currency / extra evidence      10
 ## 11.1 Amount score
 
 ```text
-exact selected-account settlement amount     40
-exact original-currency amount                35
+exact selected-account authoritative amount    40
+exact original-currency amount                 35
+estimated settlement plausibly close (<=5%)   30
+estimated settlement moderately close (<=10%)  20
+estimated settlement deviation > 20%           0 (and blocks auto-match)
 no comparable amount                           0
 ```
 
@@ -1190,8 +1176,8 @@ account_leg_status = authoritative
 posted_on          = Statement posted date
 verification_status = statement_confirmed
 
-balance delta applied to account_state:
-  +0.70 USD debt reduction (replacing 68.90 with 68.20)
+projection delta applied to account_state:
+  projection_effect(after) - projection_effect(before) = -68.20 - (-68.90) = +0.70 USD (debt changes from -68.90 to -68.20)
 
 historical reporting FX:
   reporting_amount and reporting_fx_rate frozen

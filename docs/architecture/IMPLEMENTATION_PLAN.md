@@ -642,6 +642,11 @@ Create the first production-ready target user path:
 iPhone Expense Shortcut
 ```
 
+supporting:
+- A. Normal one-off expense capture;
+- B. Foreign-currency card expense with reference FX estimation;
+- C. Installment plan schedule capture.
+
 ## Build
 
 Implement:
@@ -661,8 +666,10 @@ Create:
 ```text
 api/deps.py (minimum device-token Bearer authentication)
 services/expense_service.py
+services/reference_fx_service.py
 services/gemini_service.py
 repositories/ingestion.py
+repositories/installments.py
 api/routes/expenses.py
 api/routes/ingestion.py
 ```
@@ -672,7 +679,7 @@ Implement minimum device-token authentication required by the Expense API:
 - Lookup active device by token hash in `devices` table;
 - Resolve owning user and household context;
 - Update `last_seen_at`.
-(Full browser user login and admin revocation workflows are completed in Phase 11).
+(Full browser user login and admin revocation workflows are completed in Phase 10).
 
 Gemini prompt becomes **expense-only**.
 
@@ -688,6 +695,31 @@ generic income detection
 Account/category options come from DB, not `Literal`.
 
 Add deterministic validation after AI output.
+
+## Reference FX Capability
+
+Add minimal reference-FX service required only for Product v1 presentation/estimation:
+- current/T-1 reference FX lookup;
+- Decimal calculation only;
+- foreign-card settlement estimation (`from_amount` computed, `account_leg_status = 'estimated'`);
+- updates `account_state` with estimated debt.
+
+> **CRITICAL INVARIANT**: Reference FX MUST NEVER fabricate missing cross-currency transfer legs. Cross-currency transfers strictly require both real legs.
+
+## Installment Expense Extraction & Plan Creation
+
+Expense-only structured output includes `payment_mode`:
+- `one_off`
+- `installment`
+
+If `installment`:
+- extracts `total_amount`, `currency`, `total_periods`, `merchant`, `from_account`;
+- high-confidence capture atomically creates `ingestion_request` + `installment_plan` + `installment_periods` schedules + audit log;
+- creates **NO transaction** and **NO `account_state` balance mutation**;
+- returns replayable plan summary (`installment_plan_id`, `total_periods`, `display_summary`);
+- low-confidence installment capture enters `needs_confirmation`.
+
+> Note: Statement billing recognition (`recognize_installment`) remains part of reconciliation / Statement phases and is NOT executed in Phase 3.
 
 ## Idempotency
 
@@ -711,6 +743,8 @@ Same key/different payload:
 ```text
 409 IDEMPOTENCY_KEY_REUSE
 ```
+
+Idempotency applies to one-off expenses and installment-plan captures identically.
 
 ## Confidence
 
@@ -745,7 +779,10 @@ Pending image lifetime should be minimal and bounded.
 
 ```text
 expense high-confidence commit
-low-confidence produces no transaction
+foreign-card estimated settlement (account_leg_status = estimated, account_state reflects estimate)
+installment plan creation (creates plan + schedules, zero transactions, zero balance mutation)
+installment retry creates no duplicate plan
+low-confidence produces no transaction or plan until confirmed
 confirm commits once
 confirm twice is idempotent
 revise maintains same request
@@ -763,7 +800,7 @@ Gemini timeout/dependency unavailable
 
 ## Acceptance
 
-Target Expense API can run end-to-end independently of legacy `/api/record`.
+Target Expense API can run end-to-end independently of legacy `/api/record`, supporting one-off expenses, foreign-card estimation, and installment plan capture.
 
 ## Rollback
 

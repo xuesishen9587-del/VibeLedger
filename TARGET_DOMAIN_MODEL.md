@@ -141,7 +141,7 @@ delete_reason          nullable
 
 外币信用卡消费（`original_currency` $\ne$ 账户币种）：
 - **Shortcut 录入时**：永久保留 `original_amount` / `original_currency`；使用参考汇率计算预估扣款金额（`from_amount` / `from_currency`），标记 `account_leg_status = estimated`，并以此预估值更新 `account_state` 负债。
-- **Statement 出账对账时**：对账原子提交时以银行权威结算金额覆盖 `from_amount`，置 `account_leg_status = authoritative`，将差额 delta 原子补偿至 `account_state`，记录 `posted_on`，冻结历史 reporting FX，并记录审计日志。
+- **Statement 出账对账时**：对账原子提交时以银行权威结算金额覆盖 `from_amount`，置 `account_leg_status = authoritative`，将结算投影差额（$$\text{projection\_delta} = \text{projection\_effect}(\text{after}) - \text{projection\_effect}(\text{before}) = -68.20 - (-68.90) = +0.70\text{ USD}$$）原子补偿至 `account_state`（使卡内负债从 $-68.90$ 修正为 $-68.20$），记录 `posted_on`，冻结历史 reporting FX，并记录审计日志。
 - **重要约束**：预估仅允许用于外币信用卡消费扣款腿；跨币种内部转账（`transfer`）必须提供双向真实金额，严禁用参考汇率捏造。
 
 ### Fee & Category Rules

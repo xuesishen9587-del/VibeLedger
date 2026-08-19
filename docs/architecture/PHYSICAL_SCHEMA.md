@@ -155,7 +155,7 @@ Lightweight security/ownership root. Product v1 normally contains one household.
 | `name` | TEXT | NOT NULL |
 | `reporting_currency` | CHAR(3) | NOT NULL default `CNY` |
 | `ledger_start_date` | DATE | NOT NULL |
-| `status` | TEXT | `active / archived` |
+| `status` | TEXT | NOT NULL default `active`; `active / archived` |
 | `created_at` | TIMESTAMPTZ | NOT NULL default now() |
 | `updated_at` | TIMESTAMPTZ | NOT NULL default now() |
 
@@ -179,7 +179,7 @@ Application users. Authentication SHOULD be delegated to an external identity pr
 | `email` | CITEXT | nullable, UNIQUE when present |
 | `display_name` | TEXT | NOT NULL |
 | `default_currency` | CHAR(3) | NOT NULL default `CNY` |
-| `status` | TEXT | `active / disabled` |
+| `status` | TEXT | NOT NULL default `active`; `active / disabled` |
 | `created_at` | TIMESTAMPTZ | NOT NULL default now() |
 | `updated_at` | TIMESTAMPTZ | NOT NULL default now() |
 
@@ -198,11 +198,12 @@ CHECK (status IN ('active', 'disabled'));
 |---|---|---|
 | `household_id` | UUID | FK -> households, NOT NULL |
 | `user_id` | UUID | FK -> users, NOT NULL |
-| `role` | TEXT | `owner / member` |
+| `role` | TEXT | NOT NULL default `member`; `owner / member` |
 | `joined_at` | TIMESTAMPTZ | NOT NULL default now() |
 
 ```sql
 PRIMARY KEY (household_id, user_id);
+CHECK (role IN ('owner', 'member'));
 CREATE INDEX ix_household_members_user ON household_members (user_id);
 ```
 
@@ -217,7 +218,7 @@ CREATE INDEX ix_household_members_user ON household_members (user_id);
 | `device_name` | TEXT | NOT NULL |
 | `platform` | TEXT | NOT NULL; Product v1 `ios_shortcuts` |
 | `token_hash` | BYTEA | NOT NULL UNIQUE |
-| `status` | TEXT | `active / revoked` |
+| `status` | TEXT | NOT NULL default `active`; `active / revoked` |
 | `client_version` | TEXT | nullable |
 | `created_at` | TIMESTAMPTZ | NOT NULL default now() |
 | `last_seen_at` | TIMESTAMPTZ | nullable |
@@ -250,13 +251,13 @@ Account metadata only.
 | `household_id` | UUID | FK -> households, NOT NULL |
 | `name` | TEXT | NOT NULL |
 | `institution` | TEXT | nullable |
-| `account_type` | TEXT | `cash / savings / credit / investment` |
+| `account_type` | TEXT | NOT NULL; `cash / savings / credit / investment` |
 | `currency` | CHAR(3) | NOT NULL |
 | `owner_user_id` | UUID | FK -> users, nullable |
 | `linked_cash_account_id` | UUID | self FK -> accounts, nullable |
 | `billing_day` | SMALLINT | nullable, 1..31 |
 | `due_day` | SMALLINT | nullable, 1..31 |
-| `status` | TEXT | `active / inactive` |
+| `status` | TEXT | NOT NULL default `active`; `active / inactive` |
 | `row_version` | BIGINT | NOT NULL default 0 |
 | `created_at` | TIMESTAMPTZ | NOT NULL default now() |
 | `updated_at` | TIMESTAMPTZ | NOT NULL default now() |
@@ -335,7 +336,7 @@ Rules:
 | `account_id` | UUID | FK -> accounts, NOT NULL |
 | `alias_text` | TEXT | NOT NULL |
 | `normalized_alias` | TEXT | NOT NULL |
-| `status` | TEXT | `active / inactive` |
+| `status` | TEXT | NOT NULL default `active`; `active / inactive` |
 | `created_at` | TIMESTAMPTZ | NOT NULL default now() |
 | `deleted_at` | TIMESTAMPTZ | nullable |
 
@@ -363,8 +364,8 @@ Do not enforce global alias uniqueness. Ambiguous aliases are valid and must cau
 | `id` | UUID | PK |
 | `household_id` | UUID | FK -> households, NOT NULL |
 | `name` | TEXT | NOT NULL |
-| `category_type` | TEXT | `expense / income` |
-| `status` | TEXT | `active / inactive` |
+| `category_type` | TEXT | NOT NULL; `expense / income` |
+| `status` | TEXT | NOT NULL default `active`; `active / inactive` |
 | `created_at` | TIMESTAMPTZ | NOT NULL default now() |
 | `updated_at` | TIMESTAMPTZ | NOT NULL default now() |
 
@@ -390,9 +391,9 @@ Request-level idempotency belongs here, not on transaction rows.
 | `id` | UUID | PK |
 | `device_id` | UUID | FK -> devices, NOT NULL |
 | `idempotency_key` | TEXT | NOT NULL |
-| `request_kind` | TEXT | `expense / transfer / snapshot` |
+| `request_kind` | TEXT | NOT NULL; `expense / transfer / snapshot` |
 | `request_hash` | BYTEA | NOT NULL |
-| `status` | TEXT | see below |
+| `status` | TEXT | NOT NULL default `received`; see below |
 | `captured_at` | TIMESTAMPTZ | nullable |
 | `client_version` | TEXT | nullable |
 | `draft_payload` | JSONB | nullable |
@@ -402,7 +403,7 @@ Request-level idempotency belongs here, not on transaction rows.
 | `updated_at` | TIMESTAMPTZ | NOT NULL default now() |
 | `committed_at` | TIMESTAMPTZ | nullable |
 
-Statuses:
+Status values:
 
 ```text
 received
@@ -457,7 +458,7 @@ Committed financial/economic events only. Pending drafts never enter this table.
 |---|---|---|
 | `id` | UUID | PK |
 | `household_id` | UUID | FK -> households, NOT NULL |
-| `transaction_type` | TEXT | see below |
+| `transaction_type` | TEXT | NOT NULL; see below |
 | `occurred_on` | DATE | NOT NULL; report attribution date |
 | `occurred_at` | TIMESTAMPTZ | nullable |
 | `posted_on` | DATE | nullable |
@@ -479,9 +480,9 @@ Committed financial/economic events only. Pending drafts never enter this table.
 | `merchant` | TEXT | nullable |
 | `merchant_normalized` | TEXT | nullable |
 | `remarks` | TEXT | nullable |
-| `source` | TEXT | see below |
-| `status` | TEXT | `committed / voided` |
-| `verification_status` | TEXT | see below |
+| `source` | TEXT | NOT NULL; see below |
+| `status` | TEXT | NOT NULL default `committed`; `committed / voided` |
+| `verification_status` | TEXT | NOT NULL default `unverified`; see below |
 | `confidence` | NUMERIC(5,4) | nullable |
 | `source_request_id` | UUID | FK -> ingestion_requests, nullable |
 | `statement_batch_id` | UUID | FK -> reconciliation_batches, nullable |
@@ -652,7 +653,9 @@ For an expense where `original_currency <> from_account.currency`:
 2. **Statement Reconciliation Settlement**:
    - `from_amount` is updated to the authoritative card settlement amount;
    - `account_leg_status = 'authoritative'`;
-   - `account_state` receives the exact delta (`authoritative_amount - estimated_amount`);
+   - `account_state` receives the exact projection delta:
+     $$\text{projection\_delta} = \text{projection\_effect}(\text{after}) - \text{projection\_effect}(\text{before}) = -68.20 - (-68.90) = +0.70\text{ USD}$$
+     moving `account_state.ledger_balance` from $-68.90$ to $-68.20$;
    - `posted_on` is recorded;
    - `reporting_amount` and `reporting_fx_rate` are frozen;
    - `audit_events` records the transition with before/after state.
@@ -722,7 +725,7 @@ WHERE deleted_at IS NULL AND merchant_normalized IS NOT NULL;
 | `id` | UUID | PK |
 | `source_transaction_id` | UUID | FK -> transactions, NOT NULL |
 | `target_transaction_id` | UUID | FK -> transactions, NOT NULL |
-| `relation_type` | TEXT | `refund_of / reversal_of / installment_of` |
+| `relation_type` | TEXT | NOT NULL; `refund_of / reversal_of / installment_of` |
 | `created_at` | TIMESTAMPTZ | NOT NULL default now() |
 
 ```sql
@@ -752,8 +755,8 @@ Multiple partial refunds may target the same original expense.
 | `as_of` | TIMESTAMPTZ | NOT NULL |
 | `balance` | NUMERIC(20,6) | NOT NULL, signed |
 | `currency` | CHAR(3) | NOT NULL |
-| `snapshot_type` | TEXT | `balance / investment_valuation` |
-| `source` | TEXT | `shortcut / statement / dashboard_manual` |
+| `snapshot_type` | TEXT | NOT NULL; `balance / investment_valuation` |
+| `source` | TEXT | NOT NULL; `shortcut / statement / dashboard_manual` |
 | `reconciliation_batch_id` | UUID | FK -> reconciliation_batches, nullable |
 | `source_request_id` | UUID | FK -> ingestion_requests, nullable |
 | `is_authoritative` | BOOLEAN | NOT NULL default true |
@@ -798,7 +801,7 @@ Liability fields are stored as non-negative amounts owed.
 | `unbilled_balance` | NUMERIC(20,6) | nullable, >=0 |
 | `current_outstanding` | NUMERIC(20,6) | nullable, >=0 |
 | `currency` | CHAR(3) | NOT NULL |
-| `source` | TEXT | `statement / dashboard_manual / system_derived` |
+| `source` | TEXT | NOT NULL; `statement / dashboard_manual / system_derived` |
 | `reconciliation_batch_id` | UUID | FK -> reconciliation_batches, nullable |
 | `created_at` | TIMESTAMPTZ | NOT NULL default now() |
 
@@ -855,7 +858,7 @@ P&L = closing_value - opening_value - contributions + withdrawals
 | `withdrawals_amount` | NUMERIC(20,6) | NOT NULL default 0 |
 | `pnl_amount` | NUMERIC(20,6) | NOT NULL, signed |
 | `currency` | CHAR(3) | NOT NULL |
-| `status` | TEXT | `provisional / confirmed` |
+| `status` | TEXT | NOT NULL default `confirmed`; `provisional / confirmed` |
 | `calculation_version` | INTEGER | NOT NULL default 1 |
 | `reconciliation_batch_id` | UUID | FK -> reconciliation_batches, nullable |
 | `created_at` | TIMESTAMPTZ | NOT NULL default now() |
@@ -906,7 +909,7 @@ Future committed transactions are forbidden. Scheduling is separate.
 | `account_currency` | CHAR(3) | NOT NULL |
 | `total_periods` | SMALLINT | NOT NULL |
 | `first_statement_month` | DATE | nullable |
-| `status` | TEXT | see below |
+| `status` | TEXT | NOT NULL default `active`; see below |
 | `source_request_id` | UUID | FK -> ingestion_requests, nullable |
 | `created_at` | TIMESTAMPTZ | NOT NULL default now() |
 | `updated_at` | TIMESTAMPTZ | NOT NULL default now() |
@@ -941,7 +944,7 @@ CHECK (status IN ('pending_first_bill', 'active', 'completed', 'cancelled'));
 | `recognition_month` | DATE | nullable |
 | `scheduled_amount` | NUMERIC(20,6) | NOT NULL |
 | `currency` | CHAR(3) | NOT NULL |
-| `status` | TEXT | `scheduled / billed / cancelled` |
+| `status` | TEXT | NOT NULL default `scheduled`; `scheduled / billed / cancelled` |
 | `statement_line_id` | UUID | FK -> statement_lines, nullable |
 | `expense_transaction_id` | UUID | FK -> transactions, nullable |
 | `created_at` | TIMESTAMPTZ | NOT NULL default now() |
@@ -954,7 +957,8 @@ CHECK (currency ~ '^[A-Z]{3}$');
 CHECK (status IN ('scheduled', 'billed', 'cancelled'));
 CHECK (
   (status = 'billed' AND expense_transaction_id IS NOT NULL)
-  OR status <> 'billed'
+  OR
+  (status IN ('scheduled', 'cancelled') AND expense_transaction_id IS NULL)
 );
 UNIQUE (plan_id, period_no);
 
@@ -977,10 +981,10 @@ Rounding rule:
 | `id` | UUID | PK |
 | `household_id` | UUID | FK -> households, NOT NULL |
 | `account_id` | UUID | FK -> accounts, NOT NULL |
-| `batch_type` | TEXT | `statement / snapshot / manual` |
+| `batch_type` | TEXT | NOT NULL; `statement / snapshot / manual` |
 | `period_start` | DATE | nullable |
 | `period_end` | DATE | nullable |
-| `status` | TEXT | see below |
+| `status` | TEXT | NOT NULL default `processing`; see below |
 | `currency` | CHAR(3) | NOT NULL |
 | `authoritative_balance` | NUMERIC(20,6) | nullable, signed |
 | `statement_balance` | NUMERIC(20,6) | nullable, >=0 |
@@ -1058,9 +1062,9 @@ Rules:
 | `description_normalized` | TEXT | nullable |
 | `amount` | NUMERIC(20,6) | NOT NULL |
 | `currency` | CHAR(3) | NOT NULL |
-| `direction` | TEXT | `debit / credit / unknown` |
-| `line_type` | TEXT | see below |
-| `match_status` | TEXT | see below |
+| `direction` | TEXT | NOT NULL; `debit / credit / unknown` |
+| `line_type` | TEXT | NOT NULL; see below |
+| `match_status` | TEXT | NOT NULL default `unmatched`; see below |
 | `matched_transaction_id` | UUID | FK -> transactions, nullable |
 | `confidence` | NUMERIC(5,4) | nullable |
 | `line_fingerprint` | BYTEA | nullable, non-unique |
@@ -1122,8 +1126,8 @@ Temporary heterogeneous proposals before atomic commit.
 | `id` | UUID | PK |
 | `batch_id` | UUID | FK -> reconciliation_batches, NOT NULL |
 | `statement_line_id` | UUID | FK -> statement_lines, nullable |
-| `candidate_type` | TEXT | see below |
-| `status` | TEXT | see below |
+| `candidate_type` | TEXT | NOT NULL; see below |
+| `status` | TEXT | NOT NULL default `proposed`; see below |
 | `target_transaction_id` | UUID | FK -> transactions, nullable |
 | `payload` | JSONB | NOT NULL |
 | `confidence` | NUMERIC(5,4) | nullable |
@@ -1194,14 +1198,14 @@ Append-only immutable log.
 |---|---|---|
 | `id` | BIGINT | identity PK |
 | `household_id` | UUID | FK -> households, NOT NULL |
-| `actor_type` | TEXT | `user / device / system` |
+| `actor_type` | TEXT | NOT NULL; `user / device / system` |
 | `actor_user_id` | UUID | FK -> users, nullable |
 | `actor_device_id` | UUID | FK -> devices, nullable |
 | `request_id` | UUID | FK -> ingestion_requests, nullable |
 | `reconciliation_batch_id` | UUID | FK -> reconciliation_batches, nullable |
 | `entity_type` | TEXT | NOT NULL |
 | `entity_id` | UUID | NOT NULL |
-| `action` | TEXT | see below |
+| `action` | TEXT | NOT NULL; see below |
 | `before_data` | JSONB | nullable |
 | `after_data` | JSONB | nullable |
 | `metadata` | JSONB | nullable |
@@ -1530,8 +1534,14 @@ lock target transaction FOR UPDATE
 verify account_leg_status == 'estimated'
 lock credit-card account_state FOR UPDATE
 
-calculate balance delta = authoritative_settlement_amount - estimated_settlement_amount
-apply delta to account_state.ledger_balance (e.g. debt increased or decreased)
+calculate projection_delta:
+  projection_effect_before = -estimated_settlement_amount
+  projection_effect_after  = -authoritative_settlement_amount
+  projection_delta = projection_effect_after - projection_effect_before
+  (e.g., -68.20 - (-68.90) = +0.70 USD)
+
+apply projection_delta to account_state.ledger_balance:
+  ledger_balance := ledger_balance + projection_delta (debt changes from -68.90 to -68.20)
 
 update transaction:
   from_amount = authoritative_settlement_amount

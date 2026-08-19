@@ -208,32 +208,51 @@ Dashboard MUST NOT hold database credentials.
 
 # 3. Standard Response Model
 
-## 3.1 Success envelope
+## 3.1 Response structure conventions
 
-For ordinary resources:
+Endpoints do NOT use a universal `{"data": {}}` wrapping envelope. Instead, response shapes follow strict semantic conventions:
+
+### Resource endpoints
+Return the resource object directly at the top level:
 
 ```json
 {
-  "data": {}
+  "id": "8f6253e0-2b5e-49c8-9b57-b41cc83428f0",
+  "name": "Checking Account",
+  "account_type": "cash",
+  "currency": "CNY",
+  "status": "active"
 }
 ```
 
-For workflow endpoints:
+### Collection / List endpoints
+Return items array and pagination cursors at the top level:
+
+```json
+{
+  "items": [
+    { "id": "uuid", "occurred_on": "2026-08-19", "from_amount": "268.00" }
+  ],
+  "next_cursor": null
+}
+```
+
+### Workflow / Ingestion endpoints
+Return top-level `status` and workflow fields so clients (e.g. iOS Shortcuts) can branch directly:
 
 ```json
 {
   "status": "committed",
-  "data": {}
+  "request_id": "8f6253e0-2b5e-49c8-9b57-b41cc83428f0",
+  "transaction_id": "9a7384c1-1e2f-4a5b-8c9d-0e1f2a3b4c5d"
 }
 ```
-
-Workflow status is intentionally first-class because Shortcut must branch on it.
 
 ---
 
 ## 3.2 Error envelope
 
-All errors use:
+All errors use a structured, top-level `error` object:
 
 ```json
 {
@@ -1473,34 +1492,45 @@ If `verification_status = statement_confirmed`, backend requires explicit confir
 
 ---
 
-## 20.2 Soft delete
+## 20.2 Void / Soft delete
 
-```http
-DELETE /api/v1/transactions/{transaction_id}
-```
-
-Request body if client supports DELETE body, otherwise use POST action endpoint.
-
-Preferred explicit action:
+Canonical financial deletion endpoint:
 
 ```http
 POST /api/v1/transactions/{transaction_id}/void
 ```
 
+Request:
+
 ```json
 {
-  "reason": "Duplicate manual entry"
+  "expected_version": 5,
+  "delete_reason": "Duplicate manual entry"
+}
+```
+
+Response:
+
+```json
+{
+  "status": "voided",
+  "transaction_id": "uuid",
+  "deleted_at": "2026-08-19T10:30:00+08:00",
+  "delete_reason": "Duplicate manual entry",
+  "account_balance_restored": true
 }
 ```
 
 Backend atomically:
 
 ```text
-lock transaction
-lock affected accounts
-reverse projection
-soft-delete / void
-audit
+lock transaction FOR UPDATE
+verify status == 'committed'
+verify row_version == expected_version
+lock affected account_state FOR UPDATE
+reverse projection (apply inverse effect to ledger_balance)
+update status = 'voided', deleted_at = now(), delete_reason = ...
+write audit_events (action = 'void')
 ```
 
 ---
@@ -1883,7 +1913,7 @@ Request:
 
 Response: returns updated Transaction resource.
 
-Optimistic concurrency error (if modified concurrently): `409 Conflict` (`CONCURRENT_TRANSACTION_MODIFICATION`).
+Optimistic concurrency error (if modified concurrently): `409 Conflict` (`ROW_VERSION_CONFLICT`).
 
 ---
 
@@ -2019,42 +2049,34 @@ Client logic SHOULD branch on `code`, not human-readable `message`.
 
 ---
 
-# 30. Confirmation Rules
+# 31. Human Review & Confirmation Rules
 
-Backend MUST force confirmation when:
+### 31.1 Ingestion `needs_confirmation` triggers
+Ingestion requests (e.g. Shortcut expenses) require user confirmation before financial commit when:
+- account is unresolved or multiple account aliases match;
+- cross-currency transfer is missing one of its two actual legs;
+- AI extraction confidence is low;
+- new merchant or ambiguous category requires human confirmation.
 
-```text
-account unresolved
-multiple account candidates
-cross-currency transaction missing one leg
-Statement has multiple transaction matches
-ordinary-account residual > 200 CNY
-refund / income / transfer semantics ambiguous
-editing Statement-confirmed historical transaction
-investment capital movement ambiguous
-```
+### 31.2 Reconciliation `needs_review` triggers
+Reconciliation batches and candidates require human review when:
+- Statement line has multiple ambiguous transaction matches;
+- ordinary-account unexplained residual $> 200\text{ CNY}$;
+- investment account capital movement is ambiguous or unverified;
+- estimated settlement deviation is suspiciously high ($> 20\%$);
+- Statement original currency contradicts captured original currency (`ORIGINAL_AMOUNT_CONFLICT`).
 
-Backend MAY auto-commit when:
-
-```text
-ordinary expense
-unique account
-amount/currency clear
-category clear
-unique high-confidence Statement match
-clear missing Statement expense
-ordinary-account residual <= 200 CNY
-```
-
-Large transaction amount alone does not force confirmation.
+### 31.3 Safe Automatic Resolution
+- Ingestion auto-commits when: ordinary expense, unique account, unambiguous amount/currency, valid category, and confidence is high.
+- Reconciliation auto-matches when: candidate score $\ge 80$, margin $\ge 15$, mutual-best uniqueness holds, and residual $\le 200\text{ CNY}$ (for ordinary accounts).
 
 ---
 
-# 31. API Transaction Boundaries
+# 32. API Transaction Boundaries
 
 API boundaries MUST preserve the DB transaction rules in `PHYSICAL_SCHEMA.md`.
 
-## 31.1 Expense commit
+## 32.1 Expense commit
 
 One DB transaction:
 
@@ -2066,7 +2088,7 @@ ingestion request
 + replayable response
 ```
 
-## 31.2 Transfer commit
+## 32.2 Transfer commit
 
 One DB transaction:
 
@@ -2077,11 +2099,11 @@ transfer
 + audit
 ```
 
-## 31.3 Confirmation
+## 32.3 Confirmation
 
 No financial write before confirmation.
 
-## 31.4 Reconciliation
+## 32.4 Reconciliation
 
 Preview and candidate review are staged.
 
@@ -2089,7 +2111,7 @@ Preview and candidate review are staged.
 
 ---
 
-# 32. What Must Not Leak Into Clients
+# 33. What Must Not Leak Into Clients
 
 Clients MUST NOT need to know:
 
@@ -2108,7 +2130,7 @@ Clients consume stable domain APIs only.
 
 ---
 
-# 33. Legacy API Migration
+# 34. Legacy API Migration
 
 Current legacy:
 
@@ -2140,7 +2162,7 @@ Do not preserve legacy request shapes if they compromise the target domain model
 
 ---
 
-# 34. Implementation Rule for Agents
+# 35. Implementation Rule for Agents
 
 This document defines the external application contract.
 

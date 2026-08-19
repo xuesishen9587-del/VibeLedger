@@ -255,6 +255,56 @@ invalid currency rejected
 same from/to account rejected
 invalid transaction_type rejected
 confidence >1 rejected
+committed + deleted_at != NULL rejected
+committed + delete_reason != NULL rejected
+voided + deleted_at NULL rejected
+voided + delete_reason NULL rejected
+```
+
+## Installments
+
+Test:
+
+```text
+scheduled + expense_transaction_id IS NOT NULL rejected
+cancelled + expense_transaction_id IS NOT NULL rejected
+billed + expense_transaction_id IS NULL rejected
+total_periods < 2 or > 120 rejected
+scheduled_amount <= 0 rejected
+```
+
+## NOT NULL & Status Column Enforcement
+
+Test schema rejection on explicit NULL inserts:
+
+```text
+households.status NULL rejected
+users.status NULL rejected
+household_members.role NULL rejected
+devices.platform NULL rejected
+devices.status NULL rejected
+accounts.account_type NULL rejected
+accounts.status NULL rejected
+categories.category_type NULL rejected
+categories.status NULL rejected
+ingestion_requests.request_kind NULL rejected
+ingestion_requests.status NULL rejected
+transactions.transaction_type NULL rejected
+transactions.source NULL rejected
+transactions.status NULL rejected
+transactions.verification_status NULL rejected
+installment_plans.status NULL rejected
+installment_periods.status NULL rejected
+reconciliation_batches.batch_type NULL rejected
+reconciliation_batches.status NULL rejected
+reconciliation_batches.engine_version NULL rejected
+statement_lines.direction NULL rejected
+statement_lines.line_type NULL rejected
+statement_lines.match_status NULL rejected
+reconciliation_candidates.candidate_type NULL rejected
+reconciliation_candidates.status NULL rejected
+audit_events.actor_type NULL rejected
+audit_events.action NULL rejected
 ```
 
 ## Snapshots
@@ -559,28 +609,44 @@ Given committed expense:
 Cash 1000 -> 800
 ```
 
-Void transaction.
+Void transaction:
+
+```text
+POST /api/v1/transactions/{id}/void
+```
 
 Expected:
 
 ```text
-transaction retained
-deleted_at/void state set
-Cash restored to 1000
-audit event appended
+transaction retained in database
+status = voided
+deleted_at NOT NULL
+delete_reason NOT NULL
+Cash restored to 1000 (projection reversed)
+audit event appended (action = void)
 ```
 
 Repeat void:
 
 ```text
-must not reverse twice
+second void request returns 409 Conflict / rejected
+projection must NOT reverse twice (Cash remains 1000)
+```
+
+Schema invariant rejection:
+
+```text
+committed with deleted_at NOT NULL -> schema rejected
+committed with delete_reason NOT NULL -> schema rejected
+voided with deleted_at NULL -> schema rejected
+voided with delete_reason NULL -> schema rejected
 ```
 
 Statement-confirmed transaction:
 
 ```text
-direct destructive edit forbidden
-confirmation workflow required
+direct unverified destructive edit forbidden
+two-step preview and commit correction workflow required
 ```
 
 ---
@@ -1119,31 +1185,42 @@ Shortcut:
 
 ```text
 10000 JPY
+estimated from_amount = 68.90 USD
+account_leg_status = estimated
+account_state reflects -68.90 USD debt
 ```
 
 Statement:
 
 ```text
 10000 JPY
-68.20 USD
+68.20 USD authoritative settlement
 ```
 
 Expected:
 
 ```text
-strong match
-settlement fields enriched
+strong match (amount score capped at 40, extra original evidence agrees)
+account_leg_status -> authoritative
+from_amount -> 68.20 USD
+projection_delta = -68.20 - (-68.90) = +0.70 USD
+account_state -> -68.20 USD
+reporting FX frozen
+audit before/after recorded
 ```
 
 ---
 
-## Shortcut original only, Statement settlement only
+## Shortcut estimated settlement, Statement authoritative settlement
 
 Shortcut:
 
 ```text
 Tokyo Shop
-10000 JPY
+original_amount = 10000 JPY
+from_amount = 68.90 USD (estimated reference FX)
+account_leg_status = estimated
+account_state reflects -68.90 USD debt
 date D
 ```
 
@@ -1151,7 +1228,7 @@ Statement:
 
 ```text
 Tokyo Shop
-68.20 USD
+68.20 USD authoritative settlement
 date D+2
 ```
 
@@ -1160,9 +1237,34 @@ Only one candidate.
 Expected:
 
 ```text
-may match via merchant/date/type
-fill USD settlement leg
+matches via merchant/date/type and plausibly close estimated settlement (<=5% variance)
+differing settlement amount is NOT treated as an AMOUNT_CONFLICT
+account_leg_status -> authoritative
+from_amount -> 68.20 USD
+projection_delta = -68.20 - (-68.90) = +0.70 USD
+account_state -> -68.20 USD
+reporting FX frozen
+audit transition recorded
 ```
+
+---
+
+## Authoritative mismatch vs Estimated settlement mismatch
+
+Case A (Authoritative leg mismatch):
+- Transaction has `account_leg_status = 'authoritative'` with `from_amount = 100.00 USD`.
+- Statement line has `120.00 USD`.
+- Expected: hard conflict, candidate rejected.
+
+Case B (Estimated leg deviation within plausible bounds):
+- Transaction has `account_leg_status = 'estimated'` with `from_amount = 68.90 USD`.
+- Statement line has `68.20 USD`.
+- Expected: expected behavior, match allowed.
+
+Case C (Estimated leg wildly inconsistent):
+- Transaction has `account_leg_status = 'estimated'` with `from_amount = 68.90 USD`.
+- Statement line has `150.00 USD` (>20% deviation).
+- Expected: auto-match blocked, `needs_review` (`SETTLEMENT_DEVIATION_SUSPICIOUS`).
 
 ---
 

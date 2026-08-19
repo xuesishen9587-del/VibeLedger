@@ -59,8 +59,9 @@ PostgreSQL Database
   ├── Identity & Config : households, users, devices, accounts, categories, account_aliases
   ├── Idempotency       : ingestion_requests (device-scoped request lifecycle)
   ├── Durable Ledger    : transactions, transaction_links, audit_events (append-only)
-  ├── Projections       : account_state (rebuildable derived cache)
-  ├── Authoritative Obs : account_snapshots, credit_card_snapshots, investment_pnl_periods
+  ├── Projections       : account_state (rebuildable derived cache, initialized_at baseline)
+  ├── Authoritative Obs : account_snapshots, credit_card_snapshots
+  ├── Derived Analytics : investment_pnl_periods (calculated P&L between valuation baselines)
   ├── Installments      : installment_plans, installment_periods (scheduled vs billed)
   └── Reconciliation    : reconciliation_batches, statement_lines, reconciliation_candidates
 ```
@@ -84,21 +85,23 @@ All future development must follow this strict reading and authority order:
 
 ## 5. Locked Major Product Decisions
 
-1. **No Legacy Data Migration**: Old production data will NOT be migrated. The target system starts with a fresh schema at `ledger_start_date` initialized with explicit opening balances.
+1. **No Legacy Data Migration**: Old production data will NOT be migrated. The target system starts with a fresh schema at `ledger_start_date` initialized with explicit opening balances (`account_state.initialized_at`).
 2. **Statement is Optional Evidence**: Statement PDF upload is an optional high-accuracy tool, NOT a mandatory monthly closing ritual. An account can remain calibrated purely via periodic balance Snapshots.
-3. **Draft Safety & Confirmation**: High-confidence Shortcut expenses auto-commit; low-confidence inputs enter `needs_confirmation` (`ingestion_requests`) and create NO transaction or balance mutation until user approval.
+3. **Draft Safety & Confirmation**: High-confidence Shortcut expenses auto-commit; low-confidence inputs enter `needs_confirmation` (`ingestion_requests`) and create NO transaction or balance mutation until user approval. Reconciliation ambiguities enter `needs_review` on the batch.
 4. **Idempotency Ownership**: Client `idempotency_key` is owned at the `ingestion_requests` level per device, not directly on `transactions`.
-5. **Multi-Currency & FX**: Original currency amounts are preserved permanently. Statement settlement freezes historical reporting FX; subsequent credit-card repayments at different FX rates do NOT rewrite past expense amounts.
-6. **Refund Semantics**: Refunds are independent transactions linked via `refund_of`, never deletions of original expenses. Soft deletes (`deleted_at`) reverse projections and preserve audit trails.
-7. **Installment Schedules**: Purchasing an installment plan creates schedule records; only the current billed period becomes an expense upon Statement arrival. No future transactions exist in advance.
-8. **Reconciliation Thresholds**: Unexplained residuals on ordinary accounts $\le 200\text{ CNY}$ may auto-generate `reconciliation_adjustment`; residuals $>200\text{ CNY}$ trigger `needs_review`. Investment accounts NEVER use the $200\text{ CNY}$ threshold.
-9. **Investment Valuation**: Market gains/losses (`investment_pnl_periods`) update net worth and investment analytics, but are strictly excluded from household `cash_income`.
-10. **Document Privacy**: Statement PDFs are deleted immediately upon successful parsing (max 24h retention on failure); PDF passwords are kept in memory only and never persisted.
-11. **Backend Exclusivity**: Dashboard is a pure UI client consuming Backend REST APIs; it never holds direct database credentials or executes accounting business logic.
+5. **Foreign Credit Card Estimation**: Shortcut captures foreign card purchases with reference FX (`account_leg_status = 'estimated'`) and updates `account_state` estimated debt. Statement reconciliation replaces it with authoritative settlement, applies the exact delta to `account_state`, freezes historical reporting FX, and audits the transition. Cross-currency transfers strictly require both real legs and never use estimated FX.
+6. **Fee Reporting**: `fee` is a distinct `transaction_type` requiring an expense category. Household expense reporting includes ordinary expense + fee - applicable refunds.
+7. **Refund & Void Semantics**: Refunds are independent transactions linked via `refund_of`, never deletions of original expenses. Voiding / soft delete (`status = 'voided'` $\iff$ `deleted_at IS NOT NULL` + `delete_reason`) atomically reverses `account_state` projections exactly once and preserves audit trails.
+8. **Installment Schedules**: Purchasing an installment plan creates schedule records only; only the current billed period becomes an expense upon Statement arrival (`recognize_installment`). No future transactions exist in advance.
+9. **Reconciliation Thresholds**: Unexplained residuals on ordinary accounts $\le 200\text{ CNY}$ may auto-generate `reconciliation_adjustment`; residuals $>200\text{ CNY}$ trigger `needs_review`. Investment accounts NEVER use the $200\text{ CNY}$ threshold.
+10. **Investment Valuation**: Market gains/losses (`investment_pnl_periods`) update net worth and investment analytics, but are strictly excluded from household `cash_income`. Pending reconciliation calculations remain in candidate payload until atomic commit.
+11. **Historical Correction Flow**: Statement-confirmed transactions can only be corrected through an explicit two-step preview/commit API with optimistic concurrency control (`row_version`), updating `account_state` deltas and writing append-only audit events without altering raw Statement evidence.
+12. **Document Privacy**: Statement PDFs are deleted immediately upon successful parsing (max 24h retention on failure); PDF passwords are kept in memory only and never persisted.
+13. **Backend Exclusivity**: Dashboard is a pure UI client consuming Backend REST APIs; it never holds direct database credentials or executes accounting business logic.
 
 ---
 
 ## 6. Current Next Steps
 
-1. **Documentation Cleanup**: Complete (Repository synchronized and legacy archived).
+1. **Architecture Consistency Review**: Complete (All target architecture documents frozen and 100% synchronized).
 2. **Next Action**: Proceed to **Implementation Phase 0** (Architecture freeze & test safety guards) and **Implementation Phase 1** (Target database foundation migrations & repositories) as defined in [`docs/architecture/IMPLEMENTATION_PLAN.md`](./docs/architecture/IMPLEMENTATION_PLAN.md).

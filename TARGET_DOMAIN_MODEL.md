@@ -1,6 +1,6 @@
 # VibeLedger Target Domain Model
 
-> Status: **Approved target design**
+> Status: **Frozen Target Domain Model (Final consistency review complete)**
 > Purpose: 作为后续 Codex / Antigravity 架构设计与开发的业务约束。
 >
 > 原则：**保持家庭账本准确到“足够可信”，优先降低日常使用摩擦，不构建复杂家庭 ERP。**
@@ -118,12 +118,14 @@ to_amount              nullable
 to_currency            nullable
 effective_fx_rate      nullable
 
+account_leg_status     nullable (estimated / authoritative)
+
 category_id            nullable
 merchant               nullable
 remarks                nullable
 
 source
-status
+status                 (committed / voided)
 confidence             nullable
 
 source_request_id      nullable
@@ -132,7 +134,31 @@ statement_batch_id     nullable
 created_at
 updated_at
 deleted_at             nullable
+delete_reason          nullable
 ```
+
+### Foreign Currency Credit Card Expense Rule
+
+外币信用卡消费（`original_currency` $\ne$ 账户币种）：
+- **Shortcut 录入时**：永久保留 `original_amount` / `original_currency`；使用参考汇率计算预估扣款金额（`from_amount` / `from_currency`），标记 `account_leg_status = estimated`，并以此预估值更新 `account_state` 负债。
+- **Statement 出账对账时**：对账原子提交时以银行权威结算金额覆盖 `from_amount`，置 `account_leg_status = authoritative`，将差额 delta 原子补偿至 `account_state`，记录 `posted_on`，冻结历史 reporting FX，并记录审计日志。
+- **重要约束**：预估仅允许用于外币信用卡消费扣款腿；跨币种内部转账（`transfer`）必须提供双向真实金额，严禁用参考汇率捏造。
+
+### Fee & Category Rules
+
+- **`fee`（手续费）**：独立的 `transaction_type`，属于家庭现金支出，必须关联支出分类（`category_id`），计入家庭总支出。转账手续费作为同一操作下的独立 `fee` 交易，不计入转账本金。
+- **分类规则**：
+  - `expense` $\to$ 必须关联支出分类
+  - `fee` $\to$ 必须关联支出分类
+  - `cash_income` $\to$ 必须关联收入分类
+  - `refund` $\to$ 可继承原消费分类
+  - `transfer` / `opening_balance` / `reconciliation_adjustment` $\to$ 分类必须为 NULL
+
+### Soft Delete & Void Rules
+
+- `status = committed` $\iff$ `deleted_at IS NULL`
+- `status = voided` $\iff$ `deleted_at IS NOT NULL` 且必须提供 `delete_reason`
+- 软删除与作废（void）为同一生命周期操作，原子反向回退 `account_state` 投影并记录不可变审计事件。
 
 ### Date Rule
 
@@ -623,27 +649,21 @@ Statement 出账后：
 12,000 CNY / 12 months
 ```
 
-规则：
+分期计划建立流程：
+- **统一入口**：Expense Shortcut 仍为统一消费入口，通过 AI 结构化提取识别 `payment_mode`（`one_off` / `installment`）。
+- **字段提取**：对于分期消费，提取 `total_amount`、`currency`、`total_periods`、`merchant`、`from_account`。
+- **初次录入**：创建 `installment_plans` 与各期 `installment_periods` 计划排期表，返回 `installment_plan_id` 与提示摘要（如“12,000 CNY 12期分期计划已建立”）。
+- **零提前记账**：不得在购买当天生成 12 笔正式未来 Transaction，不得立即确认消费支出，不得将全部本金扣减当前账户余额。
+- **按期确认**：首期及后续各期费用在信用卡 Statement 首次出账时，通过 `recognize_installment` 候选在对账提交时确认当期实际 `expense` 流水并计入当期负债与支出。
+- **尾期调整**：最后一期自动承担 rounding remainder。
+
+展示口径：
 
 ```text
-首次进入信用卡 Statement 的月份
-→ 确认第 1 期 1,000
-
-之后每月
-→ 确认 1,000
+本期应还 (statement_balance / remaining_due)
+剩余未出账分期 (unbilled installment schedules)
+current_outstanding (已出账未还 + 未出账已消费)
 ```
-
-展示：
-
-```text
-本期应还
-剩余未出账分期
-current_outstanding
-```
-
-不得在购买当天生成 12 笔正式未来 Transaction 并立即修改全部余额。
-
-最后一期承担 rounding remainder。
 
 Product v1 不支持提前还清。
 
@@ -727,30 +747,53 @@ investment_pnl
 
 ---
 
-# 11. Confirmation Rules
+# 11. Workflow Confirmation & Review Rules
 
-以下情况 MUST `needs_confirmation`：
+系统严格区分 **Ingestion 阶段的确认（`needs_confirmation`）** 与 **Reconciliation 阶段的审核（`needs_review`）**：
+
+### 11.1 Ingestion / Shortcut 阶段 MUST `needs_confirmation`
+
+发生在客户端提交消费截图或草稿处理期间：
 
 ```text
-找不到账户
-多个账户候选
-跨币种交易缺一侧金额
-Statement 多候选匹配
-Statement residual > 200 CNY
-无法区分 refund / income / transfer
-修改 Statement-confirmed 历史交易
+找不到唯一扣款账户 / 多个账户候选
+金额、币种置信度不足或存在确定性校验冲突
+分类置信度不足（若需人工确认分类）
+用户在正式提交前发起自然语言修正
 ```
 
-以下情况 MAY 自动处理：
+草稿处于 `needs_confirmation` 期间，**绝不生成正式 Transaction，绝不修改账户余额**。
+
+### 11.2 Reconciliation / 对账阶段 MUST `needs_review`
+
+发生在 Statement 对账批次、Snapshot 对账或投资对账计算期间：
 
 ```text
-普通消费
-唯一账户
-金额币种明确
-类别明确
-Statement 唯一高置信匹配
-Statement 明确漏记普通消费
-普通账户 residual <= 200 CNY
+Statement 与已有交易存在多候选匹配 / 候选冲突
+普通账户对账 residual > 200 CNY
+对账流水类型歧义（无法明确区分 refund / cash_income / transfer）
+投资账户对账存在未明确的资金进出（capital movement）
+内部转账对账找不到唯一对方账户
+Statement 权威数据与历史已确认记录冲突
+```
+
+批次处于 `needs_review` 期间，**绝不部分修改正式账本，等待人工裁决后原子提交**。
+
+### 11.3 历史已确认交易变更（Correction）
+
+修改 `verification_status = statement_confirmed` 的历史交易：
+- 严禁直接隐式修改或重用 ingestion requests；
+- 必须通过专用的变更预览（correction preview）与用户显式提交（correction commit）流程；
+- 原子重算并补偿 `account_state` 投影，记录完整的变更前/后不可变审计事件。
+
+### 11.4 自动处理场景
+
+以下情况 MAY 自动提交入账：
+
+```text
+普通消费 Shortcut：唯一账户、金额币种明确、分类明确、校验通过
+Statement 对账：唯一高置信匹配、明确漏记普通消费、普通账户 residual <= 200 CNY
+投资对账：资金进出完全明确且无歧义
 ```
 
 交易金额大小本身不触发强制确认。
@@ -948,7 +991,7 @@ Ending Value
 │
 └─ Unknown capital movement
         ↓
-    needs_confirmation
+    needs_review
         ↓
     User supplies transfer / capital movement
         ↓

@@ -1,14 +1,19 @@
-# VibeLedger Implementation Plan
+# VibeLedger Target Architecture Implementation Plan
 
-> Status: **Approved implementation roadmap**
+> Status: **Frozen Target Implementation Plan (Final consistency review complete)**
 >
 > Authority:
 >
-> 1. `TARGET_DOMAIN_MODEL.md`
-> 2. `docs/architecture/PHYSICAL_SCHEMA.md`
-> 3. `docs/architecture/API_CONTRACT.md`
-> 4. `docs/architecture/RECONCILIATION_ENGINE.md`
-> 5. This document
+> 1. `TARGET_DOMAIN_MODEL.md` — approved business truth
+> 2. `docs/architecture/PHYSICAL_SCHEMA.md` — target persistence contract
+> 3. `docs/architecture/API_CONTRACT.md` — target public API contract
+> 4. `docs/architecture/RECONCILIATION_ENGINE.md` — target reconciliation/matching contract
+> 5. This document — implementation sequencing and verification gates
+> 6. `docs/architecture/TEST_PLAN.md` — testing and regression rules
+>
+> Principle: **Phased, test-driven, greenfield rebuild.**
+>
+> Core rule: **Each Phase MUST have automated test acceptance criteria before proceeding to the next Phase.**
 >
 > Goal: migrate the current legacy implementation to the target architecture **incrementally, testably, and without a one-shot rewrite**.
 >
@@ -832,7 +837,7 @@ multi-currency reporting
 
 Every number required by current Dashboard can be obtained from Backend APIs.
 
-Dashboard itself may still temporarily use legacy DB until Phase 10.
+Dashboard itself may still temporarily use legacy DB until Phase 11.
 
 ---
 
@@ -1260,28 +1265,94 @@ Investment valuation updates net worth and investment analytics only.
 
 ---
 
-# 16. Phase 10 — Dashboard Migration to Backend
+# 16. Phase 10 — Authentication & Authorization Hardening
 
 ## Goal
 
-Remove Dashboard ownership of accounting/database logic.
+Harden identity, browser user authentication, household authorization boundaries, and device management before Dashboard cutover.
+
+Note: Schema tables (`users`, `household_members`, `devices`) are created in Phase 1; minimum device-token authentication for the Expense API is implemented in Phase 3.
 
 ## Build
 
-Create a small Dashboard API client:
+Implement:
+
+```text
+api/auth/ (browser authentication provider integration)
+auth_subject resolution -> User -> Household
+Household member access control middleware
+Device management & token revocation endpoints
+Production auth security test suite
+```
+
+Dashboard authentication:
+
+```text
+external auth
+→ auth_subject
+→ user
+→ household
+```
+
+Shortcut:
+
+```text
+Bearer device token (hashing and revocation verified)
+```
+
+Per-device revocation:
+- Revoked devices receive `401 Unauthorized` with `DEVICE_REVOKED`
+- Token plaintext is never logged, leaked, or returned after creation
+
+Do not accept:
+
+```text
+recorded_by
+user_id
+household_id
+```
+
+from an untrusted Shortcut body as authorization truth. Resolve identity exclusively from the authenticated token context.
+
+## Tests
+
+```text
+valid device token accepts request
+revoked device token rejected immediately
+user not household member rejected with 403
+two users both see household data cleanly
+device mapped to correct user and household
+device token never returned or logged in plaintext
+```
+
+## Acceptance
+
+All target REST endpoints reject unauthorized or cross-household requests; device tokens support immediate revocation.
+
+---
+
+# 17. Phase 11 — Dashboard Migration to Backend
+
+## Goal
+
+Remove Dashboard direct ownership of accounting/database logic and migrate it to Backend REST APIs using Phase 10 authenticated sessions.
+
+## Build
+
+Create Dashboard API client:
 
 ```text
 ai-ledger-dashboard/
   api_client.py
 ```
 
-Replace imports:
+Replace direct database queries:
 
 ```text
 from database import ...
 ```
 
-with Backend HTTP calls.
+with Backend HTTP calls against `/api/v1/*`.
 
 Migrate page-by-page:
 
@@ -1295,6 +1366,7 @@ Migrate page-by-page:
 7. work queue
 8. Statement upload/review
 9. audit/history
+10. transaction correction / void UI
 ```
 
 Delete Dashboard-side:
@@ -1307,7 +1379,7 @@ investment adjustment -> income remapping
 direct SELECT/UPDATE/INSERT
 ```
 
-Move FX/reporting rules to Backend.
+Move all reporting and FX calculations to Backend.
 
 ## Keep
 
@@ -1317,7 +1389,7 @@ Do not rewrite UI technology unless required.
 
 ## Tests
 
-Backend API tests are authoritative.
+Backend API tests remain authoritative.
 
 Dashboard tests focus on:
 
@@ -1336,7 +1408,7 @@ Dashboard container does not require:
 DATABASE_URL
 ```
 
-It only needs Backend URL/auth configuration.
+It only needs Backend URL and authentication configuration.
 
 Search repository:
 
@@ -1344,67 +1416,7 @@ Search repository:
 ai-ledger-dashboard
 ```
 
-must contain no direct PostgreSQL business access.
-
----
-
-# 17. Phase 11 — Users, Devices, and Authentication
-
-## Goal
-
-Enable two browser users and separate iPhone device tokens.
-
-This phase is deliberately late enough to avoid blocking core accounting development, but must be completed before production cutover.
-
-## Build
-
-Implement:
-
-```text
-users
-household_members
-devices
-```
-
-Dashboard authentication:
-
-```text
-external auth
-→ auth_subject
-→ user
-→ household
-```
-
-Shortcut:
-
-```text
-Bearer device token
-```
-
-Per-device revocation.
-
-Do not accept:
-
-```text
-recorded_by
-user_id
-household_id
-```
-
-from an untrusted Shortcut body as authorization truth.
-
-Resolve identity from token.
-
-## Tests
-
-```text
-valid device
-revoked device
-user not household member
-two users both see household
-device mapped to correct user
-token never returned/read in plaintext
-```
+must contain zero direct PostgreSQL business access.
 
 ---
 
@@ -1651,20 +1663,20 @@ Read APIs       Snapshot Reconciliation
                 Investment
    └──────────────┬─────────────┘
                   ↓
-               Phase 10
-               Dashboard Migration
-                  ↓
-               Phase 11
-               Auth / Devices
-                  ↓
-               Phase 12
-               Shortcut v2
-                  ↓
-               Phase 13
-               Production Cutover
-                  ↓
-               Phase 14
-               Legacy Removal
+                Phase 10
+                Auth Hardening
+                   ↓
+                Phase 11
+                Dashboard Migration
+                   ↓
+                Phase 12
+                Shortcut v2
+                   ↓
+                Phase 13
+                Production Cutover
+                   ↓
+                Phase 14
+                Legacy Removal
 ```
 
 Phase 4 may proceed in parallel with Phase 5 after the Core Ledger is stable.

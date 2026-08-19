@@ -1,6 +1,6 @@
 # VibeLedger Reconciliation Engine
 
-> Status: **Target reconciliation-engine contract**
+> Status: **Frozen Target Reconciliation Engine Contract (Final consistency review complete)**
 >
 > Authority:
 >
@@ -1152,18 +1152,20 @@ Priority:
 ```text
 1. original-currency exact match, if Statement exposes original amount
 2. settlement account-currency exact match, if existing transaction has settlement leg
-3. date + merchant + type, if settlement amount was not yet known
+3. date + merchant + type, with estimated settlement amount plausibility check
 ```
 
 Example:
 
-Shortcut:
+Shortcut capture:
 
 ```text
-merchant = Tokyo Shop
-original = 10,000 JPY
-card     = USD Visa
-from_amount = NULL
+merchant           = Tokyo Shop
+original           = 10,000 JPY
+card               = USD Visa
+from_amount        = 68.90 USD (estimated using current/T-1 reference FX)
+account_leg_status = estimated
+account_state      = -68.90 USD (estimated debt)
 ```
 
 Statement:
@@ -1176,16 +1178,26 @@ settlement = 68.20 USD
 If date and merchant strongly identify a unique transaction:
 
 ```text
-match may be accepted
+match candidate accepted
 ```
 
-Commit may patch authoritative settlement fields:
+Atomic commit patches authoritative settlement fields:
 
 ```text
-from_amount       = 68.20
-from_currency     = USD
-posted_on         = Statement posted date
+from_amount        = 68.20
+from_currency      = USD
+account_leg_status = authoritative
+posted_on          = Statement posted date
 verification_status = statement_confirmed
+
+balance delta applied to account_state:
+  +0.70 USD debt reduction (replacing 68.90 with 68.20)
+
+historical reporting FX:
+  reporting_amount and reporting_fx_rate frozen
+
+audit:
+  audit_events recorded with estimated -> authoritative transition
 ```
 
 If Statement also provides original amount:

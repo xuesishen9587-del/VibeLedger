@@ -1,6 +1,6 @@
 # VibeLedger API Contract
 
-> Status: **Target API contract**
+> Status: **Frozen Target API Contract (Final consistency review complete)**
 >
 > Authority:
 >
@@ -35,7 +35,17 @@ Legacy endpoints may temporarily coexist during migration, but new clients MUST 
 
 ---
 
-## 1.2 Content types
+## 1.2 Response Envelope Conventions
+
+Product v1 avoids unnecessary universal wrapping envelopes:
+
+- **Error responses**: use top-level `{"error": { "code": "...", "message": "...", "details": ... }}`
+- **Workflow endpoints** (Ingestion, Reconciliation, Confirmation): return workflow states at top level (e.g. `{"status": "committed | needs_confirmation | needs_review", ...}`)
+- **Resource / List endpoints**: return resource representation or collection object directly (e.g. `{"id": "...", ...}` or `{"items": [...], "next_cursor": null}`)
+
+---
+
+## 1.3 Content types
 
 JSON endpoints:
 
@@ -371,14 +381,34 @@ committed OR needs_confirmation
 
 ---
 
-## 5.2 High-confidence response
+## 5.2 High-confidence response (One-off expense)
+
+Standard one-off expense:
 
 ```json
 {
   "status": "committed",
   "request_id": "uuid",
   "transaction_id": "uuid",
+  "payment_mode": "one_off",
   "display_summary": "¥268.00 · 京东\nICBC Visa · Digital & Gadgets\n2026-08-19"
+}
+```
+
+Foreign-currency credit card purchase (e.g. 10,000 JPY on USD Visa):
+
+```json
+{
+  "status": "committed",
+  "request_id": "uuid",
+  "transaction_id": "uuid",
+  "payment_mode": "one_off",
+  "original_amount": "10000.00",
+  "original_currency": "JPY",
+  "from_amount": "68.90",
+  "from_currency": "USD",
+  "account_leg_status": "estimated",
+  "display_summary": "10,000 JPY (est. $68.90) · Tokyo Store\nUSD Visa · Travel\n2026-08-19"
 }
 ```
 
@@ -392,7 +422,32 @@ finish
 
 ---
 
-## 5.3 Low-confidence response
+## 5.3 High-confidence response (Installment plan)
+
+When the screenshot represents an installment purchase:
+
+```json
+{
+  "status": "committed",
+  "request_id": "uuid",
+  "installment_plan_id": "uuid",
+  "payment_mode": "installment",
+  "total_amount": "12000.00",
+  "currency": "CNY",
+  "total_periods": 12,
+  "merchant": "Apple",
+  "display_summary": "¥12,000.00 · Apple (12期分期计划已建立)\nICBC Visa\n2026-08-19"
+}
+```
+
+Note:
+- Creates `installment_plans` and 12 `installment_periods` schedule rows.
+- No future `transactions` or immediate account debt mutations are created.
+- The first expense transaction is recognized when the first installment appears on the Statement.
+
+---
+
+## 5.4 Low-confidence response
 
 ```json
 {
@@ -1755,9 +1810,115 @@ No API exists to update/delete audit events.
 
 ---
 
-# 28. Health / Readiness
+# 28. Historical Transaction Correction & Void API
 
-## 28.1 Liveness
+Used by Dashboard for explicit corrections to historical or Statement-confirmed transactions without mutating raw Statement evidence.
+
+## 28.1 Preview correction
+
+```http
+POST /api/v1/transactions/{transaction_id}/corrections/preview
+```
+
+Request:
+
+```json
+{
+  "occurred_on": "2026-08-18",
+  "category_id": "uuid",
+  "merchant": "Apple Store Ginza",
+  "remarks": "Updated purchase detail",
+  "from_amount": "68.20"
+}
+```
+
+Response:
+
+```json
+{
+  "transaction_id": "uuid",
+  "expected_version": 3,
+  "is_statement_confirmed": true,
+  "proposed_changes": {
+    "occurred_on": "2026-08-18",
+    "category_id": "uuid",
+    "merchant": "Apple Store Ginza",
+    "from_amount": "68.20"
+  },
+  "account_state_deltas": [
+    {
+      "account_id": "uuid",
+      "account_name": "USD Visa",
+      "current_balance": "-1500.00",
+      "delta": "-0.70",
+      "projected_balance": "-1500.70"
+    }
+  ],
+  "requires_confirmation": true
+}
+```
+
+---
+
+## 28.2 Commit correction
+
+```http
+POST /api/v1/transactions/{transaction_id}/corrections/commit
+```
+
+Request:
+
+```json
+{
+  "expected_version": 3,
+  "changes": {
+    "occurred_on": "2026-08-18",
+    "category_id": "uuid",
+    "merchant": "Apple Store Ginza",
+    "from_amount": "68.20"
+  },
+  "reason": "Corrected merchant and foreign exchange settlement discrepancy"
+}
+```
+
+Response: returns updated Transaction resource.
+
+Optimistic concurrency error (if modified concurrently): `409 Conflict` (`CONCURRENT_TRANSACTION_MODIFICATION`).
+
+---
+
+## 28.3 Void transaction
+
+```http
+POST /api/v1/transactions/{transaction_id}/void
+```
+
+Request:
+
+```json
+{
+  "expected_version": 3,
+  "delete_reason": "Duplicate manual transaction recorded by user"
+}
+```
+
+Response:
+
+```json
+{
+  "status": "voided",
+  "transaction_id": "uuid",
+  "deleted_at": "2026-08-19T10:30:00+08:00",
+  "delete_reason": "Duplicate manual transaction recorded by user",
+  "account_balance_restored": true
+}
+```
+
+---
+
+# 29. Health / Readiness
+
+## 29.1 Liveness
 
 ```http
 GET /health
@@ -1775,7 +1936,7 @@ This does not require Gemini.
 
 ---
 
-## 28.2 Readiness
+## 29.2 Readiness
 
 ```http
 GET /ready
@@ -1803,7 +1964,7 @@ Example:
 
 ---
 
-# 29. Stable Error Codes
+# 30. Stable Error Codes
 
 Minimum Product v1 set:
 

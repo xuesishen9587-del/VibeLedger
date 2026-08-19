@@ -94,3 +94,17 @@ The canonical match statuses on `statement_lines` are:
 - `new_candidate` — High-confidence proposal to create a new transaction/transfer/refund/installment.
 - `ambiguous` — Multiple matches or unclear semantics requiring human review.
 - `ignored` — Line intentionally skipped from ledger impact (e.g., non-household movement).
+
+### 3.7 Foreign Credit Card Estimation & Account Leg Status
+- **`account_leg_status = 'estimated'`**: Set at Shortcut ingestion time for foreign card expenses (`original_currency <> card.currency`) where settlement leg is estimated via reference FX. Updates `account_state` estimated debt.
+- **`account_leg_status = 'authoritative'`**: Set upon Statement reconciliation atomic commit, replacing the estimate with actual settlement amount, applying the balance delta to `account_state`, and freezing historical reporting FX.
+- **Transfer Invariant**: Cross-currency internal transfers strictly require both actual settlement legs and NEVER use estimated FX.
+
+### 3.8 Fee & Category Invariants
+- **`fee`**: Distinct transaction type representing household cash outflow; requires an active expense-type category (`category_id`).
+- **Reporting Formula**: $\text{Household Expense} = \text{ordinary expense} + \text{fee} - \text{applicable refunds}$.
+
+### 3.9 Void & Soft Delete Lifecycle
+- **`status = 'committed'`** $\iff$ `deleted_at IS NULL` AND `delete_reason IS NULL`
+- **`status = 'voided'`** $\iff$ `deleted_at IS NOT NULL` AND `delete_reason IS NOT NULL`
+- Soft delete and void are the identical financial lifecycle operation; voiding atomically reverses `account_state` projections exactly once and preserves audit trails.

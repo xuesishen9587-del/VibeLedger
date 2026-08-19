@@ -1,17 +1,15 @@
-# VibeLedger Test Plan
+# VibeLedger Test and Quality Plan
 
-> Status: **Target test contract**
+> Status: **Frozen Target Test Plan (Final consistency review complete)**
 >
 > Authority:
 >
-> 1. `TARGET_DOMAIN_MODEL.md`
-> 2. `docs/architecture/PHYSICAL_SCHEMA.md`
-> 3. `docs/architecture/API_CONTRACT.md`
-> 4. `docs/architecture/RECONCILIATION_ENGINE.md`
-> 5. `docs/architecture/IMPLEMENTATION_PLAN.md`
-> 6. This document
->
-> Goal: verify accounting correctness, idempotency, concurrency safety, reconciliation replay safety, and client/API behavior.
+> 1. `TARGET_DOMAIN_MODEL.md` — business rules
+> 2. `docs/architecture/PHYSICAL_SCHEMA.md` — schema invariants
+> 3. `docs/architecture/API_CONTRACT.md` — interface contracts
+> 4. `docs/architecture/RECONCILIATION_ENGINE.md` — reconciliation correctness
+> 5. `docs/architecture/IMPLEMENTATION_PLAN.md` — phase sequencing
+> 6. This document — testing strategy and regression contractness, idempotency, concurrency safety, reconciliation replay safety, and client/API behavior.
 >
 > Core rule: **No automated test may modify production data.**
 
@@ -2061,8 +2059,11 @@ income separation
 Required:
 
 ```text
-Dashboard no DB access
-all reporting via API
+external browser auth & auth_subject mapping
+household member access authorization
+device token validation & immediate revocation
+token never leaked/logged in plaintext
+cross-household access rejection (403)
 ```
 
 ## Phase 11
@@ -2070,7 +2071,9 @@ all reporting via API
 Required:
 
 ```text
-users/devices/auth/isolation
+Dashboard zero direct DB access (REST-only)
+all reporting via authenticated Backend API
+correction & void UI flows
 ```
 
 ## Phase 12
@@ -2283,11 +2286,29 @@ two concurrent writes never lose balance updates
 
 internal transfer never counts as income/expense
 
+cross-currency transfer strictly rejects missing actual leg and never invents legs via reference FX
+
 credit-card repayment never counts as expense/income
 
 refund never deletes original expense
 
+foreign-card Shortcut creates estimated account leg and updates account_state
+
+reconciliation replaces foreign-card estimate with authoritative settlement and applies exact delta to account_state
+
+installment plan capture creates schedule only with zero transactions and zero balance mutation
+
 future installment schedule never changes current balance before billing
+
+first Statement billing creates first installment expense transaction
+
+fee is separate transaction_type requiring expense category and included in household expense reporting
+
+voided transaction requires delete_reason and atomically reverses account_state exactly once
+
+uninitialized account (initialized_at NULL) rejected for normal financial writes
+
+historical transaction correction revalidates row_version, updates account_state delta, and writes audit event
 
 investment P&L never appears in cash income
 
@@ -2296,6 +2317,8 @@ pending/provisional investment calculations never insert uncommitted rows into i
 ordinary residual <=200 may auto-adjust
 
 investment residual never uses ordinary auto-adjust
+
+reconciliation batch permanently retains parser_version and engine_version
 
 Statement preview never changes committed ledger
 

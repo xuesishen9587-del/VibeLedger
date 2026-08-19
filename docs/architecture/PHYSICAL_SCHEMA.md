@@ -1,6 +1,6 @@
 # VibeLedger Physical PostgreSQL Schema
 
-> Status: **Target physical schema**
+> Status: **Frozen Target Physical Schema (Final consistency review complete)**
 >
 > Authority: `TARGET_DOMAIN_MODEL.md` is the business source of truth. This document translates it into the target PostgreSQL persistence model.
 >
@@ -310,6 +310,7 @@ Current derived projection. **Not source of truth.**
 |---|---|---|
 | `account_id` | UUID | PK, FK -> accounts |
 | `ledger_balance` | NUMERIC(20,6) | NOT NULL default 0 |
+| `initialized_at` | TIMESTAMPTZ | nullable; set when opening baseline is established |
 | `last_transaction_at` | TIMESTAMPTZ | nullable |
 | `last_authoritative_snapshot_at` | TIMESTAMPTZ | nullable |
 | `row_version` | BIGINT | NOT NULL default 0 |
@@ -318,6 +319,8 @@ Current derived projection. **Not source of truth.**
 Rules:
 
 - one row per account;
+- `initialized_at = NULL` represents an uninitialized technical default state (0 balance is not an observed fact);
+- `initialized_at IS NOT NULL` indicates the account has been formally initialized with an `opening_balance`, authoritative Snapshot, or first Statement baseline;
 - every committed financial mutation locks this row first;
 - balance is denominated in `accounts.currency`;
 - table must be rebuildable from durable facts.
@@ -467,6 +470,7 @@ Committed financial/economic events only. Pending drafts never enter this table.
 | `to_amount` | NUMERIC(20,6) | nullable, >0 |
 | `to_currency` | CHAR(3) | nullable |
 | `effective_fx_rate` | NUMERIC(24,12) | nullable, >0 |
+| `account_leg_status` | TEXT | nullable; `estimated / authoritative` |
 | `reporting_amount` | NUMERIC(20,6) | nullable; frozen reporting value |
 | `reporting_currency` | CHAR(3) | nullable |
 | `reporting_fx_rate` | NUMERIC(24,12) | nullable |
@@ -547,6 +551,14 @@ CHECK (source IN (
 
 CHECK (status IN ('committed', 'voided'));
 
+CHECK (
+  (status = 'committed' AND deleted_at IS NULL AND delete_reason IS NULL)
+  OR
+  (status = 'voided' AND deleted_at IS NOT NULL AND delete_reason IS NOT NULL)
+);
+
+CHECK (account_leg_status IS NULL OR account_leg_status IN ('estimated', 'authoritative'));
+
 CHECK (verification_status IN (
   'unverified',
   'user_confirmed',
@@ -573,44 +585,53 @@ Transaction shape:
 expense:
   from_account required
   to_account null
+  from_amount required (estimated if foreign card, authoritative otherwise)
+  category_id required (must reference an active expense-type category)
+
+fee:
+  from_account required
+  to_account null
   from_amount required
+  category_id required (must reference an active expense-type category)
 
 cash_income:
   from_account null
   to_account required
   to_amount required
+  category_id required (must reference an active income-type category)
 
 refund:
   from_account null
   to_account required
   to_amount required
+  category_id nullable (may inherit original expense category)
 
 transfer:
   from_account required
   to_account required
   from_amount required
   to_amount required
-
-fee:
-  from_account required
-  to_account null
-  from_amount required
+  effective_fx_rate required
+  category_id null
 
 reconciliation_adjustment:
   exactly one account side
   corresponding leg amount required
+  category_id null
 
 opening_balance:
   exactly one account side
   corresponding leg amount required
+  category_id null
 ```
 
 Category service rules:
 
 ```text
-expense / cash_income -> category required
+expense / fee -> expense category required
+cash_income   -> income category required
+refund        -> may inherit original expense category
 transfer / opening_balance / reconciliation_adjustment -> category null
-refund -> may inherit original category
 ```
 
 Cross-table service rules:
@@ -619,6 +640,24 @@ Cross-table service rules:
 from_currency == from_account.currency
 to_currency   == to_account.currency
 ```
+
+### Foreign Currency Credit Card Expense & Estimation
+
+For an expense where `original_currency <> from_account.currency`:
+1. **Shortcut Ingestion**:
+   - `original_amount` / `original_currency` preserved permanently;
+   - `from_amount` is computed using current / T-1 reference FX and stored;
+   - `account_leg_status = 'estimated'`;
+   - `account_state` projection is updated with this estimated debt.
+2. **Statement Reconciliation Settlement**:
+   - `from_amount` is updated to the authoritative card settlement amount;
+   - `account_leg_status = 'authoritative'`;
+   - `account_state` receives the exact delta (`authoritative_amount - estimated_amount`);
+   - `posted_on` is recorded;
+   - `reporting_amount` and `reporting_fx_rate` are frozen;
+   - `audit_events` records the transition with before/after state.
+
+> **CRITICAL INVARIANT**: Estimation applies ONLY to foreign credit-card expense settlement legs. Cross-currency internal transfers (`transfer`) strictly require both real settlement amounts (`from_amount` and `to_amount`) and MUST NEVER invent a transfer leg using reference FX.
 
 ### Historical FX freeze
 
@@ -952,6 +991,8 @@ Rounding rule:
 | `matched_count` | INTEGER | NOT NULL default 0 |
 | `created_count` | INTEGER | NOT NULL default 0 |
 | `pending_count` | INTEGER | NOT NULL default 0 |
+| `parser_version` | TEXT | nullable; Statement batches only |
+| `engine_version` | TEXT | NOT NULL default '1' |
 | `source_request_id` | UUID | FK -> ingestion_requests, nullable |
 | `created_by_user_id` | UUID | FK -> users, nullable |
 | `row_version` | BIGINT | NOT NULL default 0 |
@@ -1215,7 +1256,11 @@ Add a trigger rejecting UPDATE/DELETE.
 
 ### Transactions
 
-Use:
+Soft delete and void are the **identical financial lifecycle operation** in Product v1:
+
+- `status = 'committed'` $\iff$ `deleted_at IS NULL` AND `delete_reason IS NULL`
+- `status = 'voided'` $\iff$ `deleted_at IS NOT NULL` AND `delete_reason IS NOT NULL`
+- `deleted_by_user_id` is nullable (set for user actions; null for automated system compensations)
 
 ```text
 deleted_at
@@ -1223,9 +1268,9 @@ deleted_by_user_id
 delete_reason
 ```
 
-Soft delete must atomically reverse the transaction's `account_state` projection and append an audit event.
+Voiding must atomically reverse the transaction's `account_state` projection exactly once and append an immutable `audit_events` row.
 
-Statement-confirmed transactions require confirmation before modification/deletion.
+Statement-confirmed transactions require explicit two-step correction/void workflows.
 
 ### Accounts
 
@@ -1452,6 +1497,52 @@ else:
     create confirmed investment P&L
     set investment account_state to authoritative valuation
     audit
+
+COMMIT
+```
+
+## 13.8 Statement-confirmed transaction correction boundary
+
+```text
+BEGIN
+
+lock transaction row FOR UPDATE
+verify row_version matches caller token
+lock affected account_state rows in sorted order
+
+compute projection deltas (before vs after amounts, accounts, dates)
+apply delta updates to account_state
+update transaction fields (amount, category, merchant, remarks, row_version + 1)
+
+write audit_events (action = 'update', before_state, after_state)
+
+COMMIT
+```
+
+Correction never mutates immutable Statement evidence (`statement_lines`).
+
+## 13.9 Foreign-currency credit card settlement delta reconciliation boundary
+
+```text
+BEGIN
+
+lock target transaction FOR UPDATE
+verify account_leg_status == 'estimated'
+lock credit-card account_state FOR UPDATE
+
+calculate balance delta = authoritative_settlement_amount - estimated_settlement_amount
+apply delta to account_state.ledger_balance (e.g. debt increased or decreased)
+
+update transaction:
+  from_amount = authoritative_settlement_amount
+  account_leg_status = 'authoritative'
+  posted_on = statement_line.post_date
+  reporting_amount = locked historical reporting value
+  reporting_fx_locked_at = now()
+  statement_batch_id = batch.id
+  verification_status = 'statement_confirmed'
+
+write audit_events (action = 'reconcile', before: estimated, after: authoritative)
 
 COMMIT
 ```

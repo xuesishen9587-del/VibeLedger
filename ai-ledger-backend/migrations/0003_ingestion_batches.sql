@@ -1,0 +1,75 @@
+-- VibeLedger Migration: 0003_ingestion_batches
+-- Authority: docs/architecture/PHYSICAL_SCHEMA.md
+
+CREATE TABLE ingestion_requests (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    device_id UUID NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+    idempotency_key TEXT NOT NULL,
+    request_kind TEXT NOT NULL,
+    request_hash BYTEA NOT NULL,
+    status TEXT NOT NULL DEFAULT 'received',
+    captured_at TIMESTAMPTZ,
+    client_version TEXT,
+    draft_payload JSONB,
+    response_payload JSONB,
+    failure_code TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    committed_at TIMESTAMPTZ,
+    CONSTRAINT uq_device_idempotency UNIQUE (device_id, idempotency_key),
+    CONSTRAINT chk_ingestion_idempotency_key_len CHECK (length(idempotency_key) BETWEEN 8 AND 200),
+    CONSTRAINT chk_ingestion_kind CHECK (request_kind IN ('expense', 'transfer', 'snapshot')),
+    CONSTRAINT chk_ingestion_status CHECK (status IN (
+        'received',
+        'processing',
+        'needs_confirmation',
+        'committed',
+        'rejected',
+        'failed'
+    ))
+);
+
+CREATE TABLE reconciliation_batches (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    household_id UUID NOT NULL REFERENCES households(id) ON DELETE CASCADE,
+    account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    batch_type TEXT NOT NULL,
+    period_start DATE,
+    period_end DATE,
+    status TEXT NOT NULL DEFAULT 'processing',
+    currency CHAR(3) NOT NULL,
+    authoritative_balance NUMERIC(20,6),
+    statement_balance NUMERIC(20,6),
+    current_outstanding NUMERIC(20,6),
+    unbilled_balance NUMERIC(20,6),
+    residual_amount NUMERIC(20,6),
+    adjustment_amount NUMERIC(20,6),
+    matched_count INTEGER NOT NULL DEFAULT 0,
+    created_count INTEGER NOT NULL DEFAULT 0,
+    pending_count INTEGER NOT NULL DEFAULT 0,
+    parser_version TEXT,
+    engine_version TEXT NOT NULL DEFAULT '1',
+    source_request_id UUID REFERENCES ingestion_requests(id) ON DELETE SET NULL,
+    created_by_user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+    row_version BIGINT NOT NULL DEFAULT 0,
+    failure_code TEXT,
+    failure_detail TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    committed_at TIMESTAMPTZ,
+    CONSTRAINT chk_reconciliation_type CHECK (batch_type IN ('statement', 'snapshot', 'manual')),
+    CONSTRAINT chk_reconciliation_status CHECK (status IN ('processing', 'ready', 'needs_review', 'committed', 'rejected', 'failed')),
+    CONSTRAINT chk_reconciliation_currency CHECK (currency ~ '^[A-Z]{3}$'),
+    CONSTRAINT chk_reconciliation_stmt_balance CHECK (statement_balance IS NULL OR statement_balance >= 0),
+    CONSTRAINT chk_reconciliation_cc_outstanding CHECK (current_outstanding IS NULL OR current_outstanding >= 0),
+    CONSTRAINT chk_reconciliation_unbilled_balance CHECK (unbilled_balance IS NULL OR unbilled_balance >= 0),
+    CONSTRAINT chk_reconciliation_matched_count CHECK (matched_count >= 0),
+    CONSTRAINT chk_reconciliation_created_count CHECK (created_count >= 0),
+    CONSTRAINT chk_reconciliation_pending_count CHECK (pending_count >= 0),
+    CONSTRAINT chk_reconciliation_period CHECK (period_start IS NULL OR period_end IS NULL OR period_end >= period_start),
+    CONSTRAINT chk_reconciliation_committed_at CHECK (
+        (status = 'committed' AND committed_at IS NOT NULL)
+        OR
+        (status <> 'committed' AND committed_at IS NULL)
+    )
+);

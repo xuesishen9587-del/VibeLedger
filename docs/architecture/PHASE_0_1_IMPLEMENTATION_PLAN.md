@@ -12,7 +12,20 @@ Phase 2 financial business logic (expense mutation, cash income mutation, transf
 > **Database Isolation Policy**:
 > Target migrations and tests will run strictly inside explicit, isolated PostgreSQL schemas via `search_path` (e.g. `DB_SCHEMA=vibeledger_target` for dev and `vibeledger_test_<uuid>` for tests). No legacy production tables in `public` will be modified, altered, renamed, or migrated.
 > 
-> **Safety Guard**: Any attempt to run tests or migrations when `ENVIRONMENT=production`, or when `DB_SCHEMA` is empty or resolves to `public`, will be immediately aborted.
+> **Explicit Schema Scoping (No Public Fallback)**:
+> Database connection scoping executes strictly inside `DB_SCHEMA` using `SET search_path = {schema}`. The legacy `public` fallback is **strictly forbidden** in target query paths to prevent target SQL from accidentally falling back to legacy tables in the `public` schema.
+> 
+> **Safety Guard**: Any attempt to run tests or migrations when `ENVIRONMENT=production`, or when `DB_SCHEMA` is empty, resolves to `public`, or is unspecified, will be immediately aborted.
+
+---
+
+## Implementation Rules & Authority
+
+> [!IMPORTANT]
+> **Schema Authority Rule**:
+> The migration descriptions in this document are high-level summaries only. **`docs/architecture/PHYSICAL_SCHEMA.md` is the absolute authority** for all table specifications: columns, types (`NUMERIC(20,6)` / `NUMERIC(24,12)`), NULLability, defaults, CHECK constraints, FK constraints, UNIQUE constraints, and index details.
+> 
+> Before declaring Phase 1 complete, a comprehensive **table-by-table schema parity check** must be performed against `PHYSICAL_SCHEMA.md` to ensure absolute correctness.
 
 ---
 
@@ -22,11 +35,11 @@ Phase 2 financial business logic (expense mutation, cash income mutation, transf
 ai-ledger-backend/
 ├── app/
 │   ├── __init__.py
-│   ├── config.py                 # Target configuration layer & safety guards
-│   ├── db.py                     # Connection & transaction context management with schema search_path
+│   ├── config.py                 # Target configuration layer (Pydantic v2 Settings) & safety guards
+│   ├── db.py                     # Connection & transaction context management with schema search_path & Identifier quoting
 │   ├── domain/
 │   │   ├── __init__.py
-│   │   └── money.py              # Decimal parsing, currency validation, quantization, FX validation
+│   │   └── money.py              # Decimal parsing, currency validation, quantization, FX rate validation
 │   └── repositories/
 │       ├── __init__.py
 │       ├── accounts.py           # Household, User, Device, Account, AccountState, Aliases, Categories
@@ -34,19 +47,19 @@ ai-ledger-backend/
 │       └── audit.py              # Append-only AuditEvents persistence
 ├── migrations/
 │   ├── __init__.py
-│   ├── runner.py                 # Explicit deterministic SQL migration runner
-│   ├── 0001_extensions.sql       # pgcrypto, pg_trgm, citext
-│   ├── 0002_identity_accounts.sql# households, users, household_members, devices, accounts, account_state, aliases, categories
-│   ├── 0003_ingestion_batches.sql# ingestion_requests, reconciliation_batches
-│   ├── 0004_transactions.sql     # transactions, transaction_links
-│   ├── 0005_snapshots_invest.sql # account_snapshots, credit_card_snapshots, investment_pnl_periods
-│   ├── 0006_statement_candidates.sql # statement_lines, reconciliation_candidates
-│   ├── 0007_installments.sql     # installment_plans, installment_periods
+│   ├── runner.py                 # Explicit deterministic SQL migration runner (validates safety)
+│   ├── 0001_extensions.sql       # Database-level extension bootstrap logic (non-destructive)
+│   ├── 0002_identity_accounts.sql# households, users, household_members, devices, accounts, account_state, aliases, categories (inline FKs)
+│   ├── 0003_ingestion_batches.sql# ingestion_requests, reconciliation_batches (inline FKs)
+│   ├── 0004_transactions.sql     # transactions, transaction_links (inline FKs)
+│   ├── 0005_snapshots_invest.sql # account_snapshots, credit_card_snapshots, investment_pnl_periods (inline FKs)
+│   ├── 0006_statement_candidates.sql # statement_lines, reconciliation_candidates (inline FKs)
+│   ├── 0007_installments.sql     # installment_plans, installment_periods (inline FKs)
 │   ├── 0008_audit_events.sql     # audit_events & immutable update/delete trigger
-│   └── 0009_deferred_fks_indexes.sql # cross-table foreign keys, trigram GIN indexes, partial indexes
+│   └── 0009_indexes.sql          # trigram GIN indexes, partial indexes, and performance indexes only
 ├── tests/
 │   ├── __init__.py
-│   ├── test_safety.py            # Phase 0 safety guard tests (production reject, public schema reject)
+│   ├── test_safety.py            # Phase 0 safety guard tests (production reject, public schema reject, public fallback reject)
 │   ├── test_money.py             # Phase 1 domain money unit tests (exact Decimal arithmetic, currencies, quantization)
 │   ├── test_migrations.py        # Schema migration determinism & isolated schema execution tests
 │   └── test_schema.py            # PostgreSQL schema constraints, NOT NULLs, triggers, row locks, transaction rollback
@@ -59,27 +72,31 @@ ai-ledger-backend/
 
 ### 1. Phase 0: Configuration & Safety Foundation
 
-#### [NEW] [config.py](file:///Users/shenxs/Desktop/Vibe%20Coding/Finance%20Ledger/ai-ledger-backend/app/config.py)
-- Defines typed `Settings` using Pydantic / python-dotenv:
-  - `ENVIRONMENT`: `development` | `test` | `production`
-  - `DATABASE_URL`: PostgreSQL connection string
-  - `DB_SCHEMA`: Target PostgreSQL schema (defaults to `vibeledger_target` in development, required)
-  - `GEMINI_API_KEY`: Placeholder/config (NOT used in Phase 0/1)
+#### [MODIFY] [requirements.txt](file:///c:/Users/Illidan/OneDrive/Vibe%20Coding/Vibe%20Ledger/ai-ledger-backend/requirements.txt)
+- Adds `pydantic-settings>=2.2.0` to backend dependencies.
+
+#### [NEW] [config.py](file:///c:/Users/Illidan/OneDrive/Vibe%20Coding/Vibe%20Ledger/ai-ledger-backend/app/config.py)
+- Defines explicit Settings using Pydantic v2 `BaseSettings` (from `pydantic_settings`):
+  - `ENVIRONMENT`: `development` | `test` | `production` (strictly validated, no implicit default)
+  - `DATABASE_URL`: PostgreSQL connection string (strictly validated)
+  - `DB_SCHEMA`: Target PostgreSQL schema (required for migrations and tests; must NOT be default or public)
+  - `GEMINI_API_KEY`: Placeholder/config (optional, not used in Phase 0/1)
 - Implements safety verification functions:
   - `validate_safety()`: Refuses execution if `ENVIRONMENT == "production"` during tests/migrations.
   - `validate_schema()`: Refuses execution if `DB_SCHEMA` is empty, whitespace, or `"public"`.
   - `is_safe_for_testing()`: Refuses destructive test operations if `ENVIRONMENT != "test"`.
 
-#### [NEW] [.env.example](file:///Users/shenxs/Desktop/Vibe%20Coding/Finance%20Ledger/.env.example) & [ai-ledger-backend/.env.example](file:///Users/shenxs/Desktop/Vibe%20Coding/Finance%20Ledger/ai-ledger-backend/.env.example)
+#### [NEW] [.env.example](file:///c:/Users/Illidan/OneDrive/Vibe%20Coding/Vibe%20Ledger/.env.example) & [ai-ledger-backend/.env.example](file:///c:/Users/Illidan/OneDrive/Vibe%20Coding/Vibe%20Ledger/ai-ledger-backend/.env.example)
 - Canonical example variables with safe placeholders only (no real credentials).
 
 ---
 
 ### 2. Database Connection & Transaction Layer
 
-#### [NEW] [db.py](file:///Users/shenxs/Desktop/Vibe%20Coding/Finance%20Ledger/ai-ledger-backend/app/db.py)
+#### [NEW] [db.py](file:///c:/Users/Illidan/OneDrive/Vibe%20Coding/Vibe%20Ledger/ai-ledger-backend/app/db.py)
 - Connection provider using `psycopg2`.
-- Schema scoping: every connection executes `SET search_path = {schema}, public` or `SET search_path = {schema}` upon acquisition to ensure complete isolation.
+- Schema scoping: every connection executes `SET search_path = {schema}` upon acquisition (strictly omitting `, public` fallback to prevent target code from querying legacy public tables).
+- Safe Identifier Quoting: schema names are safely parameterized using `psycopg2.sql.Identifier(schema)` to prevent SQL injection during dynamic DDL search path statements.
 - Context managers:
   - `get_connection(schema=None)`: yields connection scoped to target schema.
   - `transaction(conn=None, schema=None)`: context manager managing `BEGIN`, `COMMIT`, and `ROLLBACK` cleanly without hidden auto-commits.
@@ -89,7 +106,7 @@ ai-ledger-backend/
 
 ### 3. Domain Money Primitives
 
-#### [NEW] [domain/money.py](file:///Users/shenxs/Desktop/Vibe%20Coding/Finance%20Ledger/ai-ledger-backend/app/domain/money.py)
+#### [NEW] [domain/money.py](file:///c:/Users/Illidan/OneDrive/Vibe%20Coding/Vibe%20Ledger/ai-ledger-backend/app/domain/money.py)
 - `parse_decimal(value)`: safely converts string/int/Decimal to `Decimal`, strictly rejecting float types to prevent precision loss.
 - `quantize_money(amount: Decimal, currency: str) -> Decimal`: quantizes to currency minor units (e.g. JPY $\to$ `1`, CNY/USD/EUR/SGD $\to$ `0.01`).
 - `validate_currency_code(code: str) -> str`: validates regex `^[A-Z]{3}$` and uppercase normalization.
@@ -100,83 +117,84 @@ ai-ledger-backend/
 
 ### 4. Physical Database Migrations
 
-Explicit versioned SQL migrations based on `PHYSICAL_SCHEMA.md`:
+Explicit versioned SQL migrations based on `PHYSICAL_SCHEMA.md`. All foreign keys are created inline in the migrations where both referenced tables exist:
 
 #### [NEW] `migrations/0001_extensions.sql`
-- `CREATE EXTENSION IF NOT EXISTS pgcrypto;`
-- `CREATE EXTENSION IF NOT EXISTS pg_trgm;`
-- `CREATE EXTENSION IF NOT EXISTS citext;`
+- Treated as database-level bootstrap prerequisites.
+- Safely detects and creates extensions if needed and permissions allow:
+  `CREATE EXTENSION IF NOT EXISTS pgcrypto;`
+  `CREATE EXTENSION IF NOT EXISTS pg_trgm;`
+  `CREATE EXTENSION IF NOT EXISTS citext;`
+- These are never dropped or recreated during `vibeledger_test_<uuid>` cleanup.
+- If unavailable and the current DB user cannot install them, execution aborts with a clear error.
 
 #### [NEW] `migrations/0002_identity_accounts.sql`
-- `households` (UUID PK, reporting_currency CHAR(3), ledger_start_date DATE, status CHECK active/archived)
-- `users` (UUID PK, auth_subject TEXT UNIQUE, email CITEXT UNIQUE, display_name TEXT, default_currency CHAR(3), status CHECK active/disabled)
-- `household_members` (PK household_id + user_id, role CHECK owner/member)
-- `devices` (UUID PK, user_id FK, device_name, platform, token_hash BYTEA UNIQUE, status CHECK active/revoked, revoked_at consistency CHECK)
-- `accounts` (UUID PK, household_id FK, name, institution, account_type CHECK cash/savings/credit/investment, currency CHAR(3), owner_user_id FK, linked_cash_account_id FK, billing_day/due_day credit checks, status CHECK active/inactive, uq_accounts_active_name)
-- `account_state` (PK account_id FK -> accounts, ledger_balance NUMERIC(20,6) default 0, initialized_at TIMESTAMPTZ nullable, row_version BIGINT default 0)
-- `account_aliases` (UUID PK, account_id FK, alias_text, normalized_alias, status, uq_account_alias)
-- `categories` (UUID PK, household_id FK, name, category_type CHECK expense/income, status, uq_categories_active)
+- `households` (UUID PK, reporting_currency, ledger_start_date, status)
+- `users` (UUID PK, auth_subject UNIQUE, email CITEXT UNIQUE, display_name, default_currency, status)
+- `household_members` (PK household_id + user_id, role)
+- `devices` (UUID PK, user_id FK -> users, device_name, platform, token_hash UNIQUE, status, revoked_at)
+- `accounts` (UUID PK, household_id FK -> households, name, institution, account_type, currency, owner_user_id FK -> users, linked_cash_account_id FK -> accounts, billing_day/due_day, status)
+- `account_state` (PK account_id FK -> accounts, ledger_balance NUMERIC(20,6), initialized_at, row_version)
+- `account_aliases` (UUID PK, account_id FK -> accounts, alias_text, normalized_alias, status)
+- `categories` (UUID PK, household_id FK -> households, name, category_type, status)
 
 #### [NEW] `migrations/0003_ingestion_batches.sql`
-- `ingestion_requests` (UUID PK, device_id FK, idempotency_key TEXT, request_kind CHECK expense/transfer/snapshot, request_hash BYTEA, status CHECK received/processing/needs_confirmation/committed/rejected/failed, UNIQUE(device_id, idempotency_key))
-- `reconciliation_batches` (UUID PK, household_id FK, account_id FK, batch_type CHECK statement/snapshot/manual, status CHECK processing/ready/needs_review/committed/rejected/failed, currency CHAR(3), engine_version NOT NULL default '1', counts >= 0, committed_at check)
+- `ingestion_requests` (UUID PK, device_id FK -> devices, idempotency_key, request_kind, request_hash, status)
+- `reconciliation_batches` (UUID PK, household_id FK -> households, account_id FK -> accounts, batch_type, status, currency, engine_version, counts, committed_at)
 
 #### [NEW] `migrations/0004_transactions.sql`
-- `transactions` (UUID PK, household_id FK, transaction_type CHECK expense/cash_income/refund/transfer/fee/reconciliation_adjustment/opening_balance, occurred_on DATE, occurred_at TIMESTAMPTZ, posted_on DATE, from_account_id FK, to_account_id FK, original_amount > 0 NUMERIC(20,6), original_currency CHAR(3), from_amount, from_currency, to_amount, to_currency, effective_fx_rate NUMERIC(24,12), account_leg_status CHECK estimated/authoritative, reporting_amount, reporting_currency, reporting_fx_rate, category_id FK, merchant, merchant_normalized, remarks, source CHECK shortcut/statement/dashboard_manual/reconciliation/installment/system, status CHECK committed/voided, verification_status CHECK unverified/user_confirmed/statement_confirmed/manual_confirmed/system_confirmed, confidence BETWEEN 0 AND 1, source_request_id FK, statement_batch_id FK, lifecycle CHECK status=committed <=> deleted_at IS NULL AND delete_reason IS NULL, status=voided <=> deleted_at IS NOT NULL AND delete_reason IS NOT NULL)
-- `transaction_links` (UUID PK, source_transaction_id FK, target_transaction_id FK, relation_type CHECK refund_of/reversal_of/installment_of, source <> target, uq_transaction_link_source_relation)
+- `transactions` (UUID PK, household_id FK -> households, transaction_type, occurred_on, occurred_at, posted_on, from_account_id FK -> accounts, to_account_id FK -> accounts, original_amount, original_currency, from_amount, from_currency, to_amount, to_currency, effective_fx_rate, account_leg_status, reporting_amount, reporting_currency, reporting_fx_rate, category_id FK -> categories, merchant, merchant_normalized, remarks, source, status, verification_status, confidence, source_request_id FK -> ingestion_requests, statement_batch_id FK -> reconciliation_batches)
+- `transaction_links` (UUID PK, source_transaction_id FK -> transactions, target_transaction_id FK -> transactions, relation_type)
 
 #### [NEW] `migrations/0005_snapshots_invest.sql`
-- `account_snapshots` (UUID PK, household_id FK, account_id FK, as_of TIMESTAMPTZ, balance NUMERIC(20,6), currency CHAR(3), snapshot_type CHECK balance/investment_valuation, source CHECK shortcut/statement/dashboard_manual, reconciliation_batch_id FK, uq_snapshot_per_batch)
-- `credit_card_snapshots` (UUID PK, household_id FK, account_id FK, as_of TIMESTAMPTZ, statement_period_start/end, statement_balance, remaining_statement_due, unbilled_balance, current_outstanding, currency CHAR(3), source CHECK statement/dashboard_manual/system_derived, uq_credit_snapshot_per_batch)
-- `investment_pnl_periods` (UUID PK, household_id FK, account_id FK, opening_snapshot_id FK, closing_snapshot_id FK, period_start, period_end, contributions_amount >= 0, withdrawals_amount >= 0, pnl_amount signed, currency CHAR(3), status CHECK provisional/confirmed, calculation_version, UNIQUE(account_id, closing_snapshot_id))
+- `account_snapshots` (UUID PK, household_id FK -> households, account_id FK -> accounts, as_of, balance, currency, snapshot_type, source, reconciliation_batch_id FK -> reconciliation_batches)
+- `credit_card_snapshots` (UUID PK, household_id FK -> households, account_id FK -> accounts, as_of, statement_period_start/end, statement_balance, remaining_statement_due, unbilled_balance, current_outstanding, currency, source)
+- `investment_pnl_periods` (UUID PK, household_id FK -> households, account_id FK -> accounts, opening_snapshot_id FK -> account_snapshots, closing_snapshot_id FK -> account_snapshots, period_start, period_end, contributions_amount, withdrawals_amount, pnl_amount, currency, status, calculation_version)
 
 #### [NEW] `migrations/0006_statement_candidates.sql`
-- `statement_lines` (UUID PK, batch_id FK, source_page_no, source_row_no, transaction_on DATE, posted_on DATE, description_raw, description_normalized, amount > 0 NUMERIC(20,6), currency CHAR(3), direction CHECK debit/credit/unknown, line_type CHECK expense/income/transfer/refund/fee/unknown, match_status CHECK unmatched/matched/new_candidate/ambiguous/ignored, matched_transaction_id FK, confidence BETWEEN 0 AND 1, line_fingerprint BYTEA non-unique)
-- `reconciliation_candidates` (UUID PK, batch_id FK, statement_line_id FK, candidate_type CHECK match/create_transaction/create_transfer/refund/adjustment/snapshot/investment_pnl/recognize_installment, status CHECK proposed/needs_review/accepted/rejected/applied, target_transaction_id FK, payload JSONB NOT NULL, confidence BETWEEN 0 AND 1, reason_code, reason_detail, resolved_by_user_id FK, resolved_at, applied_transaction_id FK)
+- `statement_lines` (UUID PK, batch_id FK -> reconciliation_batches, source_page_no, source_row_no, transaction_on, posted_on, description_raw, description_normalized, amount, currency, direction, line_type, match_status, matched_transaction_id FK -> transactions, confidence, line_fingerprint)
+- `reconciliation_candidates` (UUID PK, batch_id FK -> reconciliation_batches, statement_line_id FK -> statement_lines, candidate_type, status, target_transaction_id FK -> transactions, payload, confidence, reason_code, reason_detail, resolved_by_user_id FK -> users, resolved_at, applied_transaction_id FK -> transactions)
 
 #### [NEW] `migrations/0007_installments.sql`
-- `installment_plans` (UUID PK, household_id FK, credit_account_id FK, purchase_occurred_on DATE, merchant, original_amount > 0, original_currency CHAR(3), account_principal_amount > 0, account_currency CHAR(3), total_periods BETWEEN 2 AND 120, first_statement_month DATE, status CHECK pending_first_bill/active/completed/cancelled)
-- `installment_periods` (UUID PK, plan_id FK, period_no > 0, recognition_month DATE, scheduled_amount > 0 NUMERIC(20,6), currency CHAR(3), status CHECK scheduled/billed/cancelled, statement_line_id FK, expense_transaction_id FK, UNIQUE(plan_id, period_no), status=billed <=> expense_transaction_id IS NOT NULL)
+- `installment_plans` (UUID PK, household_id FK -> households, credit_account_id FK -> accounts, purchase_occurred_on, merchant, original_amount, original_currency, account_principal_amount, account_currency, total_periods, first_statement_month, status)
+- `installment_periods` (UUID PK, plan_id FK -> installment_plans, period_no, scheduled_amount, currency, status, statement_line_id FK -> statement_lines, expense_transaction_id FK -> transactions)
 
 #### [NEW] `migrations/0008_audit_events.sql`
-- `audit_events` (id BIGINT GENERATED ALWAYS AS IDENTITY PK, household_id FK, actor_type CHECK user/device/system, actor_user_id FK, actor_device_id FK, request_id FK, reconciliation_batch_id FK, entity_type TEXT NOT NULL, entity_id UUID NOT NULL, action CHECK create/update/soft_delete/restore/confirm/reject/commit/reconcile/void, before_data JSONB, after_data JSONB, metadata JSONB, created_at TIMESTAMPTZ NOT NULL default now())
-- Immutability trigger: `BEFORE UPDATE OR DELETE ON audit_events` raising an exception (`audit_events is append-only: updates and deletes are forbidden`).
+- `audit_events` (id BIGINT GENERATED ALWAYS AS IDENTITY PK, household_id FK -> households, actor_type, actor_user_id FK -> users, actor_device_id FK -> devices, request_id FK -> ingestion_requests, reconciliation_batch_id FK -> reconciliation_batches, entity_type, entity_id, action, before_data, after_data, metadata, created_at)
+- Immutability trigger: `BEFORE UPDATE OR DELETE ON audit_events` raising an exception to enforce append-only audit trail.
 
-#### [NEW] `migrations/0009_deferred_fks_indexes.sql`
-- Cross-table foreign keys and indexes:
-  - Indexes on `accounts (household_id, account_type, status)`, `transactions (from_account_id, occurred_on DESC)`, `transactions (to_account_id, occurred_on DESC)`, `transactions (household_id, occurred_on DESC)`, `transactions (household_id, transaction_type, occurred_on DESC)`.
-  - GIN trigram indexes on `transactions.merchant_normalized`, `statement_lines.description_normalized`, `account_aliases.normalized_alias`.
-  - Foreign key linking `installment_periods.expense_transaction_id -> transactions(id)`.
-  - Foreign key linking `statement_lines.matched_transaction_id -> transactions(id)`.
-  - Foreign key linking `reconciliation_candidates.target_transaction_id -> transactions(id)`.
-  - Foreign key linking `reconciliation_candidates.applied_transaction_id -> transactions(id)`.
+#### [NEW] `migrations/0009_indexes.sql`
+- Index structures only (no duplicate or deferred FKs):
+  - Performance indexes on `accounts`, `transactions`, `audit_events`.
+  - GIN trigram indexes on normalized text fields (`transactions.merchant_normalized`, `statement_lines.description_normalized`, `account_aliases.normalized_alias`).
+  - Partial indexes for active records constraints.
 
 #### [NEW] `migrations/runner.py`
 - Deterministic migration engine that tracks applied migrations in `schema_migrations` table inside the configured `DB_SCHEMA`.
-- Validates safety constraints before executing.
+- Validates safety constraints and requires explicit schema configuration.
 - Executes migrations sequentially in a single transaction per migration file.
 
 ---
 
 ### 5. Repository Layer (Phase 1 Persistence Primitives)
 
-#### [NEW] [repositories/accounts.py](file:///Users/shenxs/Desktop/Vibe%20Coding/Finance%20Ledger/ai-ledger-backend/app/repositories/accounts.py)
+#### [NEW] [repositories/accounts.py](file:///c:/Users/Illidan/OneDrive/Vibe%20Coding/Vibe%20Ledger/ai-ledger-backend/app/repositories/accounts.py)
 - Household: `create_household()`, `get_household()`
 - User: `create_user()`, `get_user()`
 - Membership: `add_household_member()`, `get_household_members()`
 - Device: `create_device()`, `get_device()`, `get_device_by_token_hash()`
 - Account & State:
-  - `create_account()`: atomically creates `accounts` row and its associated `account_state` row (`ledger_balance = Decimal('0.000000')`, `initialized_at = None`).
+  - `create_account()`: atomically creates `accounts` row and its associated `account_state` row.
   - `get_account()`, `get_account_state()`, `list_accounts()`
-  - `lock_account_state(conn, account_id)`: executes `SELECT * FROM account_state WHERE account_id = %s FOR UPDATE`.
+  - `lock_account_state(conn, account_id)`: executes `SELECT * FROM account_state WHERE account_id = %s FOR UPDATE` under the schema search path.
 - Aliases & Categories:
   - `create_account_alias()`, `list_account_aliases()`
   - `create_category()`, `list_categories()`
 
-#### [NEW] [repositories/ingestion.py](file:///Users/shenxs/Desktop/Vibe%20Coding/Finance%20Ledger/ai-ledger-backend/app/repositories/ingestion.py)
+#### [NEW] [repositories/ingestion.py](file:///c:/Users/Illidan/OneDrive/Vibe%20Coding/Vibe%20Ledger/ai-ledger-backend/app/repositories/ingestion.py)
 - `create_ingestion_request()`, `get_ingestion_request()`, `get_by_device_and_key()`, `update_ingestion_request_status()`
 
-#### [NEW] [repositories/audit.py](file:///Users/shenxs/Desktop/Vibe%20Coding/Finance%20Ledger/ai-ledger-backend/app/repositories/audit.py)
+#### [NEW] [repositories/audit.py](file:///c:/Users/Illidan/OneDrive/Vibe%20Coding/Vibe%20Ledger/ai-ledger-backend/app/repositories/audit.py)
 - `insert_audit_event()`, `list_audit_events_for_entity()`
 
 ---
@@ -189,6 +207,7 @@ Explicit versioned SQL migrations based on `PHYSICAL_SCHEMA.md`:
    - `ENVIRONMENT=production` causes immediate abort.
    - Empty or `public` `DB_SCHEMA` causes immediate abort.
    - Destructive operations outside `ENVIRONMENT=test` are rejected.
+   - Database connections run without legacy `public` fallback in `search_path`.
    - Tests do not silently fall back to legacy database/schema.
 
 2. **Money Domain Unit Tests (`tests/test_money.py`)**:
@@ -201,21 +220,17 @@ Explicit versioned SQL migrations based on `PHYSICAL_SCHEMA.md`:
    - Run migrations against fresh isolated schema (`vibeledger_test_<uuid>`).
    - Verify all 9 migration files apply successfully in order.
    - Re-running migrations is an idempotent no-op.
+   - Verify DB extensions (pgcrypto, pg_trgm, citext) are detected at DB level and NOT dropped/recreated during cleanup.
 
-4. **Schema & Constraint PostgreSQL Integration Tests (`tests/test_schema.py`)**:
-   - **Identity & Devices**: Duplicate `auth_subject` rejected; duplicate `token_hash` rejected; device status/revocation consistency constraint.
-   - **Accounts & Account State**: Invalid `account_type` rejected; invalid `currency` rejected; duplicate active name in household rejected; same name in different household allowed; inactive account name allows new active account.
+4. **Schema & Parity Check PostgreSQL Integration Tests (`tests/test_schema.py`)**:
+   - Performs a field-by-field parity verification against `docs/architecture/PHYSICAL_SCHEMA.md`.
+   - **Identity & Devices**: Duplicate `auth_subject` / `token_hash` rejected.
+   - **Accounts & Account State**: Invalid `account_type` or `currency` rejected; duplicate active name in household rejected.
    - **Atomicity**: Creating an account atomically creates `account_state` with `ledger_balance = 0` and `initialized_at = NULL`.
    - **Locking & Transactions**: `lock_account_state` executes `SELECT ... FOR UPDATE`; failure in multi-step operation rolls back cleanly leaving zero partial rows.
-   - **Categories**: Duplicate active category per type rejected.
-   - **Ingestion Requests**: `(device_id, idempotency_key)` uniqueness enforced; invalid status rejected.
-   - **Transactions**: Invalid `transaction_type` rejected; negative `original_amount` rejected; lifecycle constraints (`status=committed <=> deleted_at IS NULL AND delete_reason IS NULL`, `status=voided <=> deleted_at IS NOT NULL AND delete_reason IS NOT NULL`) enforced; explicit NULLs on required columns rejected.
-   - **Installments**: `status=billed <=> expense_transaction_id IS NOT NULL` enforced; periods between 2 and 120.
-   - **Reconciliation**: Batch status checks, counts >= 0, `engine_version` NOT NULL enforced.
-   - **Audit Immutability**: `INSERT` into `audit_events` succeeds; `UPDATE` raises error from trigger; `DELETE` raises error from trigger.
+   - **Audit Immutability**: `INSERT` into `audit_events` succeeds; `UPDATE` or `DELETE` raises database trigger errors.
 
 ### Execution Command
 ```bash
 ai-ledger-backend/venv_backend/bin/python -m unittest discover -s ai-ledger-backend/tests -p "test_*.py"
 ```
-*(Integration tests that require isolated PostgreSQL will run in BypassSandbox mode using a dedicated test schema `vibeledger_test_<uuid>`, clean up after themselves, and confirm that legacy `public` tables remain 100% untouched).*

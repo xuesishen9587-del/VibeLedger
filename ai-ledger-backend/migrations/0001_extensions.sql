@@ -1,7 +1,7 @@
--- VibeLedger Database Extensions Bootstrap
--- Extensions are database-level resources and are created once.
--- They must never be dropped during test schema cleanup.
+-- VibeLedger Migration: 0001_extensions
+-- Authority: docs/architecture/PHYSICAL_SCHEMA.md
+-- PostgreSQL extensions (pgcrypto, pg_trgm, citext) are database-level prerequisites
+-- verified and bootstrapped dynamically by the migration engine prior to execution.
+-- This migration step formally marks the extension prerequisites as fulfilled in migration history.
 
-CREATE EXTENSION IF NOT EXISTS pgcrypto SCHEMA public;
-CREATE EXTENSION IF NOT EXISTS pg_trgm SCHEMA public;
-CREATE EXTENSION IF NOT EXISTS citext SCHEMA public;
+SELECT 1;

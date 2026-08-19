@@ -8,8 +8,8 @@ def create_household(
     conn,
     household_id: UUID,
     name: str,
+    ledger_start_date: date,
     reporting_currency: str = 'CNY',
-    ledger_start_date: date = None,
     status: str = 'active'
 ) -> None:
     with conn.cursor() as cur:
@@ -50,8 +50,8 @@ def create_user(
     conn,
     user_id: UUID,
     auth_subject: str,
-    email: Optional[str],
     display_name: str,
+    email: Optional[str] = None,
     default_currency: str = 'CNY',
     status: str = 'active'
 ) -> None:
@@ -134,15 +134,16 @@ def create_device(
     device_name: str,
     platform: str,
     token_hash: bytes,
+    client_version: Optional[str] = None,
     status: str = 'active'
 ) -> None:
     with conn.cursor() as cur:
         cur.execute(
             """
-            INSERT INTO devices (id, user_id, device_name, platform, token_hash, status)
-            VALUES (%s, %s, %s, %s, %s, %s);
+            INSERT INTO devices (id, user_id, device_name, platform, token_hash, client_version, status)
+            VALUES (%s, %s, %s, %s, %s, %s, %s);
             """,
-            (device_id, user_id, device_name, platform, token_hash, status)
+            (device_id, user_id, device_name, platform, token_hash, client_version, status)
         )
 
 def get_device(conn, device_id: UUID) -> Optional[Dict[str, Any]]:
@@ -204,9 +205,9 @@ def create_account(
     account_id: UUID,
     household_id: UUID,
     name: str,
-    institution: Optional[str],
     account_type: str,
     currency: str,
+    institution: Optional[str] = None,
     owner_user_id: Optional[UUID] = None,
     linked_cash_account_id: Optional[UUID] = None,
     billing_day: Optional[int] = None,

@@ -20,8 +20,9 @@ class TestMigrations(unittest.TestCase):
         
     def tearDown(self):
         if config.is_safe_for_testing() and hasattr(self, "test_schema"):
+            # Enforce strict validation before dropping test schema
+            config.validate_test_schema(self.test_schema)
             settings = config.get_settings()
-            # Connect using the main target schema which is allowed
             conn = get_connection(settings.DB_SCHEMA)
             try:
                 with conn.cursor() as cur:
@@ -37,30 +38,36 @@ class TestMigrations(unittest.TestCase):
         # 1. Run migrations first time
         runner.run_migrations(self.test_schema)
         
-        # Verify schema table creation
+        # Verify schema table creation and checksum recording
         conn = get_connection(self.test_schema)
         try:
             with conn.cursor() as cur:
-                # Check if schema_migrations exists and has 9 entries
-                cur.execute("SELECT migration_name FROM schema_migrations ORDER BY migration_name;")
+                cur.execute("SELECT migration_name, checksum_sha256 FROM schema_migrations ORDER BY migration_name;")
                 rows = cur.fetchall()
-                migration_names = [row[0] for row in rows]
-                self.assertEqual(len(migration_names), 9)
-                self.assertTrue(migration_names[0].startswith("0001_"))
-                self.assertTrue(migration_names[8].startswith("0009_"))
+                self.assertEqual(len(rows), 9)
+                self.assertTrue(rows[0][0].startswith("0001_"))
+                self.assertTrue(rows[8][0].startswith("0009_"))
+                for filename, checksum in rows:
+                    self.assertEqual(len(checksum), 64) # SHA256 hex string length
                 
-                # Check that a few main tables are present
+                # Check that main tables are present
                 cur.execute("""
                     SELECT table_name 
                     FROM information_schema.tables 
                     WHERE table_schema = %s;
                 """, (self.test_schema,))
                 tables = {row[0] for row in cur.fetchall()}
-                self.assertIn("households", tables)
-                self.assertIn("users", tables)
-                self.assertIn("accounts", tables)
-                self.assertIn("transactions", tables)
-                self.assertIn("audit_events", tables)
+                expected_tables = {
+                    "households", "users", "household_members", "devices",
+                    "accounts", "account_state", "account_aliases", "categories",
+                    "ingestion_requests", "transactions", "transaction_links",
+                    "account_snapshots", "credit_card_snapshots", "investment_pnl_periods",
+                    "installment_plans", "installment_periods",
+                    "reconciliation_batches", "statement_lines", "reconciliation_candidates",
+                    "audit_events", "schema_migrations"
+                }
+                for t in expected_tables:
+                    self.assertIn(t, tables, f"Expected table '{t}' missing from schema.")
         finally:
             conn.close()
 
@@ -72,5 +79,42 @@ class TestMigrations(unittest.TestCase):
             with conn.cursor() as cur:
                 cur.execute("SELECT COUNT(*) FROM schema_migrations;")
                 self.assertEqual(cur.fetchone()[0], 9)
+        finally:
+            conn.close()
+
+    def test_migration_checksum_drift_protection(self):
+        # 1. Apply all migrations
+        runner.run_migrations(self.test_schema)
+        
+        # 2. Tamper with a recorded checksum in schema_migrations
+        conn = get_connection(self.test_schema)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE schema_migrations 
+                    SET checksum_sha256 = 'tampered_fake_checksum_000000000000000000000000000000000000000000' 
+                    WHERE migration_name = '0002_identity_accounts.sql';
+                    """
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+        # 3. Attempting to rerun migrations must detect drift and fail loudly
+        with self.assertRaises(runner.MigrationChecksumMismatch) as ctx:
+            runner.run_migrations(self.test_schema)
+        self.assertIn("Drift detected", str(ctx.exception))
+        self.assertIn("0002_identity_accounts.sql", str(ctx.exception))
+
+    def test_extension_discovery_and_non_destruction(self):
+        conn = get_connection(self.test_schema)
+        try:
+            ext_map = runner.ensure_extensions(conn)
+            self.assertIn("pgcrypto", ext_map)
+            self.assertIn("pg_trgm", ext_map)
+            self.assertIn("citext", ext_map)
+            for ext, nsp in ext_map.items():
+                self.assertTrue(bool(nsp), f"Extension {ext} has empty namespace")
         finally:
             conn.close()

@@ -3,7 +3,7 @@
 
 CREATE TABLE audit_events (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    household_id UUID NOT NULL REFERENCES households(id) ON DELETE CASCADE,
+    household_id UUID NOT NULL REFERENCES households(id) ON DELETE RESTRICT,
     actor_type TEXT NOT NULL,
     actor_user_id UUID REFERENCES users(id) ON DELETE SET NULL,
     actor_device_id UUID REFERENCES devices(id) ON DELETE SET NULL,

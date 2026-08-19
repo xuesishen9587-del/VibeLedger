@@ -3,7 +3,7 @@
 
 CREATE TABLE transactions (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    household_id UUID NOT NULL REFERENCES households(id) ON DELETE CASCADE,
+    household_id UUID NOT NULL REFERENCES households(id) ON DELETE RESTRICT,
     transaction_type TEXT NOT NULL,
     occurred_on DATE NOT NULL,
     occurred_at TIMESTAMPTZ,
@@ -85,8 +85,8 @@ CREATE TABLE transactions (
 
 CREATE TABLE transaction_links (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    source_transaction_id UUID NOT NULL REFERENCES transactions(id) ON DELETE CASCADE,
-    target_transaction_id UUID NOT NULL REFERENCES transactions(id) ON DELETE CASCADE,
+    source_transaction_id UUID NOT NULL REFERENCES transactions(id) ON DELETE RESTRICT,
+    target_transaction_id UUID NOT NULL REFERENCES transactions(id) ON DELETE RESTRICT,
     relation_type TEXT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT chk_trans_links_not_self CHECK (source_transaction_id <> target_transaction_id),

@@ -3,8 +3,8 @@
 
 CREATE TABLE installment_plans (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    household_id UUID NOT NULL REFERENCES households(id) ON DELETE CASCADE,
-    credit_account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    household_id UUID NOT NULL REFERENCES households(id) ON DELETE RESTRICT,
+    credit_account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE RESTRICT,
     purchase_occurred_on DATE NOT NULL,
     merchant TEXT,
     original_amount NUMERIC(20,6) NOT NULL,

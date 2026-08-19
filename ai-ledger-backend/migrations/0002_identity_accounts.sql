@@ -16,7 +16,7 @@ CREATE TABLE households (
 CREATE TABLE users (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     auth_subject TEXT NOT NULL UNIQUE,
-    email public.citext UNIQUE,
+    email __CITEXT_TYPE__ UNIQUE,
     display_name TEXT NOT NULL,
     default_currency CHAR(3) NOT NULL DEFAULT 'CNY',
     status TEXT NOT NULL DEFAULT 'active',
@@ -56,7 +56,7 @@ CREATE TABLE devices (
 
 CREATE TABLE accounts (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    household_id UUID NOT NULL REFERENCES households(id) ON DELETE CASCADE,
+    household_id UUID NOT NULL REFERENCES households(id) ON DELETE RESTRICT,
     name TEXT NOT NULL,
     institution TEXT,
     account_type TEXT NOT NULL,
@@ -104,7 +104,7 @@ CREATE TABLE account_aliases (
 
 CREATE TABLE categories (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    household_id UUID NOT NULL REFERENCES households(id) ON DELETE CASCADE,
+    household_id UUID NOT NULL REFERENCES households(id) ON DELETE RESTRICT,
     name TEXT NOT NULL,
     category_type TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'active',

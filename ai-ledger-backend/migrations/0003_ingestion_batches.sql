@@ -3,7 +3,7 @@
 
 CREATE TABLE ingestion_requests (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    device_id UUID NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+    device_id UUID NOT NULL REFERENCES devices(id) ON DELETE RESTRICT,
     idempotency_key TEXT NOT NULL,
     request_kind TEXT NOT NULL,
     request_hash BYTEA NOT NULL,
@@ -31,8 +31,8 @@ CREATE TABLE ingestion_requests (
 
 CREATE TABLE reconciliation_batches (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    household_id UUID NOT NULL REFERENCES households(id) ON DELETE CASCADE,
-    account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    household_id UUID NOT NULL REFERENCES households(id) ON DELETE RESTRICT,
+    account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE RESTRICT,
     batch_type TEXT NOT NULL,
     period_start DATE,
     period_end DATE,
@@ -61,15 +61,11 @@ CREATE TABLE reconciliation_batches (
     CONSTRAINT chk_reconciliation_status CHECK (status IN ('processing', 'ready', 'needs_review', 'committed', 'rejected', 'failed')),
     CONSTRAINT chk_reconciliation_currency CHECK (currency ~ '^[A-Z]{3}$'),
     CONSTRAINT chk_reconciliation_stmt_balance CHECK (statement_balance IS NULL OR statement_balance >= 0),
-    CONSTRAINT chk_reconciliation_cc_outstanding CHECK (current_outstanding IS NULL OR current_outstanding >= 0),
-    CONSTRAINT chk_reconciliation_unbilled_balance CHECK (unbilled_balance IS NULL OR unbilled_balance >= 0),
+    CONSTRAINT chk_reconciliation_outstanding CHECK (current_outstanding IS NULL OR current_outstanding >= 0),
+    CONSTRAINT chk_reconciliation_unbilled CHECK (unbilled_balance IS NULL OR unbilled_balance >= 0),
     CONSTRAINT chk_reconciliation_matched_count CHECK (matched_count >= 0),
     CONSTRAINT chk_reconciliation_created_count CHECK (created_count >= 0),
     CONSTRAINT chk_reconciliation_pending_count CHECK (pending_count >= 0),
     CONSTRAINT chk_reconciliation_period CHECK (period_start IS NULL OR period_end IS NULL OR period_end >= period_start),
-    CONSTRAINT chk_reconciliation_committed_at CHECK (
-        (status = 'committed' AND committed_at IS NOT NULL)
-        OR
-        (status <> 'committed' AND committed_at IS NULL)
-    )
+    CONSTRAINT chk_reconciliation_committed_at CHECK ((status = 'committed' AND committed_at IS NOT NULL) OR status <> 'committed')
 );

@@ -6,17 +6,20 @@ def insert_audit_event(
     conn,
     household_id: UUID,
     actor_type: str,
+    entity_type: str,
+    entity_id: UUID,
+    action: str,
     actor_user_id: Optional[UUID] = None,
     actor_device_id: Optional[UUID] = None,
     request_id: Optional[UUID] = None,
     reconciliation_batch_id: Optional[UUID] = None,
-    entity_type: str = "",
-    entity_id: UUID = None,
-    action: str = "",
     before_data: Optional[Dict[str, Any]] = None,
     after_data: Optional[Dict[str, Any]] = None,
     metadata: Optional[Dict[str, Any]] = None
 ) -> None:
+    """
+    Inserts an immutable audit event. entity_type, entity_id, and action are strictly required.
+    """
     before_json = json.dumps(before_data) if before_data is not None else None
     after_json = json.dumps(after_data) if after_data is not None else None
     meta_json = json.dumps(metadata) if metadata is not None else None

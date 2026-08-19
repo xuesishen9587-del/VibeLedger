@@ -1,7 +1,11 @@
 import os
+import re
 from typing import Literal, Optional
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+TEST_SCHEMA_REGEX = re.compile(r"^vibeledger_test_[a-zA-Z0-9_]+$")
+PROTECTED_SCHEMAS = {"public", "vibeledger_target", "extensions", "pg_catalog", "information_schema", "vault"}
 
 class Settings(BaseSettings):
     ENVIRONMENT: Literal["development", "test", "production"] = Field(
@@ -39,14 +43,9 @@ class Settings(BaseSettings):
         return val
 
 # Load active settings
-# Note: we catch validation errors and report them clearly to guide setting up env variables.
 try:
     settings = Settings()
 except Exception as e:
-    # During testing we might want to let validation fail if they check it programmatically,
-    # but we also need a way to let test suite run its safety assertions.
-    # We will instantiate a dummy settings object if env is not fully configured,
-    # but raise errors when validate_safety() is called.
     settings = None
     settings_load_error = e
 else:
@@ -89,3 +88,22 @@ def is_safe_for_testing() -> bool:
         return current_settings.ENVIRONMENT == "test"
     except Exception:
         return False
+
+def validate_test_schema(schema: str) -> None:
+    """
+    Validates that a schema is a temporary test schema eligible for destructive DROP SCHEMA.
+    Requires ENVIRONMENT == 'test' and schema matching '^vibeledger_test_[a-zA-Z0-9_]+$'.
+    Explicitly forbids dropping 'public', 'vibeledger_target', 'extensions', etc.
+    """
+    if not is_safe_for_testing():
+        raise PermissionError("Destructive test schema operations are only allowed when ENVIRONMENT='test'.")
+    
+    s = schema.strip().lower()
+    if s in PROTECTED_SCHEMAS:
+        raise PermissionError(f"Safety violation: Schema '{schema}' is protected and can NEVER be dropped by test cleanup.")
+        
+    if not TEST_SCHEMA_REGEX.match(s):
+        raise PermissionError(
+            f"Safety violation: Test schema '{schema}' does not match required pattern 'vibeledger_test_<identifier>'. "
+            "Destructive DROP SCHEMA is rejected."
+        )

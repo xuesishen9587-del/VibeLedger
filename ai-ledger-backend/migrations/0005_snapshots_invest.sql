@@ -3,8 +3,8 @@
 
 CREATE TABLE account_snapshots (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    household_id UUID NOT NULL REFERENCES households(id) ON DELETE CASCADE,
-    account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    household_id UUID NOT NULL REFERENCES households(id) ON DELETE RESTRICT,
+    account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE RESTRICT,
     as_of TIMESTAMPTZ NOT NULL,
     balance NUMERIC(20,6) NOT NULL,
     currency CHAR(3) NOT NULL,
@@ -22,8 +22,8 @@ CREATE TABLE account_snapshots (
 
 CREATE TABLE credit_card_snapshots (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    household_id UUID NOT NULL REFERENCES households(id) ON DELETE CASCADE,
-    account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    household_id UUID NOT NULL REFERENCES households(id) ON DELETE RESTRICT,
+    account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE RESTRICT,
     as_of TIMESTAMPTZ NOT NULL,
     statement_period_start DATE,
     statement_period_end DATE,
@@ -50,8 +50,8 @@ CREATE TABLE credit_card_snapshots (
 
 CREATE TABLE investment_pnl_periods (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    household_id UUID NOT NULL REFERENCES households(id) ON DELETE CASCADE,
-    account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    household_id UUID NOT NULL REFERENCES households(id) ON DELETE RESTRICT,
+    account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE RESTRICT,
     opening_snapshot_id UUID NOT NULL REFERENCES account_snapshots(id) ON DELETE RESTRICT,
     closing_snapshot_id UUID NOT NULL REFERENCES account_snapshots(id) ON DELETE RESTRICT,
     period_start TIMESTAMPTZ NOT NULL,

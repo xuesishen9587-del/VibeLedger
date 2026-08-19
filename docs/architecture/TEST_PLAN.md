@@ -1984,6 +1984,7 @@ Required:
 
 ```text
 Expense API
+minimum device authentication (Bearer token)
 idempotency
 confirmation
 request recovery
@@ -2289,6 +2290,8 @@ refund never deletes original expense
 future installment schedule never changes current balance before billing
 
 investment P&L never appears in cash income
+
+pending/provisional investment calculations never insert uncommitted rows into investment_pnl_periods before batch commit
 
 ordinary residual <=200 may auto-adjust
 

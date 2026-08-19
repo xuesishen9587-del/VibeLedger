@@ -75,7 +75,7 @@ atomic balance-update lessons
 deterministic transfer lock ordering
 cross-currency two-leg concept
 client idempotency concept
-Streamlit UI as Phase-1 Dashboard technology
+Streamlit UI as Product v1 Dashboard technology
 ```
 
 Legacy implementation details that MUST NOT define the new model:
@@ -331,24 +331,29 @@ Create/commit:
 
 ```text
 docs/architecture/
+  README.md
   PHYSICAL_SCHEMA.md
   API_CONTRACT.md
   RECONCILIATION_ENGINE.md
   IMPLEMENTATION_PLAN.md
+  TEST_PLAN.md
 ```
 
 Update:
 
 ```text
 PROJECT_CONTEXT.md
-development_doc.md
+docs/legacy/README.md
+docs/legacy/development_doc.md
+docs/legacy/remediation_summary.md
 ```
 
 Mark:
 
 ```text
 TARGET_DOMAIN_MODEL.md = target business truth
-development_doc.md     = legacy/current implementation reference
+docs/architecture/*    = target architecture contracts
+docs/legacy/*          = legacy/current implementation reference
 ```
 
 Create:
@@ -649,12 +654,20 @@ POST /api/v1/ingestion-requests/{id}/reject
 Create:
 
 ```text
+api/deps.py (minimum device-token Bearer authentication)
 services/expense_service.py
 services/gemini_service.py
 repositories/ingestion.py
 api/routes/expenses.py
 api/routes/ingestion.py
 ```
+
+Implement minimum device-token authentication required by the Expense API:
+- Validate incoming `Authorization: Bearer <device-token>`;
+- Lookup active device by token hash in `devices` table;
+- Resolve owning user and household context;
+- Update `last_seen_at`.
+(Full browser user login and admin revocation workflows are completed in Phase 11).
 
 Gemini prompt becomes **expense-only**.
 
@@ -819,7 +832,7 @@ multi-currency reporting
 
 Every number required by current Dashboard can be obtained from Backend APIs.
 
-Dashboard itself may still temporarily use legacy DB until Phase 8.
+Dashboard itself may still temporarily use legacy DB until Phase 10.
 
 ---
 
@@ -836,8 +849,7 @@ This is intentionally earlier than Statement parsing because real usage does not
 Implement:
 
 ```text
-POST /api/v1/accounts/{id}/snapshots
-POST /api/v1/investment-accounts/{id}/snapshots
+POST /api/v1/accounts/{id}/snapshots (ordinary cash / savings / credit balance snapshots)
 
 GET reconciliation batch
 GET reconciliation preview
@@ -1188,6 +1200,8 @@ Implement investment valuation without contaminating household cash income.
 Implement:
 
 ```text
+POST /api/v1/investment-accounts/{id}/snapshots
+GET  /api/v1/investment-accounts/{id}/performance
 account snapshot investment_valuation
 investment_pnl_periods
 contribution/withdrawal matching
@@ -1203,7 +1217,7 @@ closing value
 + withdrawals
 ```
 
-Investment Statement parser Phase 1 extracts only:
+Investment Statement parser Product v1 extracts only:
 
 ```text
 total asset value
@@ -1559,7 +1573,7 @@ legacy future installment calculations
 Update:
 
 ```text
-development_doc.md
+docs/legacy/development_doc.md
 ```
 
 to archive legacy implementation history.

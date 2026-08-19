@@ -30,7 +30,7 @@
 - Transfer / Snapshot 如使用 Shortcut，应为独立专用 Shortcut。
 - Statement 重复上传无需检测 PDF 是否重复，但 reconciliation 必须 replay-safe。
 
-### OUT OF SCOPE — Phase 1
+### OUT OF SCOPE — Product v1 / MVP
 
 - AA / 夫妻债权债务。
 - 投资具体持仓、成本、证券交易解析。
@@ -102,8 +102,9 @@ opening_balance
 ```text
 id
 transaction_type
-occurred_at
-posted_at              nullable
+occurred_on
+occurred_at            nullable
+posted_on              nullable
 
 from_account_id        nullable
 to_account_id          nullable
@@ -125,7 +126,7 @@ source
 status
 confidence             nullable
 
-idempotency_key        nullable
+source_request_id      nullable
 statement_batch_id     nullable
 
 created_at
@@ -138,11 +139,12 @@ deleted_at             nullable
 普通消费：
 
 ```text
-occurred_at = 实际交易日期
-posted_at   = Statement 入账日期
+occurred_on = 实际交易业务日期 (DATE, 必需, 报表归属口径)
+occurred_at = 实际交易精确时间 (TIMESTAMPTZ, 可选)
+posted_on   = Statement/银行入账日期 (DATE, 可选, 仅用于匹配与对账)
 ```
 
-报表使用 `occurred_at`。
+报表使用 `occurred_on`。
 
 分期例外：见 Installment。
 
@@ -250,7 +252,7 @@ total_asset_value
 currency
 ```
 
-第一阶段投资 Statement 只解析：
+Product v1 投资 Statement 只解析：
 
 ```text
 总资产
@@ -431,11 +433,14 @@ unknown
 `match_status`：
 
 ```text
+unmatched
 matched
 new_candidate
 ambiguous
 ignored
 ```
+
+> 注：`line_type` 的 `income` 仅存在于 Statement 流水解析层；入账生成正式 Transaction 时统一转换为 `cash_income`。
 
 ---
 
@@ -461,6 +466,8 @@ create_transfer
 refund
 adjustment
 snapshot
+investment_pnl
+recognize_installment
 ```
 
 Statement 必须：
@@ -638,7 +645,7 @@ current_outstanding
 
 最后一期承担 rounding remainder。
 
-Phase 1 不支持提前还清。
+Product v1 不支持提前还清。
 
 ---
 
@@ -1032,14 +1039,11 @@ historical audit trail
 
 ## Next Step
 
-下一阶段直接进行：
+目标架构设计文档已全部制定并冻结于 `docs/architecture/`：
+1. [`PHYSICAL_SCHEMA.md`](./docs/architecture/PHYSICAL_SCHEMA.md) — 目标 PostgreSQL 持久化规范
+2. [`API_CONTRACT.md`](./docs/architecture/API_CONTRACT.md) — 目标 REST API 契约
+3. [`RECONCILIATION_ENGINE.md`](./docs/architecture/RECONCILIATION_ENGINE.md) — 对账与匹配引擎规范
+4. [`IMPLEMENTATION_PLAN.md`](./docs/architecture/IMPLEMENTATION_PLAN.md) — 实施路径与分阶段计划
+5. [`TEST_PLAN.md`](./docs/architecture/TEST_PLAN.md) — 验证与测试规范
 
-```text
-1. Physical Database Schema
-2. API Contract
-3. Reconciliation Matching Engine Design
-4. Implementation Phases
-5. Tests
-```
-
-在以上设计完成前，不开始大规模重构。
+后续开发请严格按照 [`IMPLEMENTATION_PLAN.md`](./docs/architecture/IMPLEMENTATION_PLAN.md) 从 **Implementation Phase 0** 及 **Implementation Phase 1** 开始分阶段推进。

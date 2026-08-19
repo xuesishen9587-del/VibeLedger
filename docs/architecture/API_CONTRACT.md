@@ -8,7 +8,7 @@
 > 2. `docs/architecture/PHYSICAL_SCHEMA.md` — persistence contract  
 > 3. This document — public application/API contract
 >
-> Scope: Phase 1 target API. Legacy `/api/record` is not the target interface.
+> Scope: Product v1 target API. Legacy `/api/record` is not the target interface.
 >
 > Core rule: **Backend is the only business-rule layer. Dashboard and iOS Shortcuts never write PostgreSQL directly.**
 
@@ -50,7 +50,7 @@ Statement upload:
 Content-Type: multipart/form-data
 ```
 
-Shortcut image capture may use Base64 in JSON during Phase 1 for simplicity.
+Shortcut image capture may use Base64 in JSON during Product v1 for simplicity.
 
 ---
 
@@ -795,6 +795,8 @@ No committed ledger mutation occurs.
 
 Investment snapshot remains separate from ordinary income.
 
+> Note: In the implementation roadmap, general account snapshots are introduced in Implementation Phase 5, while dedicated Investment Snapshot and Investment P&L workflows are finalized in Implementation Phase 9.
+
 ```http
 POST /api/v1/investment-accounts/{account_id}/snapshots
 ```
@@ -803,6 +805,7 @@ Request:
 
 ```json
 {
+  "idempotency_key": "optional browser / required device",
   "as_of": "2026-08-19T10:00:00+08:00",
   "total_asset_value": "160000.00",
   "currency": "CNY",
@@ -1565,7 +1568,7 @@ Response:
 
 Future scheduled periods are not transactions until billed.
 
-Phase 1 has no early-payoff endpoint.
+Product v1 has no early-payoff endpoint.
 
 ---
 
@@ -1802,7 +1805,7 @@ Example:
 
 # 29. Stable Error Codes
 
-Minimum Phase-1 set:
+Minimum Product v1 set:
 
 ```text
 AUTH_REQUIRED

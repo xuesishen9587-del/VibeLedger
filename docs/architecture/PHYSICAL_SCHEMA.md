@@ -147,7 +147,7 @@ CREATE EXTENSION IF NOT EXISTS citext;
 
 ## 3.1 `households`
 
-Lightweight security/ownership root. Phase 1 normally contains one household.
+Lightweight security/ownership root. Product v1 normally contains one household.
 
 | Column | Type | Constraints / Meaning |
 |---|---|---|
@@ -215,7 +215,7 @@ CREATE INDEX ix_household_members_user ON household_members (user_id);
 | `id` | UUID | PK |
 | `user_id` | UUID | FK -> users, NOT NULL |
 | `device_name` | TEXT | NOT NULL |
-| `platform` | TEXT | NOT NULL; Phase 1 `ios_shortcuts` |
+| `platform` | TEXT | NOT NULL; Product v1 `ios_shortcuts` |
 | `token_hash` | BYTEA | NOT NULL UNIQUE |
 | `status` | TEXT | `active / revoked` |
 | `client_version` | TEXT | nullable |
@@ -840,7 +840,9 @@ Service invariants:
 - account must be `investment`;
 - both snapshots belong to this account and are `investment_valuation`;
 - known capital flows come from committed transfers / Statement-confirmed flows;
-- ambiguous capital movement => `provisional` + reconciliation `needs_review`.
+- ambiguous capital movement => reconciliation batch remains `needs_review`;
+- Invariant: A reconciliation batch in `processing`, `ready`, or `needs_review` MUST NOT insert uncommitted rows into `investment_pnl_periods`. Pending/provisional calculations belong strictly in `reconciliation_candidates.payload` until atomic batch commit;
+- While `status = provisional` is retained in the schema for future extensibility, it is not used to persist uncommitted reconciliation drafts in Product v1 and must never affect normal reporting.
 
 Investment P&L MUST NOT be counted as cash income.
 
@@ -1102,6 +1104,7 @@ refund
 adjustment
 snapshot
 investment_pnl
+recognize_installment
 ```
 
 Statuses:
@@ -1122,7 +1125,8 @@ CHECK (candidate_type IN (
   'refund',
   'adjustment',
   'snapshot',
-  'investment_pnl'
+  'investment_pnl',
+  'recognize_installment'
 ));
 
 CHECK (status IN ('proposed', 'needs_review', 'accepted', 'rejected', 'applied'));
@@ -1576,7 +1580,7 @@ audit_events            -> immutable history
 
 ---
 
-# 17. Phase-1 Non-Goals
+# 17. Product v1 Non-Goals
 
 Do not model yet:
 

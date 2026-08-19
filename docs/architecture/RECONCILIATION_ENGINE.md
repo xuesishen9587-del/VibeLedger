@@ -9,7 +9,7 @@
 > 3. `docs/architecture/API_CONTRACT.md` — API/workflow contract
 > 4. This document — reconciliation and matching rules
 >
-> Scope: Phase 1.
+> Scope: Product v1.
 >
 > Core rule: **Parsing and matching may create evidence and candidates, but MUST NOT mutate the committed ledger until reconciliation commit.**
 
@@ -56,7 +56,7 @@ false positive / silently wrong ledger
 
 # 2. Non-Goals
 
-Phase 1 does not attempt:
+Product v1 does not attempt:
 
 - perfect merchant identity resolution;
 - transaction matching across arbitrary long time windows;
@@ -174,7 +174,7 @@ atomic commit
 
 # 5. Configuration Constants
 
-The following are implementation constants, not end-user settings in Phase 1:
+The following are implementation constants, not end-user settings in Product v1:
 
 ```text
 MATCH_DATE_WINDOW_DAYS       = 5
@@ -709,7 +709,7 @@ all conflicts:
     needs_review
 ```
 
-A global Hungarian/maximum-weight solver is not required in Phase 1 because the system intentionally favors conservative matching.
+A global Hungarian/maximum-weight solver is not required in Product v1 because the system intentionally favors conservative matching.
 
 ---
 
@@ -968,7 +968,7 @@ one transfer transaction
 not two independent income/expense rows
 ```
 
-Phase-1 replay strategy:
+Product v1 replay strategy:
 
 1. whichever side is resolved and committed first creates the transfer;
 2. the later Statement side matches that existing transfer;
@@ -983,7 +983,7 @@ do not auto-commit either ambiguous side
 
 At least one batch remains `needs_review` until the counter-account is resolved.
 
-This intentionally avoids introducing cross-batch distributed commit complexity in Phase 1.
+This intentionally avoids introducing cross-batch distributed commit complexity in Product v1.
 
 ---
 
@@ -1126,7 +1126,7 @@ merchant similarity when available
 If unique:
 
 ```text
-candidate = recognize_installment_period
+candidate = recognize_installment
 ```
 
 Commit:
@@ -1613,7 +1613,7 @@ Transactions before the chosen baseline are outside the ledger's tracked history
 
 Investment account reconciliation does not use the ordinary ±200 adjustment rule.
 
-Phase 1 extracts:
+Product v1 extracts:
 
 ```text
 total asset value
@@ -1669,6 +1669,8 @@ contributions
 withdrawals
 ```
 
+Pending/provisional investment calculations belong strictly in `reconciliation_candidates.payload` (with `candidate_type = investment_pnl`) and MUST NOT insert uncommitted rows into `investment_pnl_periods` while the batch is in `processing`, `ready`, or `needs_review`. Only atomic batch commit creates confirmed `investment_pnl_periods` rows.
+
 ---
 
 ## 33.3 Ambiguous investment capital movement
@@ -1722,7 +1724,7 @@ Those deposits/withdrawals are matched to existing internal transfers where poss
 
 Missing explicit capital flows create transfer candidates.
 
-Security-level trades are ignored in Phase 1.
+Security-level trades are ignored in Product v1.
 
 ---
 

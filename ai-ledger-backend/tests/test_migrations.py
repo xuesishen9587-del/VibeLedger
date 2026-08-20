@@ -108,6 +108,7 @@ class TestMigrations(unittest.TestCase):
         self.assertIn("0002_identity_accounts.sql", str(ctx.exception))
 
     def test_extension_discovery_and_non_destruction(self):
+        # 1. Extensions discovery check
         conn = get_connection(self.test_schema)
         try:
             ext_map = runner.ensure_extensions(conn)
@@ -116,5 +117,38 @@ class TestMigrations(unittest.TestCase):
             self.assertIn("citext", ext_map)
             for ext, nsp in ext_map.items():
                 self.assertTrue(bool(nsp), f"Extension {ext} has empty namespace")
+                self.assertNotEqual(
+                    nsp, self.test_schema,
+                    f"Extension {ext} must NOT reside in disposable test schema {self.test_schema}"
+                )
+                self.assertNotEqual(
+                    nsp, "vibeledger_target",
+                    f"Extension {ext} must NOT reside in target DB_SCHEMA 'vibeledger_target'"
+                )
+        finally:
+            conn.close()
+
+        # 2. Verify dropping a test schema does NOT remove extensions
+        runner.run_migrations(self.test_schema)
+        
+        # Drop test schema
+        settings = config.get_settings()
+        conn = get_connection(settings.DB_SCHEMA)
+        try:
+            with conn.cursor() as cur:
+                quoted = sql.Identifier(self.test_schema)
+                cur.execute(sql.SQL("DROP SCHEMA IF EXISTS {schema} CASCADE;").format(schema=quoted))
+            conn.commit()
+            
+            # Re-discover on connection after drop
+            ext_map_after = runner.ensure_extensions(conn)
+            self.assertIn("pgcrypto", ext_map_after)
+            self.assertIn("pg_trgm", ext_map_after)
+            self.assertIn("citext", ext_map_after)
+            for ext, nsp in ext_map_after.items():
+                self.assertNotEqual(
+                    nsp, self.test_schema,
+                    f"Extension {ext} unexpectedly mapped to dropped test schema {self.test_schema}"
+                )
         finally:
             conn.close()

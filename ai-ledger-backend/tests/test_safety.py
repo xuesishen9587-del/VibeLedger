@@ -12,20 +12,21 @@ class TestSafety(unittest.TestCase):
             with self.assertRaises(PermissionError):
                 config.validate_safety()
 
-    def test_public_schema_rejected(self):
-        mock_settings = MagicMock()
-        mock_settings.ENVIRONMENT = "development"
-        mock_settings.DB_SCHEMA = "public"
-        
-        with patch("app.config.get_settings", return_value=mock_settings):
-            with self.assertRaises(PermissionError):
-                config.validate_safety()
-                
-        with self.assertRaises(PermissionError):
-            config.validate_schema("public")
+    def test_shared_system_schemas_rejected(self):
+        for forbidden in ["public", "extensions", "pg_catalog", "information_schema", "vault"]:
+            mock_settings = MagicMock()
+            mock_settings.ENVIRONMENT = "development"
+            mock_settings.DB_SCHEMA = forbidden
             
-        with self.assertRaises(PermissionError):
-            config.validate_schema(" PUBLIC ")
+            with patch("app.config.get_settings", return_value=mock_settings):
+                with self.assertRaises(PermissionError):
+                    config.validate_safety()
+                    
+            with self.assertRaises(PermissionError):
+                config.validate_schema(forbidden)
+                
+            with self.assertRaises(PermissionError):
+                config.validate_schema(f" {forbidden.upper()} ")
 
     def test_empty_schema_rejected(self):
         mock_settings = MagicMock()

@@ -31,9 +31,12 @@ def get_migration_files() -> List[str]:
 def ensure_extensions(conn) -> Dict[str, str]:
     """
     Queries PostgreSQL catalogs to discover installed extension namespaces.
-    Attempts safe installation for missing extensions without forcing a hard-coded schema.
-    Fails clearly if any required extension is unavailable.
-    Returns mapping from extension name to its installed schema name.
+    If any required extension is missing, attempts safe installation into the dedicated
+    shared 'extensions' schema (creating 'extensions' schema if needed) using
+    schema-qualified CREATE EXTENSION ... SCHEMA "extensions".
+    Falls back to 'public' if 'extensions' creation is not permitted, but NEVER installs
+    into a disposable target/test DB_SCHEMA.
+    Returns mapping from extension name to its discovered/installed schema name.
     """
     with conn.cursor() as cur:
         # 1. Discover already installed extensions and their namespaces
@@ -48,21 +51,37 @@ def ensure_extensions(conn) -> Dict[str, str]:
         installed = {row[0]: row[1] for row in cur.fetchall()}
         missing = REQUIRED_EXTENSIONS - set(installed.keys())
 
-        # 2. Attempt installation of missing extensions if any
+        # 2. Attempt installation of missing extensions into shared schema 'extensions'
         if missing:
-            print(f"INFO: Missing extensions at database level: {missing}. Attempting to install...")
+            print(f"INFO: Missing extensions at database level: {missing}. Attempting installation into shared schema 'extensions'...")
+            
+            # Determine shared extension schema (prefer 'extensions', fallback to 'public')
+            target_ext_schema = "extensions"
+            try:
+                cur.execute(sql.SQL("CREATE SCHEMA IF NOT EXISTS {schema}").format(schema=sql.Identifier(target_ext_schema)))
+                conn.commit()
+            except Exception as schema_err:
+                conn.rollback()
+                print(f"WARNING: Could not create/verify 'extensions' schema ({schema_err}). Trying 'public'...")
+                target_ext_schema = "public"
+
             for ext in missing:
                 try:
-                    cur.execute(f"CREATE EXTENSION IF NOT EXISTS {ext};")
-                    print(f"SUCCESS: Successfully created extension '{ext}'")
+                    cur.execute(
+                        sql.SQL("CREATE EXTENSION IF NOT EXISTS {ext} SCHEMA {schema};").format(
+                            ext=sql.Identifier(ext),
+                            schema=sql.Identifier(target_ext_schema)
+                        )
+                    )
+                    conn.commit()
+                    print(f"SUCCESS: Successfully created extension '{ext}' in schema '{target_ext_schema}'")
                 except Exception as e:
                     conn.rollback()
                     raise ExtensionBootstrapError(
-                        f"Required database extension '{ext}' is missing and cannot be installed. "
-                        f"Ensure permissions allow extension creation or pre-install it at the database level. "
+                        f"Required database extension '{ext}' is missing and could not be installed into shared schema '{target_ext_schema}'. "
+                        f"Ensure database superuser/admin permissions allow extension creation or pre-install it. "
                         f"Error: {e}"
                     )
-            conn.commit()
 
             # Re-discover after installation
             cur.execute(
@@ -77,7 +96,7 @@ def ensure_extensions(conn) -> Dict[str, str]:
             missing = REQUIRED_EXTENSIONS - set(installed.keys())
             if missing:
                 raise ExtensionBootstrapError(
-                    f"Required database extensions {missing} are missing after installation attempt."
+                    f"Required database extensions {missing} are still missing after installation attempt."
                 )
 
         return installed
@@ -149,11 +168,11 @@ def run_migrations(schema: Optional[str] = None) -> None:
             print(f"RUN: Applying migration '{filename}'...")
             sql_content = raw_bytes.decode("utf-8")
             
-            # Substitute extension namespaces dynamically
+            # Substitute extension namespaces dynamically using safely quoted schema identifiers
             citext_nsp = ext_schemas.get("citext", "public")
             trgm_nsp = ext_schemas.get("pg_trgm", "public")
-            sql_content = sql_content.replace("__CITEXT_TYPE__", f"{citext_nsp}.citext")
-            sql_content = sql_content.replace("__GIN_TRGM_OPS__", f"{trgm_nsp}.gin_trgm_ops")
+            sql_content = sql_content.replace("__CITEXT_TYPE__", f'"{citext_nsp}".citext')
+            sql_content = sql_content.replace("__GIN_TRGM_OPS__", f'"{trgm_nsp}".gin_trgm_ops')
             
             try:
                 with transaction(conn):

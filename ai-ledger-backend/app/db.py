@@ -56,10 +56,15 @@ def transaction(conn=None, schema: str = None):
         
     try:
         yield conn
-        conn.commit()
+        if not conn.closed:
+            conn.commit()
     except Exception:
-        conn.rollback()
+        if not conn.closed:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
         raise
     finally:
-        if should_close:
+        if should_close and not conn.closed:
             conn.close()

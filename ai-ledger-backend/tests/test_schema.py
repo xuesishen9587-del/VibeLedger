@@ -832,3 +832,130 @@ class TestSchemaAndRepository(unittest.TestCase):
             
         state_after = accounts.get_account_state(self.conn, acc_id)
         self.assertEqual(state_after["ledger_balance"], Decimal("0.000000"))
+
+    # --- 9. Catalog-Based Structural Contract Assertions ---
+    def test_catalog_structural_contracts(self):
+        """
+        Catalog-based assertions for key Phase 1 structural contracts:
+        1. Key Column Defaults
+        2. UNIQUE and Partial Indexes
+        3. GIN Trigram Indexes
+        4. Foreign Key Delete Actions (RESTRICT on ledger/audit, CASCADE on disposable children, SET NULL on actors)
+        """
+        with self.conn.cursor() as cur:
+            # 1. Key Column Defaults
+            cur.execute("""
+                SELECT table_name, column_name, column_default
+                FROM information_schema.columns
+                WHERE table_schema = %s AND column_default IS NOT NULL;
+            """, (self.test_schema,))
+            defaults = {(row[0], row[1]): row[2] for row in cur.fetchall()}
+
+            # Key status and version defaults
+            self.assertIn("'pending_first_bill'", defaults.get(("installment_plans", "status"), ""))
+            self.assertIn("'1'", defaults.get(("reconciliation_batches", "engine_version"), ""))
+            self.assertIn("0", defaults.get(("account_state", "ledger_balance"), ""))
+            self.assertIn("0", defaults.get(("accounts", "row_version"), ""))
+            self.assertIn("0", defaults.get(("account_state", "row_version"), ""))
+            self.assertIn("0", defaults.get(("transactions", "row_version"), ""))
+            self.assertIn("0", defaults.get(("reconciliation_batches", "row_version"), ""))
+            self.assertIn("'active'", defaults.get(("accounts", "status"), ""))
+            self.assertIn("'active'", defaults.get(("categories", "status"), ""))
+            self.assertIn("'committed'", defaults.get(("transactions", "status"), ""))
+            self.assertIn("'unverified'", defaults.get(("transactions", "verification_status"), ""))
+            self.assertIn("'scheduled'", defaults.get(("installment_periods", "status"), ""))
+            self.assertIn("'unmatched'", defaults.get(("statement_lines", "match_status"), ""))
+            self.assertIn("'proposed'", defaults.get(("reconciliation_candidates", "status"), ""))
+
+            # 2. Indexes: Unique, Partial, and Trigram GIN
+            cur.execute("""
+                SELECT indexname, indexdef
+                FROM pg_indexes
+                WHERE schemaname = %s;
+            """, (self.test_schema,))
+            index_defs = {row[0]: row[1] for row in cur.fetchall()}
+
+            # Unique partial indexes
+            self.assertIn("uq_accounts_active_name", index_defs)
+            self.assertIn("UNIQUE INDEX", index_defs["uq_accounts_active_name"])
+            self.assertIn("status = 'active'", index_defs["uq_accounts_active_name"])
+
+            self.assertIn("uq_categories_active", index_defs)
+            self.assertIn("UNIQUE INDEX", index_defs["uq_categories_active"])
+            self.assertIn("status = 'active'", index_defs["uq_categories_active"])
+
+            self.assertIn("uq_account_alias", index_defs)
+            self.assertIn("UNIQUE INDEX", index_defs["uq_account_alias"])
+            self.assertIn("deleted_at IS NULL", index_defs["uq_account_alias"])
+
+            self.assertIn("uq_snapshot_per_batch", index_defs)
+            self.assertIn("UNIQUE INDEX", index_defs["uq_snapshot_per_batch"])
+            self.assertIn("reconciliation_batch_id IS NOT NULL", index_defs["uq_snapshot_per_batch"])
+
+            self.assertIn("uq_credit_snapshot_per_batch", index_defs)
+            self.assertIn("UNIQUE INDEX", index_defs["uq_credit_snapshot_per_batch"])
+            self.assertIn("reconciliation_batch_id IS NOT NULL", index_defs["uq_credit_snapshot_per_batch"])
+
+            self.assertIn("uq_transaction_link_source_relation", index_defs)
+            self.assertIn("UNIQUE INDEX", index_defs["uq_transaction_link_source_relation"])
+
+            # GIN Trigram indexes
+            self.assertIn("ix_transactions_merchant_trgm", index_defs)
+            self.assertIn("using gin", index_defs["ix_transactions_merchant_trgm"].lower())
+            self.assertIn("gin_trgm_ops", index_defs["ix_transactions_merchant_trgm"])
+
+            self.assertIn("ix_statement_description_trgm", index_defs)
+            self.assertIn("using gin", index_defs["ix_statement_description_trgm"].lower())
+            self.assertIn("gin_trgm_ops", index_defs["ix_statement_description_trgm"])
+
+            self.assertIn("ix_account_alias_trgm", index_defs)
+            self.assertIn("using gin", index_defs["ix_account_alias_trgm"].lower())
+            self.assertIn("gin_trgm_ops", index_defs["ix_account_alias_trgm"])
+
+            # 3. Foreign Key Delete Rules (RESTRICT / CASCADE / SET NULL)
+            cur.execute("""
+                SELECT tc.table_name, kcu.column_name, ccu.table_name AS foreign_table, rc.delete_rule
+                FROM information_schema.table_constraints tc
+                JOIN information_schema.key_column_usage kcu
+                  ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema
+                JOIN information_schema.referential_constraints rc
+                  ON tc.constraint_name = rc.constraint_name AND tc.table_schema = rc.constraint_schema
+                JOIN information_schema.constraint_column_usage ccu
+                  ON rc.unique_constraint_name = ccu.constraint_name AND rc.unique_constraint_schema = ccu.table_schema
+                WHERE tc.table_schema = %s AND tc.constraint_type = 'FOREIGN KEY';
+            """, (self.test_schema,))
+            fk_rules = {(row[0], row[1], row[2]): row[3] for row in cur.fetchall()}
+
+            # RESTRICT (or NO ACTION): Durable ledger facts and audit log
+            self.assertIn(fk_rules.get(("audit_events", "household_id", "households")), ["RESTRICT", "NO ACTION"])
+            self.assertIn(fk_rules.get(("transactions", "household_id", "households")), ["RESTRICT", "NO ACTION"])
+            self.assertIn(fk_rules.get(("transactions", "from_account_id", "accounts")), ["RESTRICT", "NO ACTION"])
+            self.assertIn(fk_rules.get(("transactions", "to_account_id", "accounts")), ["RESTRICT", "NO ACTION"])
+            self.assertIn(fk_rules.get(("transactions", "category_id", "categories")), ["RESTRICT", "NO ACTION"])
+            self.assertIn(fk_rules.get(("accounts", "household_id", "households")), ["RESTRICT", "NO ACTION"])
+            self.assertIn(fk_rules.get(("categories", "household_id", "households")), ["RESTRICT", "NO ACTION"])
+            self.assertIn(fk_rules.get(("installment_plans", "household_id", "households")), ["RESTRICT", "NO ACTION"])
+            self.assertIn(fk_rules.get(("installment_plans", "credit_account_id", "accounts")), ["RESTRICT", "NO ACTION"])
+            self.assertIn(fk_rules.get(("reconciliation_batches", "household_id", "households")), ["RESTRICT", "NO ACTION"])
+            self.assertIn(fk_rules.get(("reconciliation_batches", "account_id", "accounts")), ["RESTRICT", "NO ACTION"])
+
+            # CASCADE: Disposable or tightly bound subordinate children
+            self.assertEqual(fk_rules.get(("household_members", "household_id", "households")), "CASCADE")
+            self.assertEqual(fk_rules.get(("household_members", "user_id", "users")), "CASCADE")
+            self.assertEqual(fk_rules.get(("devices", "user_id", "users")), "CASCADE")
+            self.assertEqual(fk_rules.get(("account_state", "account_id", "accounts")), "CASCADE")
+            self.assertEqual(fk_rules.get(("account_aliases", "account_id", "accounts")), "CASCADE")
+            self.assertEqual(fk_rules.get(("installment_periods", "plan_id", "installment_plans")), "CASCADE")
+            self.assertEqual(fk_rules.get(("statement_lines", "batch_id", "reconciliation_batches")), "CASCADE")
+            self.assertEqual(fk_rules.get(("reconciliation_candidates", "batch_id", "reconciliation_batches")), "CASCADE")
+
+            # SET NULL: Nullable actor / request / batch links preserve audit history and ledger evidence
+            self.assertEqual(fk_rules.get(("audit_events", "actor_user_id", "users")), "SET NULL")
+            self.assertEqual(fk_rules.get(("audit_events", "actor_device_id", "devices")), "SET NULL")
+            self.assertEqual(fk_rules.get(("audit_events", "request_id", "ingestion_requests")), "SET NULL")
+            self.assertEqual(fk_rules.get(("audit_events", "reconciliation_batch_id", "reconciliation_batches")), "SET NULL")
+            self.assertEqual(fk_rules.get(("transactions", "source_request_id", "ingestion_requests")), "SET NULL")
+            self.assertEqual(fk_rules.get(("transactions", "statement_batch_id", "reconciliation_batches")), "SET NULL")
+            self.assertEqual(fk_rules.get(("transactions", "created_by_user_id", "users")), "SET NULL")
+            self.assertEqual(fk_rules.get(("transactions", "created_by_device_id", "devices")), "SET NULL")
+            self.assertEqual(fk_rules.get(("transactions", "deleted_by_user_id", "users")), "SET NULL")

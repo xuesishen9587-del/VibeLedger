@@ -6,6 +6,18 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 TEST_SCHEMA_REGEX = re.compile(r"^vibeledger_test_[a-zA-Z0-9_]+$")
 PROTECTED_SCHEMAS = {"public", "vibeledger_target", "extensions", "pg_catalog", "information_schema", "vault"}
+FORBIDDEN_TARGET_SCHEMAS = {
+    "public",
+    "extensions",
+    "pg_catalog",
+    "information_schema",
+    "vault",
+    "graphql",
+    "graphql_public",
+    "realtime",
+    "storage",
+    "auth",
+}
 
 class Settings(BaseSettings):
     ENVIRONMENT: Literal["development", "test", "production"] = Field(
@@ -18,7 +30,7 @@ class Settings(BaseSettings):
     )
     DB_SCHEMA: str = Field(
         ...,
-        description="Target database schema. Must be explicitly set and cannot be 'public'."
+        description="Target database schema. Must be explicitly set and cannot be a shared/system schema."
     )
     GEMINI_API_KEY: Optional[str] = Field(
         None,
@@ -38,8 +50,8 @@ class Settings(BaseSettings):
         val = v.strip()
         if not val:
             raise ValueError("DB_SCHEMA cannot be empty or whitespace.")
-        if val.lower() == "public":
-            raise ValueError("DB_SCHEMA cannot be 'public' to protect legacy production tables.")
+        if val.lower() in FORBIDDEN_TARGET_SCHEMAS:
+            raise ValueError(f"DB_SCHEMA cannot be '{val}' (shared or system schema).")
         return val
 
 # Load active settings
@@ -66,18 +78,18 @@ def validate_safety() -> None:
         raise PermissionError("Safety violation: Execution is forbidden in production environment.")
     
     schema = current_settings.DB_SCHEMA.strip().lower()
-    if not schema or schema == "public":
-        raise PermissionError("Safety violation: Execution schema cannot be empty or 'public'.")
+    if not schema or schema in FORBIDDEN_TARGET_SCHEMAS:
+        raise PermissionError(f"Safety violation: Execution schema cannot be empty or a shared/system schema ('{schema}').")
 
 def validate_schema(schema: str) -> None:
     """
-    Verifies that the provided schema identifier is safe and explicitly not 'public'.
+    Verifies that the provided schema identifier is safe and explicitly not a shared or system schema.
     """
     s = schema.strip().lower()
     if not s:
         raise ValueError("Schema name cannot be empty.")
-    if s == "public":
-        raise PermissionError("Schema 'public' is protected and cannot be used for target database migrations or tests.")
+    if s in FORBIDDEN_TARGET_SCHEMAS:
+        raise PermissionError(f"Schema '{schema}' is a shared/system schema and cannot be used for target database migrations or tests.")
 
 def is_safe_for_testing() -> bool:
     """
@@ -99,7 +111,7 @@ def validate_test_schema(schema: str) -> None:
         raise PermissionError("Destructive test schema operations are only allowed when ENVIRONMENT='test'.")
     
     s = schema.strip().lower()
-    if s in PROTECTED_SCHEMAS:
+    if s in PROTECTED_SCHEMAS or s in FORBIDDEN_TARGET_SCHEMAS:
         raise PermissionError(f"Safety violation: Schema '{schema}' is protected and can NEVER be dropped by test cleanup.")
         
     if not TEST_SCHEMA_REGEX.match(s):

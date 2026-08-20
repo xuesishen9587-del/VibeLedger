@@ -1,6 +1,7 @@
 from typing import Optional, Dict, Any, List
 from uuid import UUID
-from datetime import date
+from datetime import date, datetime
+from decimal import Decimal
 
 # --- Household ---
 
@@ -332,31 +333,70 @@ def list_accounts(conn, household_id: UUID) -> List[Dict[str, Any]]:
 
 def lock_account_state(conn, account_id: UUID) -> Optional[Dict[str, Any]]:
     """
-    Acquires an exclusive lock (FOR UPDATE) on the account's state row.
+    Acquires an exclusive lock (FOR UPDATE) on a single account's state row.
+    """
+    states = lock_account_states(conn, [account_id])
+    return states.get(account_id)
+
+def lock_account_states(conn, account_ids: List[UUID]) -> Dict[UUID, Dict[str, Any]]:
+    """
+    Acquires exclusive locks (FOR UPDATE) on account_state rows in deterministic sorted UUID order.
+    Guarantees deadlock-free concurrency across multi-account transactions (e.g. transfers).
+    """
+    if not account_ids:
+        return {}
+    
+    unique_sorted_ids = sorted(list(set(account_ids)))
+    locked_states: Dict[UUID, Dict[str, Any]] = {}
+    
+    with conn.cursor() as cur:
+        for aid in unique_sorted_ids:
+            cur.execute(
+                """
+                SELECT account_id, ledger_balance, initialized_at, last_transaction_at,
+                       last_authoritative_snapshot_at, row_version, updated_at
+                FROM account_state
+                WHERE account_id = %s
+                FOR UPDATE;
+                """,
+                (aid,)
+            )
+            row = cur.fetchone()
+            if row:
+                locked_states[aid] = {
+                    "account_id": row[0],
+                    "ledger_balance": row[1],
+                    "initialized_at": row[2],
+                    "last_transaction_at": row[3],
+                    "last_authoritative_snapshot_at": row[4],
+                    "row_version": row[5],
+                    "updated_at": row[6]
+                }
+    return locked_states
+
+def update_account_state_projection(
+    conn,
+    account_id: UUID,
+    new_balance: Decimal,
+    last_transaction_at: Optional[datetime] = None,
+    initialized_at: Optional[datetime] = None
+) -> None:
+    """
+    Updates the derived ledger balance projection and increments row_version.
     """
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT account_id, ledger_balance, initialized_at, last_transaction_at,
-                   last_authoritative_snapshot_at, row_version, updated_at
-            FROM account_state
-            WHERE account_id = %s
-            FOR UPDATE;
+            UPDATE account_state
+            SET ledger_balance = %s,
+                last_transaction_at = COALESCE(%s, last_transaction_at),
+                initialized_at = COALESCE(%s, initialized_at),
+                row_version = row_version + 1,
+                updated_at = now()
+            WHERE account_id = %s;
             """,
-            (account_id,)
+            (new_balance, last_transaction_at, initialized_at, account_id)
         )
-        row = cur.fetchone()
-        if not row:
-            return None
-        return {
-            "account_id": row[0],
-            "ledger_balance": row[1],
-            "initialized_at": row[2],
-            "last_transaction_at": row[3],
-            "last_authoritative_snapshot_at": row[4],
-            "row_version": row[5],
-            "updated_at": row[6]
-        }
 
 # --- Aliases & Categories ---
 
@@ -417,6 +457,29 @@ def create_category(
             """,
             (category_id, household_id, name, category_type, status)
         )
+
+def get_category(conn, category_id: UUID) -> Optional[Dict[str, Any]]:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT id, household_id, name, category_type, status, created_at, updated_at
+            FROM categories
+            WHERE id = %s;
+            """,
+            (category_id,)
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        return {
+            "id": row[0],
+            "household_id": row[1],
+            "name": row[2],
+            "category_type": row[3],
+            "status": row[4],
+            "created_at": row[5],
+            "updated_at": row[6]
+        }
 
 def list_categories(conn, household_id: UUID) -> List[Dict[str, Any]]:
     with conn.cursor() as cur:

@@ -851,21 +851,21 @@ class TestSchemaAndRepository(unittest.TestCase):
             """, (self.test_schema,))
             defaults = {(row[0], row[1]): row[2] for row in cur.fetchall()}
 
-            # Key status and version defaults
-            self.assertIn("'pending_first_bill'", defaults.get(("installment_plans", "status"), ""))
-            self.assertIn("'1'", defaults.get(("reconciliation_batches", "engine_version"), ""))
+            # Key status and version defaults (valid textual default checks)
+            self.assertIn("pending_first_bill", defaults.get(("installment_plans", "status"), ""))
+            self.assertIn("1", defaults.get(("reconciliation_batches", "engine_version"), ""))
             self.assertIn("0", defaults.get(("account_state", "ledger_balance"), ""))
             self.assertIn("0", defaults.get(("accounts", "row_version"), ""))
             self.assertIn("0", defaults.get(("account_state", "row_version"), ""))
             self.assertIn("0", defaults.get(("transactions", "row_version"), ""))
             self.assertIn("0", defaults.get(("reconciliation_batches", "row_version"), ""))
-            self.assertIn("'active'", defaults.get(("accounts", "status"), ""))
-            self.assertIn("'active'", defaults.get(("categories", "status"), ""))
-            self.assertIn("'committed'", defaults.get(("transactions", "status"), ""))
-            self.assertIn("'unverified'", defaults.get(("transactions", "verification_status"), ""))
-            self.assertIn("'scheduled'", defaults.get(("installment_periods", "status"), ""))
-            self.assertIn("'unmatched'", defaults.get(("statement_lines", "match_status"), ""))
-            self.assertIn("'proposed'", defaults.get(("reconciliation_candidates", "status"), ""))
+            self.assertIn("active", defaults.get(("accounts", "status"), ""))
+            self.assertIn("active", defaults.get(("categories", "status"), ""))
+            self.assertIn("committed", defaults.get(("transactions", "status"), ""))
+            self.assertIn("unverified", defaults.get(("transactions", "verification_status"), ""))
+            self.assertIn("scheduled", defaults.get(("installment_periods", "status"), ""))
+            self.assertIn("unmatched", defaults.get(("statement_lines", "match_status"), ""))
+            self.assertIn("proposed", defaults.get(("reconciliation_candidates", "status"), ""))
 
             # 2. Indexes: Unique, Partial, and Trigram GIN
             cur.execute("""

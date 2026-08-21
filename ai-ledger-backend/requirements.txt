@@ -7,3 +7,4 @@ streamlit>=1.32.0
 pandas>=2.2.0
 plotly>=5.19.0
 psycopg2-binary>=2.9.0
+pillow>=10.2.0

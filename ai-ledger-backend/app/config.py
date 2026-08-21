@@ -36,6 +36,18 @@ class Settings(BaseSettings):
         None,
         description="API key for Gemini client."
     )
+    MAX_EXPENSE_IMAGE_BYTES: int = Field(
+        10 * 1024 * 1024,
+        description="Maximum allowed decoded image size in bytes (default: 10MB)."
+    )
+    FX_API_BASE_URL: str = Field(
+        "https://api.frankfurter.app",
+        description="Base URL for public reference FX rates provider."
+    )
+    FX_HTTP_TIMEOUT_SECONDS: float = Field(
+        5.0,
+        description="HTTP request timeout for external reference FX provider in seconds."
+    )
 
     # Use SettingsConfigDict for Pydantic v2 Settings configuration
     model_config = SettingsConfigDict(

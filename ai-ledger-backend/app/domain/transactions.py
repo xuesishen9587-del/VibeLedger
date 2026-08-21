@@ -65,6 +65,54 @@ class InvalidTransactionShapeError(LedgerDomainError):
     def __init__(self, message: str):
         super().__init__(message, code="INVALID_TRANSACTION_SHAPE")
 
+class IdempotencyKeyReuseError(LedgerDomainError):
+    def __init__(self, message: str = "This idempotency key was already used for different content."):
+        super().__init__(message, code="IDEMPOTENCY_KEY_REUSE")
+
+class DeviceAuthenticationError(LedgerDomainError):
+    def __init__(self, message: str = "Invalid or missing device authentication token."):
+        super().__init__(message, code="UNAUTHORIZED")
+
+class DeviceRevokedError(LedgerDomainError):
+    def __init__(self, message: str = "Device token is revoked or inactive."):
+        super().__init__(message, code="DEVICE_REVOKED")
+
+class RequestNotFoundError(LedgerDomainError):
+    def __init__(self, message: str = "The request was not received by the server."):
+        super().__init__(message, code="REQUEST_NOT_FOUND")
+
+class AmbiguousAccountError(LedgerDomainError):
+    def __init__(self, message: str = "Multiple plausible account candidates match the reference."):
+        super().__init__(message, code="AMBIGUOUS_ACCOUNT")
+
+class InvalidImagePayloadError(LedgerDomainError):
+    def __init__(self, message: str = "Invalid image payload or unsupported format."):
+        super().__init__(message, code="INVALID_IMAGE_PAYLOAD")
+
+class FxRateUnavailableError(LedgerDomainError):
+    def __init__(self, message: str = "No reference FX rate available for the specified currencies."):
+        super().__init__(message, code="FX_RATE_UNAVAILABLE")
+
+class FxProviderUnavailableError(LedgerDomainError):
+    def __init__(self, message: str = "Reference FX service provider is temporarily unavailable."):
+        super().__init__(message, code="FX_PROVIDER_UNAVAILABLE")
+
+class GeminiDependencyError(LedgerDomainError):
+    def __init__(self, message: str = "AI extraction service is temporarily unavailable."):
+        super().__init__(message, code="GEMINI_SERVICE_UNAVAILABLE")
+
+class InvalidRequestStateError(LedgerDomainError):
+    def __init__(self, message: str = "The ingestion request is not in a valid state for this operation."):
+        super().__init__(message, code="INVALID_REQUEST_STATE")
+
+class InvalidPaymentModeError(LedgerDomainError):
+    def __init__(self, message: str = "Invalid or unsupported payment mode."):
+        super().__init__(message, code="INVALID_PAYMENT_MODE")
+
+class InvalidInstallmentPeriodsError(LedgerDomainError):
+    def __init__(self, message: str = "Installment total_periods must be between 2 and 120."):
+        super().__init__(message, code="INVALID_INSTALLMENT_PERIODS")
+
 
 # --- Projection Calculation ---
 

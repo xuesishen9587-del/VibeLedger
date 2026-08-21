@@ -504,3 +504,6 @@ def list_categories(conn, household_id: UUID) -> List[Dict[str, Any]]:
                 "updated_at": r[6]
             })
         return categories
+
+list_accounts_for_household = list_accounts
+list_categories_for_household = list_categories

@@ -40,7 +40,11 @@ def record_expense(
     created_by_user_id: Optional[UUID] = None,
     created_by_device_id: Optional[UUID] = None,
     source_request_id: Optional[UUID] = None,
-    transaction_id: Optional[UUID] = None
+    transaction_id: Optional[UUID] = None,
+    account_leg_status: Optional[str] = None,
+    original_amount: Optional[Union[str, int, Decimal]] = None,
+    original_currency: Optional[str] = None,
+    effective_fx_rate: Optional[Union[str, int, Decimal]] = None
 ) -> Dict[str, Any]:
     if occurred_on is None or not isinstance(occurred_on, date):
         raise domain_tx.InvalidTransactionShapeError("occurred_on is a required business date.")
@@ -49,6 +53,11 @@ def record_expense(
     dec_amount = quantize_money(parse_decimal(amount), curr)
     if dec_amount <= 0:
         raise domain_tx.InvalidAmountError(f"Expense amount must be strictly positive. Given: {amount}")
+
+    orig_amt = parse_decimal(original_amount) if original_amount is not None else dec_amount
+    orig_curr = validate_currency_code(original_currency) if original_currency is not None else curr
+    fx_rate = parse_decimal(effective_fx_rate) if effective_fx_rate is not None else None
+    leg_status = account_leg_status or "authoritative"
 
     # 1. Lock account state
     locked_states = accounts_repo.lock_account_states(conn, [from_account_id])
@@ -92,14 +101,14 @@ def record_expense(
         "posted_on": None,
         "from_account_id": from_account_id,
         "to_account_id": None,
-        "original_amount": dec_amount,
-        "original_currency": curr,
+        "original_amount": orig_amt,
+        "original_currency": orig_curr,
         "from_amount": dec_amount,
         "from_currency": curr,
         "to_amount": None,
         "to_currency": None,
-        "effective_fx_rate": None,
-        "account_leg_status": "authoritative",
+        "effective_fx_rate": fx_rate,
+        "account_leg_status": leg_status,
         "reporting_amount": None,
         "reporting_currency": None,
         "reporting_fx_rate": None,

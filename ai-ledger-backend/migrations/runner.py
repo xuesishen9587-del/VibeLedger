@@ -134,6 +134,7 @@ def run_migrations(schema: Optional[str] = None) -> None:
             with conn.cursor() as cur:
                 quoted_schema = sql.Identifier(schema)
                 cur.execute(sql.SQL("CREATE SCHEMA IF NOT EXISTS {schema}").format(schema=quoted_schema))
+                cur.execute(sql.SQL("SET search_path = {schema}").format(schema=quoted_schema))
             conn.commit()
             
             # 2. Discover / verify extensions and their namespaces at DB level

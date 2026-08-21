@@ -54,12 +54,26 @@ def get_authenticated_device(
     token_hash = hashlib.sha256(raw_token.encode("utf-8")).digest()
     device = devices_repo.get_active_device_by_token_hash(conn, token_hash)
     if not device:
+        revoked_dev = devices_repo.get_device_by_token_hash(conn, token_hash)
+        if revoked_dev and (revoked_dev["status"] != "active" or revoked_dev["revoked_at"] is not None):
+            raise HTTPException(
+                status_code=401,
+                detail={
+                    "error": {
+                        "code": "DEVICE_REVOKED",
+                        "message": "Device token is revoked or inactive.",
+                        "retryable": False,
+                        "details": {}
+                    }
+                }
+            )
+
         raise HTTPException(
             status_code=401,
             detail={
                 "error": {
                     "code": "UNAUTHORIZED",
-                    "message": "Invalid, revoked, or unknown device token.",
+                    "message": "Invalid or unknown device token.",
                     "retryable": False,
                     "details": {}
                 }

@@ -1,7 +1,9 @@
 from fastapi import FastAPI, HTTPException
+from fastapi.exceptions import RequestValidationError
 from app.domain.transactions import LedgerDomainError
 from app.api.errors import (
     ledger_domain_exception_handler,
+    validation_exception_handler,
     http_exception_handler,
     global_exception_handler
 )
@@ -19,6 +21,7 @@ def create_app() -> FastAPI:
     )
 
     # Register Exception Handlers
+    app.add_exception_handler(RequestValidationError, validation_exception_handler)
     app.add_exception_handler(LedgerDomainError, ledger_domain_exception_handler)
     app.add_exception_handler(HTTPException, http_exception_handler)
     app.add_exception_handler(Exception, global_exception_handler)

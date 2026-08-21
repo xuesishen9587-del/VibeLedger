@@ -5,15 +5,16 @@ from typing import Optional, Dict, Any, List, Union
 from decimal import Decimal
 from datetime import date
 from pydantic import BaseModel, Field
+from app.domain.transactions import GeminiDependencyError
 
 class ExpenseExtractionResult(BaseModel):
     occurred_on: Optional[date] = None
     merchant: Optional[str] = None
     original_amount: Optional[Decimal] = None
-    original_currency: Optional[str] = "CNY"
+    original_currency: Optional[str] = None  # MUST NOT default to "CNY"
     from_account: Optional[str] = None
     category: Optional[str] = None
-    payment_mode: str = "one_off" # 'one_off' or 'installment'
+    payment_mode: Optional[str] = "one_off" # 'one_off' or 'installment'
     total_amount: Optional[Decimal] = None
     total_periods: Optional[int] = None
     confidence: float = 1.0
@@ -52,20 +53,20 @@ AVAILABLE EXPENSE CATEGORIES:
 {chr(10).join(cat_descriptions) if cat_descriptions else "No specific categories configured."}
 
 EXTRACTION RULES:
-1. occurred_on: Extract the actual business transaction date (YYYY-MM-DD). If unclear or not visible, use the current date or captured date.
+1. occurred_on: Extract the actual business transaction date (YYYY-MM-DD). If unclear or not visible, use null.
 2. merchant: The store, vendor, platform, or payee name.
 3. original_amount: The exact total consumption amount charged.
-4. original_currency: 3-letter currency code (e.g. CNY, USD, JPY, EUR).
+4. original_currency: 3-letter currency code (e.g. CNY, USD, JPY, EUR). If currency is not explicitly clear, set to null. DO NOT default to CNY.
 5. from_account: The name of the payment card, bank account, or wallet used. Match closely with available accounts or aliases.
 6. category: The best matching expense category name from the available categories.
 7. payment_mode: Set to "installment" if the receipt explicitly shows a credit card installment purchase (e.g. 分期, split into N periods/months); otherwise "one_off".
 8. If payment_mode is "installment":
    - total_amount: Total principal amount to be amortized.
-   - total_periods: Total number of installment months/periods (e.g. 3, 6, 12, 24).
+   - total_periods: Total number of installment months/periods (e.g. 3, 6, 12, 24). Must be null if not explicitly stated.
    - merchant: Merchant name.
    - from_account: Paying credit card account name.
 9. confidence: Overall extraction confidence score between 0.0 and 1.0.
-10. field_confidence: Dictionary of confidence scores for individual fields: amount, currency, account, category, date.
+10. field_confidence: Dictionary of confidence scores for individual fields: amount, currency, account, category, date, total_periods.
 """
 
     def extract_expense(
@@ -78,34 +79,37 @@ EXTRACTION RULES:
         captured_at: Optional[Any] = None
     ) -> ExpenseExtractionResult:
         if not self.api_key:
-            raise RuntimeError("GEMINI_API_KEY is not configured.")
+            raise GeminiDependencyError("GEMINI_API_KEY is not configured.")
 
-        from google import genai
-        from google.genai import types
+        try:
+            from google import genai
+            from google.genai import types
 
-        client = genai.Client(api_key=self.api_key)
-        system_prompt = self.build_system_prompt(accounts, categories)
+            client = genai.Client(api_key=self.api_key)
+            system_prompt = self.build_system_prompt(accounts, categories)
 
-        prompt_text = f"Extract expense details from this image. User note: '{note or ''}'."
-        if captured_at:
-            prompt_text += f" Captured at: {captured_at}."
+            prompt_text = f"Extract expense details from this image. User note: '{note or ''}'."
+            if captured_at:
+                prompt_text += f" Captured at: {captured_at}."
 
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=[
-                types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
-                prompt_text
-            ],
-            config=types.GenerateContentConfig(
-                system_instruction=system_prompt,
-                response_mime_type="application/json",
-                response_schema=ExpenseExtractionResult,
-                temperature=0.1
+            response = client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=[
+                    types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
+                    prompt_text
+                ],
+                config=types.GenerateContentConfig(
+                    system_instruction=system_prompt,
+                    response_mime_type="application/json",
+                    response_schema=ExpenseExtractionResult,
+                    temperature=0.1
+                )
             )
-        )
 
-        data = json.loads(response.text)
-        return ExpenseExtractionResult(**data)
+            data = json.loads(response.text)
+            return ExpenseExtractionResult(**data)
+        except Exception as e:
+            raise GeminiDependencyError(f"AI extraction service failed: {e}")
 
 
 class MockGeminiService(GeminiService):
@@ -126,6 +130,8 @@ class MockGeminiService(GeminiService):
             field_confidence={"amount": 1.0, "currency": 1.0, "account": 1.0, "category": 1.0}
         )
         self._custom_responses: List[ExpenseExtractionResult] = []
+        self.call_count: int = 0
+        self.should_raise: Optional[Exception] = None
 
     def set_next_result(self, result: ExpenseExtractionResult) -> None:
         self._custom_responses.append(result)
@@ -139,6 +145,9 @@ class MockGeminiService(GeminiService):
         categories: List[Dict[str, Any]],
         captured_at: Optional[Any] = None
     ) -> ExpenseExtractionResult:
+        self.call_count += 1
+        if self.should_raise:
+            raise self.should_raise
         if self._custom_responses:
             return self._custom_responses.pop(0)
         return self.default_result

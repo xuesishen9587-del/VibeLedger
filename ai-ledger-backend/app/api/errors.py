@@ -1,4 +1,5 @@
 from fastapi import Request, HTTPException
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from app.domain.transactions import (
     LedgerDomainError,
@@ -19,7 +20,12 @@ from app.domain.transactions import (
     RefundExceedsOriginalError,
     TransactionAlreadyVoidedError,
     AmbiguousAccountError,
-    InvalidImagePayloadError
+    InvalidImagePayloadError,
+    FxRateUnavailableError,
+    FxProviderUnavailableError,
+    GeminiDependencyError,
+    InvalidRequestStateError,
+    InvalidPaymentModeError
 )
 
 def build_error_response(
@@ -41,6 +47,15 @@ def build_error_response(
         }
     )
 
+async def validation_exception_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+    return build_error_response(
+        status_code=422,
+        code="INVALID_REQUEST",
+        message="Request input validation failed.",
+        retryable=False,
+        details={"errors": [str(e) for e in exc.errors()]}
+    )
+
 async def ledger_domain_exception_handler(request: Request, exc: LedgerDomainError) -> JSONResponse:
     if isinstance(exc, IdempotencyKeyReuseError):
         return build_error_response(409, exc.code, exc.message, retryable=False)
@@ -53,6 +68,9 @@ async def ledger_domain_exception_handler(request: Request, exc: LedgerDomainErr
 
     if isinstance(exc, HouseholdMismatchError):
         return build_error_response(403, exc.code, exc.message, retryable=False)
+
+    if isinstance(exc, (FxProviderUnavailableError, GeminiDependencyError)):
+        return build_error_response(503, exc.code, exc.message, retryable=True)
 
     if isinstance(exc, (AccountNotFoundError, CategoryNotFoundError, TransactionNotFoundError)):
         return build_error_response(422, exc.code, exc.message, retryable=False)
@@ -75,7 +93,7 @@ async def http_exception_handler(request: Request, exc: HTTPException) -> JSONRe
     elif exc.status_code == 409:
         code = "CONFLICT"
     elif exc.status_code == 422:
-        code = "UNPROCESSABLE_ENTITY"
+        code = "INVALID_REQUEST"
 
     return build_error_response(exc.status_code, code, msg, retryable=(exc.status_code >= 500))
 

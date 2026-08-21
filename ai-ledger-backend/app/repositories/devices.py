@@ -1,6 +1,32 @@
 from typing import Optional, Dict, Any
 from uuid import UUID
 
+def get_device_by_token_hash(conn, token_hash: bytes) -> Optional[Dict[str, Any]]:
+    """
+    Looks up a device by token hash regardless of active/revoked status.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT id, user_id, device_name, platform, status, revoked_at, last_seen_at
+            FROM devices
+            WHERE token_hash = %s;
+            """,
+            (token_hash,)
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        return {
+            "device_id": row[0],
+            "user_id": row[1],
+            "device_name": row[2],
+            "platform": row[3],
+            "status": row[4],
+            "revoked_at": row[5],
+            "last_seen_at": row[6]
+        }
+
 def get_active_device_by_token_hash(conn, token_hash: bytes) -> Optional[Dict[str, Any]]:
     """
     Looks up an active device by its SHA-256 token hash and resolves owning user and household context.
@@ -10,7 +36,7 @@ def get_active_device_by_token_hash(conn, token_hash: bytes) -> Optional[Dict[st
             """
             SELECT d.id AS device_id, d.user_id, d.device_name, d.platform, d.status, d.client_version,
                    u.display_name AS user_name, u.default_currency,
-                   hm.household_id, hm.role AS household_role
+                   hm.household_id, hm.role AS household_role, d.last_seen_at
             FROM devices d
             JOIN users u ON u.id = d.user_id
             JOIN household_members hm ON hm.user_id = u.id
@@ -37,7 +63,8 @@ def get_active_device_by_token_hash(conn, token_hash: bytes) -> Optional[Dict[st
             "user_name": row[6],
             "default_currency": row[7],
             "household_id": row[8],
-            "household_role": row[9]
+            "household_role": row[9],
+            "last_seen_at": row[10]
         }
 
 def update_device_last_seen(conn, device_id: UUID) -> None:

@@ -89,6 +89,26 @@ class InvalidImagePayloadError(LedgerDomainError):
     def __init__(self, message: str = "Invalid image payload or unsupported format."):
         super().__init__(message, code="INVALID_IMAGE_PAYLOAD")
 
+class FxRateUnavailableError(LedgerDomainError):
+    def __init__(self, message: str = "No reference FX rate available for the specified currencies."):
+        super().__init__(message, code="FX_RATE_UNAVAILABLE")
+
+class FxProviderUnavailableError(LedgerDomainError):
+    def __init__(self, message: str = "Reference FX service provider is temporarily unavailable."):
+        super().__init__(message, code="FX_PROVIDER_UNAVAILABLE")
+
+class GeminiDependencyError(LedgerDomainError):
+    def __init__(self, message: str = "AI extraction service is temporarily unavailable."):
+        super().__init__(message, code="GEMINI_SERVICE_UNAVAILABLE")
+
+class InvalidRequestStateError(LedgerDomainError):
+    def __init__(self, message: str = "The ingestion request is not in a valid state for this operation."):
+        super().__init__(message, code="INVALID_REQUEST_STATE")
+
+class InvalidPaymentModeError(LedgerDomainError):
+    def __init__(self, message: str = "Invalid or unsupported payment mode."):
+        super().__init__(message, code="INVALID_PAYMENT_MODE")
+
 
 # --- Projection Calculation ---
 

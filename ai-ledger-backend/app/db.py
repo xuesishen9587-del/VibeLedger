@@ -20,15 +20,28 @@ def get_connection(schema: str = None) -> psycopg2.extensions.connection:
         
     validate_schema(schema)
     
-    conn = psycopg2.connect(db_url)
-    
-    # Configure connection schema scoping safely using Identifier to prevent SQL injection
-    with conn.cursor() as cur:
-        quoted_schema = sql.Identifier(schema)
-        query = sql.SQL("SET search_path = {schema}").format(schema=quoted_schema)
-        cur.execute(query)
-        
-    return conn
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            conn = psycopg2.connect(
+                db_url,
+                connect_timeout=10,
+                keepalives=1,
+                keepalives_idle=30,
+                keepalives_interval=10,
+                keepalives_count=5
+            )
+            # Configure connection schema scoping safely using Identifier to prevent SQL injection
+            with conn.cursor() as cur:
+                quoted_schema = sql.Identifier(schema)
+                query = sql.SQL("SET search_path = {schema}").format(schema=quoted_schema)
+                cur.execute(query)
+            return conn
+        except psycopg2.OperationalError:
+            if attempt == max_retries - 1:
+                raise
+            import time
+            time.sleep(0.5)
 
 @contextmanager
 def get_db_connection(schema: str = None):

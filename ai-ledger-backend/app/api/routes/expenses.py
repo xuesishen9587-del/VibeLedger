@@ -1,7 +1,7 @@
 from typing import Optional, Dict, Any
 from datetime import datetime
 from fastapi import APIRouter, Depends
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app.api.deps import get_db_connection, get_authenticated_device
 from app.db import transaction
@@ -13,14 +13,21 @@ router = APIRouter(prefix="/api/v1/expenses", tags=["Expenses"])
 
 class ImagePayload(BaseModel):
     mime_type: str = Field("image/jpeg", description="MIME type of the screenshot")
-    base64: str = Field(..., description="Base64-encoded image data")
+    base64: str = Field(..., min_length=1, description="Base64-encoded image data")
 
 class CreateExpenseRequest(BaseModel):
     idempotency_key: str = Field(..., min_length=8, max_length=200, description="Client-generated unique idempotency key")
-    captured_at: Optional[datetime] = Field(None, description="Client capture timestamp with timezone")
+    captured_at: datetime = Field(..., description="Client capture timestamp with timezone")
     client_version: Optional[str] = Field(None, description="Client app/shortcut version")
     image: ImagePayload = Field(..., description="Screenshot image object")
     note: Optional[str] = Field(None, description="Optional user note")
+
+    @field_validator("captured_at")
+    @classmethod
+    def validate_timezone_aware(cls, v: datetime) -> datetime:
+        if v.tzinfo is None:
+            raise ValueError("captured_at must be a timezone-aware timestamp (e.g. ISO 8601 with offset).")
+        return v
 
 @router.post("", summary="Idempotent Expense Ingestion")
 def create_expense(
@@ -33,7 +40,6 @@ def create_expense(
     Processes idempotency, runs expense-only AI extraction, deterministic validation,
     and commits one-off expense, foreign-card estimated expense, or installment plan.
     """
-    # Instantiate services (or use injected app state services in tests)
     gemini_svc = getattr(router, "_gemini_service", None) or GeminiService()
     fx_svc = getattr(router, "_reference_fx_service", None) or ReferenceFxService()
 

@@ -650,6 +650,84 @@ class TestLedgerService(unittest.TestCase):
             )
         self.assertEqual(accounts_repo.get_account_state(self.conn, acc_id)["ledger_balance"], Decimal("500.000000"))
 
+    def test_18b_void_refund_reversal(self):
+        # 18b. void refund reverses refund projection exactly once & preserves links/history
+        acc_id = uuid.uuid4()
+        accounts_repo.create_account(self.conn, acc_id, self.household_id, "Acc_RefVoid", "cash", "CNY")
+        accounts_repo.update_account_state_projection(self.conn, acc_id, Decimal("1000.000000"))
+        self.conn.commit()
+
+        # Step 1: Expense 500 => Balance: 500
+        with transaction(self.conn):
+            exp_tx = ledger_service.record_expense(
+                conn=self.conn,
+                household_id=self.household_id,
+                from_account_id=acc_id,
+                amount=Decimal("500.00"),
+                currency="CNY",
+                category_id=self.exp_category_id,
+                occurred_on=date(2026, 8, 20),
+                merchant="Online Store"
+            )
+        self.assertEqual(accounts_repo.get_account_state(self.conn, acc_id)["ledger_balance"], Decimal("500.000000"))
+
+        # Step 2: Refund 200 => Balance: 700
+        with transaction(self.conn):
+            ref_tx = ledger_service.record_refund(
+                conn=self.conn,
+                household_id=self.household_id,
+                original_expense_id=exp_tx["id"],
+                to_account_id=acc_id,
+                amount=Decimal("200.00"),
+                currency="CNY",
+                occurred_on=date(2026, 8, 21)
+            )
+        self.assertEqual(accounts_repo.get_account_state(self.conn, acc_id)["ledger_balance"], Decimal("700.000000"))
+        self.assertEqual(len(tx_repo.get_active_refunds_for_expense(self.conn, exp_tx["id"])), 1)
+
+        # Step 3: Void refund
+        with transaction(self.conn):
+            voided_ref = ledger_service.void_transaction(
+                conn=self.conn,
+                household_id=self.household_id,
+                transaction_id=ref_tx["id"],
+                delete_reason="Refund cancelled by merchant",
+                deleted_by_user_id=self.user_id
+            )
+
+        # Assertions:
+        # 1. Refund row remains present in database with status voided
+        db_ref = tx_repo.get_transaction(self.conn, ref_tx["id"])
+        self.assertIsNotNone(db_ref)
+        self.assertEqual(db_ref["status"], "voided")
+        self.assertEqual(db_ref["delete_reason"], "Refund cancelled by merchant")
+        self.assertIsNotNone(db_ref["deleted_at"])
+
+        # 2. Refund projection is reversed exactly once (700 - 200 = 500)
+        state_after_void = accounts_repo.get_account_state(self.conn, acc_id)
+        self.assertEqual(state_after_void["ledger_balance"], Decimal("500.000000"))
+
+        # 3. Original expense remains committed
+        db_exp = tx_repo.get_transaction(self.conn, exp_tx["id"])
+        self.assertEqual(db_exp["status"], "committed")
+
+        # 4. refund_of transaction_link remains preserved
+        links = tx_repo.get_links_for_transaction(self.conn, ref_tx["id"])
+        self.assertEqual(len(links), 1)
+        self.assertEqual(links[0]["relation_type"], "refund_of")
+        self.assertEqual(links[0]["target_transaction_id"], exp_tx["id"])
+
+        # 5. get_active_refunds_for_expense no longer counts the voided refund
+        active_refunds = tx_repo.get_active_refunds_for_expense(self.conn, exp_tx["id"])
+        self.assertEqual(len(active_refunds), 0)
+
+        # 6. Audit includes create + void for the refund
+        audits = audit_repo.list_audit_events_for_entity(self.conn, "transaction", ref_tx["id"])
+        self.assertEqual(len(audits), 2)
+        actions = [a["action"] for a in audits]
+        self.assertIn("create", actions)
+        self.assertIn("void", actions)
+
     def test_19_repeated_void_rejected(self):
         # 19. repeated void rejected, no double reversal
         acc_id = uuid.uuid4()
@@ -912,3 +990,432 @@ class TestLedgerService(unittest.TestCase):
 
         state_jpy = accounts_repo.get_account_state(self.conn, acc_jpy)
         self.assertEqual(state_jpy["ledger_balance"], Decimal("-1500.000000"))
+
+    # --- H. Hardening Pass Regressions (Refund Currency Safety, Category Validation, Atomicity) ---
+
+    def test_25_refund_currency_mismatch(self):
+        # 25. refund currency safety: cannot refund CNY expense with USD leg or into USD account
+        acc_cny = uuid.uuid4()
+        acc_usd = uuid.uuid4()
+        accounts_repo.create_account(self.conn, acc_cny, self.household_id, "Checking_CNY_RefTest", "cash", "CNY")
+        accounts_repo.create_account(self.conn, acc_usd, self.household_id, "Savings_USD_RefTest", "savings", "USD")
+        accounts_repo.update_account_state_projection(self.conn, acc_cny, Decimal("1000.000000"))
+        accounts_repo.update_account_state_projection(self.conn, acc_usd, Decimal("100.000000"))
+        self.conn.commit()
+
+        # Step 1: Expense 500 CNY
+        with transaction(self.conn):
+            exp_tx = ledger_service.record_expense(
+                conn=self.conn,
+                household_id=self.household_id,
+                from_account_id=acc_cny,
+                amount=Decimal("500.00"),
+                currency="CNY",
+                category_id=self.exp_category_id,
+                occurred_on=date(2026, 8, 20)
+            )
+
+        # Step 2: Attempt refund in USD into USD account (even though numeric 10 < 500) => Must raise CurrencyMismatchError
+        with self.assertRaises(domain_tx.CurrencyMismatchError):
+            with transaction(self.conn):
+                ledger_service.record_refund(
+                    conn=self.conn,
+                    household_id=self.household_id,
+                    original_expense_id=exp_tx["id"],
+                    to_account_id=acc_usd,
+                    amount=Decimal("10.00"),
+                    currency="USD",
+                    occurred_on=date(2026, 8, 21)
+                )
+
+        # Step 3: Attempt refund in USD into CNY account => Must raise CurrencyMismatchError
+        with self.assertRaises(domain_tx.CurrencyMismatchError):
+            with transaction(self.conn):
+                ledger_service.record_refund(
+                    conn=self.conn,
+                    household_id=self.household_id,
+                    original_expense_id=exp_tx["id"],
+                    to_account_id=acc_cny,
+                    amount=Decimal("10.00"),
+                    currency="USD",
+                    occurred_on=date(2026, 8, 21)
+                )
+
+        # Step 4: Attempt refund in CNY into USD account => Must raise CurrencyMismatchError
+        with self.assertRaises(domain_tx.CurrencyMismatchError):
+            with transaction(self.conn):
+                ledger_service.record_refund(
+                    conn=self.conn,
+                    household_id=self.household_id,
+                    original_expense_id=exp_tx["id"],
+                    to_account_id=acc_usd,
+                    amount=Decimal("50.00"),
+                    currency="CNY",
+                    occurred_on=date(2026, 8, 21)
+                )
+
+        # Verify balances remain untouched
+        self.assertEqual(accounts_repo.get_account_state(self.conn, acc_cny)["ledger_balance"], Decimal("500.000000"))
+        self.assertEqual(accounts_repo.get_account_state(self.conn, acc_usd)["ledger_balance"], Decimal("100.000000"))
+
+    def test_26_explicit_refund_category_validation(self):
+        # 26. explicit refund category validation: reject cross-household, income, inactive, nonexistent
+        acc_id = uuid.uuid4()
+        accounts_repo.create_account(self.conn, acc_id, self.household_id, "Checking_CatTest", "cash", "CNY")
+        accounts_repo.update_account_state_projection(self.conn, acc_id, Decimal("1000.000000"))
+
+        # Another household & its category
+        h2_id = uuid.uuid4()
+        h2_cat_id = uuid.uuid4()
+        accounts_repo.create_household(self.conn, h2_id, "Other Household", date(2026, 1, 1))
+        accounts_repo.create_category(self.conn, h2_cat_id, h2_id, "Other Dining", "expense")
+
+        # Inactive category in self.household_id
+        inactive_cat_id = uuid.uuid4()
+        accounts_repo.create_category(self.conn, inactive_cat_id, self.household_id, "Inactive Food", "expense")
+        with self.conn.cursor() as cur:
+            cur.execute("UPDATE categories SET status = 'inactive' WHERE id = %s;", (inactive_cat_id,))
+
+        # Custom active expense category
+        custom_exp_cat_id = uuid.uuid4()
+        accounts_repo.create_category(self.conn, custom_exp_cat_id, self.household_id, "Custom Expense", "expense")
+        self.conn.commit()
+
+        # Step 1: Create original expense with self.exp_category_id
+        with transaction(self.conn):
+            exp_tx = ledger_service.record_expense(
+                conn=self.conn,
+                household_id=self.household_id,
+                from_account_id=acc_id,
+                amount=Decimal("500.00"),
+                currency="CNY",
+                category_id=self.exp_category_id,
+                occurred_on=date(2026, 8, 20)
+            )
+
+        # Cross-household category rejected
+        with self.assertRaises(domain_tx.HouseholdMismatchError):
+            with transaction(self.conn):
+                ledger_service.record_refund(
+                    conn=self.conn,
+                    household_id=self.household_id,
+                    original_expense_id=exp_tx["id"],
+                    to_account_id=acc_id,
+                    amount=Decimal("50.00"),
+                    currency="CNY",
+                    occurred_on=date(2026, 8, 21),
+                    category_id=h2_cat_id
+                )
+
+        # Income-type category rejected
+        with self.assertRaises(domain_tx.CategoryMismatchError):
+            with transaction(self.conn):
+                ledger_service.record_refund(
+                    conn=self.conn,
+                    household_id=self.household_id,
+                    original_expense_id=exp_tx["id"],
+                    to_account_id=acc_id,
+                    amount=Decimal("50.00"),
+                    currency="CNY",
+                    occurred_on=date(2026, 8, 21),
+                    category_id=self.inc_category_id
+                )
+
+        # Inactive category rejected
+        with self.assertRaises(domain_tx.CategoryMismatchError):
+            with transaction(self.conn):
+                ledger_service.record_refund(
+                    conn=self.conn,
+                    household_id=self.household_id,
+                    original_expense_id=exp_tx["id"],
+                    to_account_id=acc_id,
+                    amount=Decimal("50.00"),
+                    currency="CNY",
+                    occurred_on=date(2026, 8, 21),
+                    category_id=inactive_cat_id
+                )
+
+        # Nonexistent category rejected
+        with self.assertRaises(domain_tx.CategoryNotFoundError):
+            with transaction(self.conn):
+                ledger_service.record_refund(
+                    conn=self.conn,
+                    household_id=self.household_id,
+                    original_expense_id=exp_tx["id"],
+                    to_account_id=acc_id,
+                    amount=Decimal("50.00"),
+                    currency="CNY",
+                    occurred_on=date(2026, 8, 21),
+                    category_id=uuid.uuid4()
+                )
+
+        # Valid explicit category accepted
+        with transaction(self.conn):
+            ref1 = ledger_service.record_refund(
+                conn=self.conn,
+                household_id=self.household_id,
+                original_expense_id=exp_tx["id"],
+                to_account_id=acc_id,
+                amount=Decimal("50.00"),
+                currency="CNY",
+                occurred_on=date(2026, 8, 21),
+                category_id=custom_exp_cat_id
+            )
+        self.assertEqual(ref1["category_id"], custom_exp_cat_id)
+
+        # Omitted category inherits original category
+        with transaction(self.conn):
+            ref2 = ledger_service.record_refund(
+                conn=self.conn,
+                household_id=self.household_id,
+                original_expense_id=exp_tx["id"],
+                to_account_id=acc_id,
+                amount=Decimal("50.00"),
+                currency="CNY",
+                occurred_on=date(2026, 8, 21),
+                category_id=None
+            )
+        self.assertEqual(ref2["category_id"], self.exp_category_id)
+
+    def test_27_composite_transfer_fee_atomic_rollback(self):
+        # 27. composite transfer + fee atomicity: failure during fee rolls back entire transaction
+        acc_a = uuid.uuid4()
+        acc_b = uuid.uuid4()
+        accounts_repo.create_account(self.conn, acc_a, self.household_id, "Acc_Rollback_A", "cash", "CNY")
+        accounts_repo.create_account(self.conn, acc_b, self.household_id, "Acc_Rollback_B", "savings", "USD")
+        accounts_repo.update_account_state_projection(self.conn, acc_a, Decimal("10000.000000"))
+        accounts_repo.update_account_state_projection(self.conn, acc_b, Decimal("0.000000"))
+        self.conn.commit()
+
+        # Count transactions and audit events before
+        with self.conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM transactions;")
+            tx_count_before = cur.fetchone()[0]
+            cur.execute("SELECT COUNT(*) FROM audit_events;")
+            audit_count_before = cur.fetchone()[0]
+
+        # Invoke transfer with an invalid fee category (income category, which must fail during fee record)
+        with self.assertRaises(domain_tx.CategoryMismatchError):
+            with transaction(self.conn):
+                ledger_service.record_transfer(
+                    conn=self.conn,
+                    household_id=self.household_id,
+                    from_account_id=acc_a,
+                    to_account_id=acc_b,
+                    from_amount=Decimal("7250.00"),
+                    from_currency="CNY",
+                    to_amount=Decimal("1000.00"),
+                    to_currency="USD",
+                    fee_amount=Decimal("20.00"),
+                    fee_currency="CNY",
+                    fee_category_id=self.inc_category_id, # Invalid for fee (requires expense)
+                    occurred_on=date(2026, 8, 20)
+                )
+
+        # Verify complete rollback
+        state_a = accounts_repo.get_account_state(self.conn, acc_a)
+        state_b = accounts_repo.get_account_state(self.conn, acc_b)
+        self.assertEqual(state_a["ledger_balance"], Decimal("10000.000000"))
+        self.assertEqual(state_b["ledger_balance"], Decimal("0.000000"))
+
+        with self.conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM transactions;")
+            tx_count_after = cur.fetchone()[0]
+            cur.execute("SELECT COUNT(*) FROM audit_events;")
+            audit_count_after = cur.fetchone()[0]
+
+        self.assertEqual(tx_count_before, tx_count_after, "Transactions were partially committed on failure!")
+        self.assertEqual(audit_count_before, audit_count_after, "Audit events were partially committed on failure!")
+
+    def test_28_occurred_on_mandatory_validation(self):
+        # 28. occurred_on is mandatory across all ledger entry points
+        acc_id = uuid.uuid4()
+        accounts_repo.create_account(self.conn, acc_id, self.household_id, "Acc_OccOn", "cash", "CNY")
+        accounts_repo.update_account_state_projection(self.conn, acc_id, Decimal("1000.000000"))
+        self.conn.commit()
+
+        # record_expense
+        with self.assertRaises(domain_tx.InvalidTransactionShapeError):
+            with transaction(self.conn):
+                ledger_service.record_expense(
+                    conn=self.conn,
+                    household_id=self.household_id,
+                    from_account_id=acc_id,
+                    amount=Decimal("10.00"),
+                    currency="CNY",
+                    category_id=self.exp_category_id,
+                    occurred_on=None
+                )
+
+        # record_cash_income
+        with self.assertRaises(domain_tx.InvalidTransactionShapeError):
+            with transaction(self.conn):
+                ledger_service.record_cash_income(
+                    conn=self.conn,
+                    household_id=self.household_id,
+                    to_account_id=acc_id,
+                    amount=Decimal("10.00"),
+                    currency="CNY",
+                    category_id=self.inc_category_id,
+                    occurred_on=None
+                )
+
+        # record_fee
+        with self.assertRaises(domain_tx.InvalidTransactionShapeError):
+            with transaction(self.conn):
+                ledger_service.record_fee(
+                    conn=self.conn,
+                    household_id=self.household_id,
+                    from_account_id=acc_id,
+                    amount=Decimal("10.00"),
+                    currency="CNY",
+                    category_id=self.fee_category_id,
+                    occurred_on=None
+                )
+
+        # record_transfer
+        with self.assertRaises(domain_tx.InvalidTransactionShapeError):
+            with transaction(self.conn):
+                acc2 = uuid.uuid4()
+                accounts_repo.create_account(self.conn, acc2, self.household_id, "Acc_OccOn2", "cash", "CNY")
+                ledger_service.record_transfer(
+                    conn=self.conn,
+                    household_id=self.household_id,
+                    from_account_id=acc_id,
+                    to_account_id=acc2,
+                    from_amount=Decimal("10.00"),
+                    from_currency="CNY",
+                    occurred_on=None
+                )
+
+        # record_refund
+        with transaction(self.conn):
+            exp = ledger_service.record_expense(
+                conn=self.conn,
+                household_id=self.household_id,
+                from_account_id=acc_id,
+                amount=Decimal("100.00"),
+                currency="CNY",
+                category_id=self.exp_category_id,
+                occurred_on=date(2026, 8, 20)
+            )
+
+        with self.assertRaises(domain_tx.InvalidTransactionShapeError):
+            with transaction(self.conn):
+                ledger_service.record_refund(
+                    conn=self.conn,
+                    household_id=self.household_id,
+                    original_expense_id=exp["id"],
+                    to_account_id=acc_id,
+                    amount=Decimal("10.00"),
+                    currency="CNY",
+                    occurred_on=None
+                )
+
+        # record_opening_balance
+        with self.assertRaises(domain_tx.InvalidTransactionShapeError):
+            with transaction(self.conn):
+                ledger_service.record_opening_balance(
+                    conn=self.conn,
+                    household_id=self.household_id,
+                    account_id=acc_id,
+                    amount=Decimal("10.00"),
+                    currency="CNY",
+                    occurred_on=None
+                )
+
+        # record_reconciliation_adjustment
+        with self.assertRaises(domain_tx.InvalidTransactionShapeError):
+            with transaction(self.conn):
+                ledger_service.record_reconciliation_adjustment(
+                    conn=self.conn,
+                    household_id=self.household_id,
+                    account_id=acc_id,
+                    amount=Decimal("10.00"),
+                    currency="CNY",
+                    occurred_on=None
+                )
+
+    def test_29_concurrent_refund_and_void_no_deadlock(self):
+        # 29. concurrent refund and void targeting same expense/account execute without deadlock
+        acc_id = uuid.uuid4()
+        accounts_repo.create_account(self.conn, acc_id, self.household_id, "Acc_LockOrderTest", "cash", "CNY")
+        accounts_repo.update_account_state_projection(self.conn, acc_id, Decimal("1000.000000"))
+        self.conn.commit()
+
+        # Create two distinct expenses on the same account
+        with transaction(self.conn):
+            exp1 = ledger_service.record_expense(
+                conn=self.conn,
+                household_id=self.household_id,
+                from_account_id=acc_id,
+                amount=Decimal("300.00"),
+                currency="CNY",
+                category_id=self.exp_category_id,
+                occurred_on=date(2026, 8, 20)
+            )
+            exp2 = ledger_service.record_expense(
+                conn=self.conn,
+                household_id=self.household_id,
+                from_account_id=acc_id,
+                amount=Decimal("200.00"),
+                currency="CNY",
+                category_id=self.exp_category_id,
+                occurred_on=date(2026, 8, 20)
+            )
+
+        errors = []
+
+        # Worker 1: Refund exp1 (Locks exp1 -> locks acc_id)
+        def worker_refund():
+            conn = get_connection(self.test_schema)
+            try:
+                with transaction(conn):
+                    ledger_service.record_refund(
+                        conn=conn,
+                        household_id=self.household_id,
+                        original_expense_id=exp1["id"],
+                        to_account_id=acc_id,
+                        amount=Decimal("100.00"),
+                        currency="CNY",
+                        occurred_on=date(2026, 8, 21)
+                    )
+            except Exception as e:
+                errors.append(e)
+            finally:
+                conn.close()
+
+        # Worker 2: Void exp2 (Locks exp2 -> locks acc_id)
+        def worker_void():
+            conn = get_connection(self.test_schema)
+            try:
+                with transaction(conn):
+                    ledger_service.void_transaction(
+                        conn=conn,
+                        household_id=self.household_id,
+                        transaction_id=exp2["id"],
+                        delete_reason="Void concurrent"
+                    )
+            except Exception as e:
+                errors.append(e)
+            finally:
+                conn.close()
+
+        t1 = threading.Thread(target=worker_refund)
+        t2 = threading.Thread(target=worker_void)
+
+        t1.start()
+        t2.start()
+        t1.join(timeout=30)
+        t2.join(timeout=30)
+
+        self.assertFalse(t1.is_alive(), "Thread 1 deadlocked or timed out!")
+        self.assertFalse(t2.is_alive(), "Thread 2 deadlocked or timed out!")
+        self.assertEqual(len(errors), 0, f"Concurrent workers encountered errors: {errors}")
+
+        # Final balance calculation:
+        # Start: 1000 - 300 - 200 = 500
+        # +100 (refund on exp1) = 600
+        # +200 (void of exp2) = 800
+        state = accounts_repo.get_account_state(self.conn, acc_id)
+        self.assertEqual(state["ledger_balance"], Decimal("800.000000"))

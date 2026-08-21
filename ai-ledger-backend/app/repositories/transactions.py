@@ -183,6 +183,8 @@ def list_transaction_links_for_source(conn, source_transaction_id: UUID) -> List
             "created_at": r[4]
         } for r in rows]
 
+get_links_for_transaction = list_transaction_links_for_source
+
 def get_active_refunds_for_expense(conn, expense_transaction_id: UUID) -> List[Dict[str, Any]]:
     """
     Retrieves all committed, non-voided refund transactions linked to the given expense.

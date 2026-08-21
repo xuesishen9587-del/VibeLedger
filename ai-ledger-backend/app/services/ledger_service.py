@@ -1,3 +1,16 @@
+"""
+VibeLedger Core Ledger Service (Phase 2).
+
+All functions in this module are transaction-scoped service primitives designed for composability.
+The caller or workflow owns the database transaction boundary:
+    with transaction(conn):
+        ...
+
+The ledger service primitives do NOT perform independent commits or rollbacks.
+If any step in a composite workflow (e.g. transfer + fee) fails, the caller's transaction
+context manager will automatically roll back all mutations, leaving the database state untouched.
+"""
+
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Optional, Dict, Any, List, Union
 from uuid import UUID, uuid4
@@ -29,6 +42,9 @@ def record_expense(
     source_request_id: Optional[UUID] = None,
     transaction_id: Optional[UUID] = None
 ) -> Dict[str, Any]:
+    if occurred_on is None or not isinstance(occurred_on, date):
+        raise domain_tx.InvalidTransactionShapeError("occurred_on is a required business date.")
+
     curr = validate_currency_code(currency)
     dec_amount = quantize_money(parse_decimal(amount), curr)
     if dec_amount <= 0:
@@ -155,6 +171,9 @@ def record_cash_income(
     source_request_id: Optional[UUID] = None,
     transaction_id: Optional[UUID] = None
 ) -> Dict[str, Any]:
+    if occurred_on is None or not isinstance(occurred_on, date):
+        raise domain_tx.InvalidTransactionShapeError("occurred_on is a required business date.")
+
     curr = validate_currency_code(currency)
     dec_amount = quantize_money(parse_decimal(amount), curr)
     if dec_amount <= 0:
@@ -281,6 +300,9 @@ def record_fee(
     source_request_id: Optional[UUID] = None,
     transaction_id: Optional[UUID] = None
 ) -> Dict[str, Any]:
+    if occurred_on is None or not isinstance(occurred_on, date):
+        raise domain_tx.InvalidTransactionShapeError("occurred_on is a required business date.")
+
     curr = validate_currency_code(currency)
     dec_amount = quantize_money(parse_decimal(amount), curr)
     if dec_amount <= 0:
@@ -399,7 +421,7 @@ def record_transfer(
     from_currency: str,
     to_amount: Optional[Union[str, int, Decimal]] = None,
     to_currency: Optional[str] = None,
-    occurred_on: date = None,
+    occurred_on: Optional[date] = None,
     occurred_at: Optional[datetime] = None,
     remarks: Optional[str] = None,
     fee_amount: Optional[Union[str, int, Decimal]] = None,
@@ -411,6 +433,9 @@ def record_transfer(
     source_request_id: Optional[UUID] = None,
     transaction_id: Optional[UUID] = None
 ) -> Dict[str, Any]:
+    if occurred_on is None or not isinstance(occurred_on, date):
+        raise domain_tx.InvalidTransactionShapeError("occurred_on is a required business date.")
+
     if from_account_id == to_account_id:
         raise domain_tx.SameAccountTransferError("Source and destination accounts in a transfer must be distinct.")
 
@@ -588,12 +613,33 @@ def record_refund(
     source_request_id: Optional[UUID] = None,
     transaction_id: Optional[UUID] = None
 ) -> Dict[str, Any]:
+    if occurred_on is None or not isinstance(occurred_on, date):
+        raise domain_tx.InvalidTransactionShapeError("occurred_on is a required business date.")
+
     curr = validate_currency_code(currency)
     dec_amount = quantize_money(parse_decimal(amount), curr)
     if dec_amount <= 0:
         raise domain_tx.InvalidAmountError(f"Refund amount must be strictly positive. Given: {amount}")
 
-    # 1. Lock to_account state
+    # 1. Lock & validate original expense transaction FOR UPDATE first (Lock order: transaction -> account_state)
+    orig_tx = tx_repo.lock_transaction(conn, original_expense_id)
+    if not orig_tx:
+        raise domain_tx.TransactionNotFoundError(original_expense_id)
+    if orig_tx["household_id"] != household_id:
+        raise domain_tx.HouseholdMismatchError(f"Original transaction does not belong to household {household_id}.")
+    if orig_tx["transaction_type"] != "expense":
+        raise domain_tx.InvalidTransactionShapeError(f"Refund target must be an expense transaction. Given: {orig_tx['transaction_type']}.")
+    if orig_tx["status"] != "committed":
+        raise domain_tx.TransactionAlreadyVoidedError(original_expense_id)
+
+    # 2. Determine authoritative refundable leg currency and enforce currency safety
+    orig_refundable_currency = orig_tx["from_currency"] or orig_tx["original_currency"]
+    if curr != orig_refundable_currency:
+        raise domain_tx.CurrencyMismatchError(
+            f"Refund currency {curr} does not match original expense currency {orig_refundable_currency}."
+        )
+
+    # 3. Lock affected refund destination account_state
     locked_states = accounts_repo.lock_account_states(conn, [to_account_id])
     if to_account_id not in locked_states:
         raise domain_tx.AccountNotFoundError(to_account_id)
@@ -607,21 +653,33 @@ def record_refund(
     if to_account["status"] != "active":
         raise domain_tx.AccountInactiveError(to_account_id)
     if to_account["currency"] != curr:
-        raise domain_tx.CurrencyMismatchError(f"Refund currency {curr} does not match account currency {to_account['currency']}.")
+        raise domain_tx.CurrencyMismatchError(
+            f"Refund currency {curr} does not match destination account currency {to_account['currency']}."
+        )
 
-    # 2. Lock & fetch original expense transaction
-    orig_tx = tx_repo.lock_transaction(conn, original_expense_id)
-    if not orig_tx:
-        raise domain_tx.TransactionNotFoundError(original_expense_id)
-    if orig_tx["household_id"] != household_id:
-        raise domain_tx.HouseholdMismatchError(f"Original transaction does not belong to household {household_id}.")
-    if orig_tx["transaction_type"] != "expense":
-        raise domain_tx.InvalidTransactionShapeError(f"Refund target must be an expense transaction. Given: {orig_tx['transaction_type']}.")
-    if orig_tx["status"] != "committed":
-        raise domain_tx.TransactionAlreadyVoidedError(original_expense_id)
+    # 4. Validate category metadata (inherit original expense category if omitted; strictly validate if explicitly provided)
+    if category_id is None:
+        final_category_id = orig_tx["category_id"]
+    else:
+        category = accounts_repo.get_category(conn, category_id)
+        if not category:
+            raise domain_tx.CategoryNotFoundError(category_id)
+        if category["household_id"] != household_id:
+            raise domain_tx.HouseholdMismatchError(f"Category {category_id} does not belong to household {household_id}.")
+        if category["category_type"] != "expense":
+            raise domain_tx.CategoryMismatchError(f"Refund transaction requires an expense-type category. Given: {category['category_type']}.")
+        if category["status"] != "active":
+            raise domain_tx.CategoryMismatchError(f"Category {category_id} is inactive.")
+        final_category_id = category_id
 
-    # 3. Check cumulative non-voided refunds
+    # 5. Check cumulative non-voided refunds limit in the same currency
     active_refunds = tx_repo.get_active_refunds_for_expense(conn, original_expense_id)
+    for r in active_refunds:
+        r_curr = r["to_currency"] or r["original_currency"]
+        if r_curr != orig_refundable_currency:
+            raise domain_tx.CurrencyMismatchError(
+                f"Active refund {r['id']} has currency {r_curr} different from original expense {orig_refundable_currency}."
+            )
     already_refunded = sum((r["to_amount"] for r in active_refunds), Decimal("0"))
     refundable_limit = orig_tx["from_amount"] if orig_tx["from_amount"] is not None else orig_tx["original_amount"]
 
@@ -631,13 +689,10 @@ def record_refund(
             f"Original: {refundable_limit}, Already refunded: {already_refunded}"
         )
 
-    # Inherit category from original expense if not explicitly overridden
-    final_category_id = category_id if category_id is not None else orig_tx["category_id"]
-
-    # 4. Compute universal signed projection
+    # 6. Compute universal signed projection
     new_balance = to_acc_state["ledger_balance"] + dec_amount
 
-    # 5. Insert refund transaction
+    # 7. Insert refund transaction
     refund_tx_id = transaction_id or uuid4()
     tx_dict = {
         "id": refund_tx_id,
@@ -679,7 +734,7 @@ def record_refund(
     }
     tx_repo.insert_transaction(conn, tx_dict)
 
-    # 6. Create transaction_links record linking refund to original expense
+    # 8. Create transaction_links record linking refund to original expense
     link_id = uuid4()
     tx_repo.create_transaction_link(
         conn=conn,
@@ -689,11 +744,11 @@ def record_refund(
         relation_type="refund_of"
     )
 
-    # 7. Update projection
+    # 9. Update projection
     tx_time = occurred_at or datetime.now(timezone.utc)
     accounts_repo.update_account_state_projection(conn, to_account_id, new_balance, last_transaction_at=tx_time)
 
-    # 8. Append audit event
+    # 10. Append audit event
     actor_type = "user" if created_by_user_id else ("device" if created_by_device_id else "system")
     audit_repo.insert_audit_event(
         conn=conn,
@@ -737,6 +792,9 @@ def record_opening_balance(
     source_request_id: Optional[UUID] = None,
     transaction_id: Optional[UUID] = None
 ) -> Dict[str, Any]:
+    if occurred_on is None or not isinstance(occurred_on, date):
+        raise domain_tx.InvalidTransactionShapeError("occurred_on is a required business date.")
+
     curr = validate_currency_code(currency)
     dec_amount = quantize_money(parse_decimal(amount), curr)
     if dec_amount <= 0:
@@ -861,6 +919,9 @@ def record_reconciliation_adjustment(
     source_request_id: Optional[UUID] = None,
     transaction_id: Optional[UUID] = None
 ) -> Dict[str, Any]:
+    if occurred_on is None or not isinstance(occurred_on, date):
+        raise domain_tx.InvalidTransactionShapeError("occurred_on is a required business date.")
+
     curr = validate_currency_code(currency)
     dec_amount = quantize_money(parse_decimal(amount), curr)
     if dec_amount <= 0:

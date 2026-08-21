@@ -25,7 +25,8 @@ from app.domain.transactions import (
     FxProviderUnavailableError,
     GeminiDependencyError,
     InvalidRequestStateError,
-    InvalidPaymentModeError
+    InvalidPaymentModeError,
+    InvalidInstallmentPeriodsError
 )
 
 def build_error_response(

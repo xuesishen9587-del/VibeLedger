@@ -14,7 +14,7 @@ class ExpenseExtractionResult(BaseModel):
     original_currency: Optional[str] = None  # MUST NOT default to "CNY"
     from_account: Optional[str] = None
     category: Optional[str] = None
-    payment_mode: Optional[str] = "one_off" # 'one_off' or 'installment'
+    payment_mode: Optional[str] = None  # MUST NOT default to "one_off"; defaults to None
     total_amount: Optional[Decimal] = None
     total_periods: Optional[int] = None
     confidence: float = 1.0
@@ -59,7 +59,7 @@ EXTRACTION RULES:
 4. original_currency: 3-letter currency code (e.g. CNY, USD, JPY, EUR). If currency is not explicitly clear, set to null. DO NOT default to CNY.
 5. from_account: The name of the payment card, bank account, or wallet used. Match closely with available accounts or aliases.
 6. category: The best matching expense category name from the available categories.
-7. payment_mode: Set to "installment" if the receipt explicitly shows a credit card installment purchase (e.g. 分期, split into N periods/months); otherwise "one_off".
+7. payment_mode: Set to "installment" if the receipt explicitly shows a credit card installment purchase (e.g. 分期, split into N periods/months); otherwise "one_off". If unclear, use null.
 8. If payment_mode is "installment":
    - total_amount: Total principal amount to be amortized.
    - total_periods: Total number of installment months/periods (e.g. 3, 6, 12, 24). Must be null if not explicitly stated.
@@ -106,7 +106,7 @@ EXTRACTION RULES:
                 )
             )
 
-            data = json.loads(response.text)
+            data = json.loads(response.text, parse_float=Decimal)
             return ExpenseExtractionResult(**data)
         except Exception as e:
             raise GeminiDependencyError(f"AI extraction service failed: {e}")
@@ -127,7 +127,7 @@ class MockGeminiService(GeminiService):
             category=None,
             payment_mode="one_off",
             confidence=1.0,
-            field_confidence={"amount": 1.0, "currency": 1.0, "account": 1.0, "category": 1.0}
+            field_confidence={"amount": 1.0, "currency": 1.0, "account": 1.0, "category": 1.0, "date": 1.0}
         )
         self._custom_responses: List[ExpenseExtractionResult] = []
         self.call_count: int = 0

@@ -1,44 +1,44 @@
+import io
 import json
-import hashlib
 import base64
+import hashlib
 from typing import Optional, Dict, Any, List, Tuple
 from uuid import UUID, uuid4
+from datetime import datetime, date, timezone
 from decimal import Decimal
-from datetime import date, datetime, timezone
+from PIL import Image
 
 from app.domain.money import parse_decimal, validate_currency_code, quantize_money
+from app.domain.installments import calculate_installment_schedule
 from app.domain.transactions import (
     LedgerDomainError,
-    IdempotencyKeyReuseError,
-    RequestNotFoundError,
-    AmbiguousAccountError,
-    CategoryNotFoundError,
     AccountNotFoundError,
     AccountInactiveError,
-    CategoryMismatchError,
+    CategoryNotFoundError,
+    CurrencyMismatchError,
     InvalidTransactionShapeError,
-    HouseholdMismatchError,
     InvalidImagePayloadError,
+    IdempotencyKeyReuseError,
+    RequestNotFoundError,
+    HouseholdMismatchError,
     InvalidRequestStateError,
     InvalidPaymentModeError,
-    FxRateUnavailableError
+    InvalidInstallmentPeriodsError
 )
-from app.domain.installments import calculate_installment_schedule
-import app.repositories.accounts as accounts_repo
-import app.repositories.transactions as tx_repo
+from app.config import get_settings
 import app.repositories.ingestion as ingestion_repo
+import app.repositories.accounts as accounts_repo
 import app.repositories.installments as installments_repo
 import app.repositories.audit as audit_repo
 import app.services.ledger_service as ledger_service
-from app.services.reference_fx_service import ReferenceFxService
 from app.services.gemini_service import GeminiService, ExpenseExtractionResult
-from app.config import get_settings
+from app.services.reference_fx_service import ReferenceFxService
 
 FIELD_CONFIDENCE_THRESHOLD = 0.85
 
-def validate_image_payload(image_payload: Dict[str, Any], max_bytes: Optional[int] = None) -> Tuple[bytes, str]:
+def validate_image_payload(image_payload: Optional[Dict[str, Any]], max_bytes: Optional[int] = None) -> Tuple[bytes, str]:
     """
-    Validates base64 image input, decoded payload size, MIME type, and magic bytes.
+    Validates base64 image input, decoded payload size, MIME type, magic bytes, and actual decoder verify.
     Raises InvalidImagePayloadError on any validation failure before calling AI.
     """
     settings = get_settings()
@@ -66,13 +66,25 @@ def validate_image_payload(image_payload: Dict[str, Any], max_bytes: Optional[in
     if mime_type not in ("image/jpeg", "image/png"):
         raise InvalidImagePayloadError(f"Unsupported image MIME type: '{mime_type}'. Supported formats are image/jpeg and image/png.")
 
-    # Verify magic bytes format
+    # 1. Verify magic bytes format
     if mime_type == "image/jpeg":
         if not image_bytes.startswith(b"\xff\xd8\xff"):
             raise InvalidImagePayloadError("Image data does not match declared JPEG format.")
     elif mime_type == "image/png":
         if not image_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
             raise InvalidImagePayloadError("Image data does not match declared PNG format.")
+
+    # 2. Real image decode & verify using Pillow (catches corrupted payloads with valid headers)
+    try:
+        with Image.open(io.BytesIO(image_bytes)) as img:
+            img.verify()
+            expected_format = "JPEG" if mime_type == "image/jpeg" else "PNG"
+            if img.format != expected_format:
+                raise InvalidImagePayloadError(f"Decoded image format '{img.format}' does not match declared '{expected_format}'.")
+    except InvalidImagePayloadError:
+        raise
+    except Exception as e:
+        raise InvalidImagePayloadError(f"Corrupted or unparseable image payload: {e}")
 
     return image_bytes, mime_type
 
@@ -140,7 +152,7 @@ def _resolve_category(
     categories: List[Dict[str, Any]]
 ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     """
-    Resolves candidate string against household active expense categories.
+    Resolves candidate string against active expense categories.
     Returns: (resolved_category_dict, warning_code).
     """
     if not candidate_name or not candidate_name.strip():
@@ -219,17 +231,13 @@ def process_expense_request(
         elif existing["status"] == "needs_confirmation":
             return existing["response_payload"]
         elif existing["status"] == "rejected":
-            return {"status": "rejected", "request_id": str(existing["id"])}
+            return existing["response_payload"]
+        elif existing["status"] == "failed":
+            return existing["response_payload"]
         elif existing["status"] in ("received", "processing"):
-            if existing["response_payload"]:
-                return existing["response_payload"]
-
-    request_id = uuid4()
-    client_version = payload.get("client_version")
-    note = payload.get("note")
-
-    # Insert initial ingestion_request row if not existing
-    if not existing:
+            request_id = existing["id"]
+    else:
+        request_id = uuid4()
         inserted = ingestion_repo.create_ingestion_request(
             conn=conn,
             request_id=request_id,
@@ -239,7 +247,7 @@ def process_expense_request(
             request_hash=req_hash,
             status="processing",
             captured_at=captured_at,
-            client_version=client_version
+            client_version=payload.get("client_version")
         )
         if not inserted:
             # Another concurrent request inserted this key first -> lock it
@@ -250,8 +258,8 @@ def process_expense_request(
                 if existing["response_payload"]:
                     return existing["response_payload"]
                 request_id = existing["id"]
-    else:
-        request_id = existing["id"]
+    if not existing:
+        pass
 
     # 4. Fetch household active accounts, aliases, and categories for extraction & validation
     accounts = accounts_repo.list_accounts(conn, household_id)
@@ -275,7 +283,7 @@ def process_expense_request(
                 "status": r[4]
             })
 
-    # Enrich active accounts with their active aliases for Gemini prompt
+    # Enrich active accounts with their active aliases for Gemini prompt (household-scoped)
     for a in active_accounts:
         a["aliases"] = [al["alias_text"] for al in all_aliases if al["account_id"] == a["id"]]
 
@@ -286,15 +294,15 @@ def process_expense_request(
     extracted: ExpenseExtractionResult = gemini_service.extract_expense(
         image_bytes=img_data,
         mime_type=mime_type,
-        note=note,
+        note=payload.get("note"),
         accounts=active_accounts,
         categories=active_expense_categories,
         captured_at=captured_at
     )
 
-    # 6. Date fallback: if occurred_on is missing or low-confidence, use local calendar date of captured_at
+    # 6. Field-level confidence decision model: missing confidence defaults conservatively to 0.0
     field_conf = extracted.field_confidence or {}
-    date_conf = field_conf.get("date", 1.0)
+    date_conf = field_conf.get("date", 0.0)
     if extracted.occurred_on is not None and date_conf >= FIELD_CONFIDENCE_THRESHOLD:
         occurred_on = extracted.occurred_on
     else:
@@ -302,10 +310,12 @@ def process_expense_request(
 
     merchant = extracted.merchant.strip() if extracted.merchant else None
 
-    # Validate payment_mode
-    pm = (extracted.payment_mode or "one_off").strip().lower()
-    if pm not in ("one_off", "installment"):
+    # Validate payment_mode (MUST NOT default to one_off)
+    raw_pm = extracted.payment_mode
+    if not raw_pm or not isinstance(raw_pm, str) or raw_pm.strip().lower() not in ("one_off", "installment"):
         pm = "unknown"
+    else:
+        pm = raw_pm.strip().lower()
 
     # Deterministic account and category resolution
     resolved_acc, acc_warn = _resolve_account(extracted.from_account, active_accounts, all_aliases)
@@ -317,11 +327,11 @@ def process_expense_request(
     if pm not in ("one_off", "installment"):
         warnings.append({
             "code": "INVALID_PAYMENT_MODE",
-            "message": f"未识别的支付模式: '{extracted.payment_mode}'，请手动确认。"
+            "message": f"未识别或缺失支付模式: '{raw_pm}'，请手动确认。"
         })
 
     # Account confidence & resolution
-    acc_conf = field_conf.get("account", 1.0)
+    acc_conf = field_conf.get("account", 0.0)
     if acc_warn:
         warnings.append({
             "code": acc_warn,
@@ -335,7 +345,7 @@ def process_expense_request(
 
     # Currency validation (NO SILENT CNY DEFAULT)
     raw_curr = extracted.original_currency
-    curr_conf = field_conf.get("currency", 1.0)
+    curr_conf = field_conf.get("currency", 0.0)
     quantized_amt = None
     curr = None
 
@@ -361,7 +371,7 @@ def process_expense_request(
 
     # Amount validation
     amt = extracted.total_amount if pm == "installment" else extracted.original_amount
-    amt_conf = field_conf.get("amount", 1.0)
+    amt_conf = field_conf.get("amount", 0.0)
     if amt is None:
         warnings.append({
             "code": "AMOUNT_UNCLEAR",
@@ -379,78 +389,64 @@ def process_expense_request(
                 raise ValueError("Amount must be positive.")
             if curr:
                 quantized_amt = quantize_money(dec_amt, curr)
-            else:
-                quantized_amt = dec_amt
         except Exception:
-            quantized_amt = None
             warnings.append({
                 "code": "AMOUNT_UNCLEAR",
-                "message": "金额格式无效或必须为正数。"
+                "message": "消费金额格式无效或必须为正数。"
             })
 
-    # Installment-specific validation
-    if pm == "installment":
-        total_periods = extracted.total_periods
-        periods_conf = field_conf.get("total_periods", 1.0)
-        if total_periods is None or not isinstance(total_periods, int) or total_periods < 2 or total_periods > 120 or periods_conf < FIELD_CONFIDENCE_THRESHOLD:
-            warnings.append({
-                "code": "INVALID_INSTALLMENT_PERIODS",
-                "message": f"分期期数无效或不明确 (必须在2-120期之间)。Given: {total_periods}"
-            })
-
-        if resolved_acc and resolved_acc.get("account_type") != "credit":
-            warnings.append({
-                "code": "NON_CREDIT_INSTALLMENT_ACCOUNT",
-                "message": f"分期消费仅支持信用卡账户，账户 '{resolved_acc['name']}' 是 {resolved_acc.get('account_type')} 账户。"
-            })
-    else:
-        # Category validation for one-off expenses
-        cat_conf = field_conf.get("category", 1.0)
+    # Category validation (Category is optional for installments)
+    cat_conf = field_conf.get("category", 0.0)
+    if pm != "installment":
         if cat_warn:
             warnings.append({
                 "code": cat_warn,
-                "message": "未能明确支出分类，请手动确认。"
+                "message": "未能识别消费分类，请手动选择。"
             })
         elif cat_conf < FIELD_CONFIDENCE_THRESHOLD:
             warnings.append({
                 "code": "LOW_CATEGORY_CONFIDENCE",
-                "message": "支出分类置信度较低，请手动确认。"
+                "message": "消费分类识别置信度较低，请手动确认。"
             })
 
-    # CRITICAL INVARIANT: MERCHANT NOVELTY ALONE NEVER FORCES CONFIRMATION.
-    # Check if confirmation is required
-    needs_confirm = (
-        len(warnings) > 0
-        or resolved_acc is None
-        or (pm == "one_off" and resolved_cat is None)
-        or quantized_amt is None
-        or curr is None
-        or pm not in ("one_off", "installment")
-        or (pm == "installment" and (extracted.total_periods is None or not isinstance(extracted.total_periods, int) or extracted.total_periods < 2 or extracted.total_periods > 120 or (resolved_acc and resolved_acc.get("account_type") != "credit")))
-    )
+    # Branch C: Installment validation
+    total_periods = None
+    if pm == "installment":
+        if resolved_acc and resolved_acc["account_type"] != "credit":
+            warnings.append({
+                "code": "NON_CREDIT_INSTALLMENT_ACCOUNT",
+                "message": f"分期计划仅支持信用卡账户，'{resolved_acc['name']}' 不是信用卡账户。"
+            })
 
-    # 7. Branch D: Needs Confirmation
-    if needs_confirm:
+        periods_conf = field_conf.get("total_periods", 0.0)
+        raw_periods = extracted.total_periods
+        if raw_periods is None or not isinstance(raw_periods, int) or raw_periods < 2 or raw_periods > 120 or periods_conf < FIELD_CONFIDENCE_THRESHOLD:
+            warnings.append({
+                "code": "INVALID_INSTALLMENT_PERIODS",
+                "message": "分期期数缺失或无效（支持 2-120 期），请手动确认。"
+            })
+        else:
+            total_periods = raw_periods
+
+    # Note: Merchant novelty alone NEVER forces confirmation.
+
+    # 7. Check if request branches to Branch D: needs_confirmation
+    if warnings or quantized_amt is None or curr is None or resolved_acc is None or (pm != "installment" and resolved_cat is None) or pm not in ("one_off", "installment"):
         draft_payload = {
-            "occurred_on": str(occurred_on),
+            "occurred_on": occurred_on.isoformat() if occurred_on else None,
             "merchant": merchant,
             "original_amount": str(quantized_amt) if quantized_amt is not None else (str(amt) if amt is not None else None),
             "original_currency": curr or raw_curr,
-            "from_account": {
-                "id": str(resolved_acc["id"]),
-                "name": resolved_acc["name"]
-            } if resolved_acc else None,
-            "category": {
-                "id": str(resolved_cat["id"]),
-                "name": resolved_cat["name"]
-            } if resolved_cat else None,
-            "payment_mode": pm if pm in ("one_off", "installment") else "one_off",
-            "total_periods": extracted.total_periods if pm == "installment" else None
+            "from_account": {"id": str(resolved_acc["id"]), "name": resolved_acc["name"]} if resolved_acc else None,
+            "category": {"id": str(resolved_cat["id"]), "name": resolved_cat["name"]} if resolved_cat else None,
+            "payment_mode": raw_pm,  # Keep extracted/raw payment mode, DO NOT rewrite to one_off
+            "total_periods": total_periods or extracted.total_periods,
+            "remarks": payload.get("note")
         }
 
         acc_name_disp = resolved_acc["name"] if resolved_acc else "未知账户"
         cat_name_disp = resolved_cat["name"] if resolved_cat else "未分类"
-        amt_disp = f"{quantized_amt} {curr}" if (quantized_amt is not None and curr) else "金额待定"
+        amt_disp = f"{draft_payload['original_amount']} {draft_payload['original_currency'] or ''}".strip()
         display_summary = f"⚠️ 请确认\n{amt_disp} · {merchant or '未知商户'}\n{acc_name_disp} · {cat_name_disp}"
 
         response_payload = {
@@ -470,15 +466,11 @@ def process_expense_request(
         )
         return response_payload
 
-    # --- High Confidence & Fully Validated Paths ---
-
-    # 8. Branch C: Installment Plan Capture
+    # 8. Automated Execution: Branch C (Installment) vs Branch B (Foreign Credit Card) vs Branch A (One-off)
     if pm == "installment":
-        total_periods = extracted.total_periods
         plan_id = uuid4()
         schedules = calculate_installment_schedule(quantized_amt, curr, total_periods)
 
-        # Insert installment plan
         plan = installments_repo.create_installment_plan(
             conn=conn,
             plan_id=plan_id,
@@ -494,7 +486,6 @@ def process_expense_request(
             source_request_id=request_id
         )
 
-        # Insert schedule periods
         for idx, period_amt in enumerate(schedules, start=1):
             installments_repo.create_installment_period(
                 conn=conn,
@@ -506,7 +497,6 @@ def process_expense_request(
                 status="scheduled"
             )
 
-        # Audit event for plan creation
         audit_repo.insert_audit_event(
             conn=conn,
             household_id=household_id,
@@ -555,17 +545,9 @@ def process_expense_request(
         )
         return response_payload
 
-    # 9. Branch A & B: One-off Expense (Same Currency vs Foreign Credit Card)
-    is_foreign_card = (resolved_acc["currency"] != curr)
-
+    # Branch B: Foreign Credit Card Expense
+    is_foreign_card = (resolved_acc["account_type"] == "credit" and curr != resolved_acc["currency"])
     if is_foreign_card:
-        # Foreign currency card expense estimation rule
-        if resolved_acc["account_type"] != "credit":
-            raise LedgerDomainError(
-                f"Foreign currency expense on non-credit account {resolved_acc['name']} is not supported for auto-estimation.",
-                code="CURRENCY_MISMATCH"
-            )
-
         fx_service = reference_fx_service or ReferenceFxService()
         est_from_amount, fx_rate = fx_service.estimate_settlement(
             original_amount=quantized_amt,
@@ -574,7 +556,6 @@ def process_expense_request(
             as_of=occurred_on
         )
 
-        # Record expense with estimated settlement leg
         tx = ledger_service.record_expense(
             conn=conn,
             household_id=household_id,
@@ -584,7 +565,7 @@ def process_expense_request(
             category_id=resolved_cat["id"],
             occurred_on=occurred_on,
             merchant=merchant,
-            remarks=note,
+            remarks=payload.get("note"),
             source="shortcut",
             created_by_user_id=user_id,
             created_by_device_id=device_id,
@@ -614,7 +595,12 @@ def process_expense_request(
             "display_summary": display_summary
         }
     else:
-        # Standard one-off expense (same currency)
+        # Branch A: Standard One-Off Expense
+        if curr != resolved_acc["currency"]:
+            raise CurrencyMismatchError(
+                f"Expense currency {curr} does not match debit account {resolved_acc['name']} ({resolved_acc['currency']})."
+            )
+
         tx = ledger_service.record_expense(
             conn=conn,
             household_id=household_id,
@@ -624,7 +610,7 @@ def process_expense_request(
             category_id=resolved_cat["id"],
             occurred_on=occurred_on,
             merchant=merchant,
-            remarks=note,
+            remarks=payload.get("note"),
             source="shortcut",
             created_by_user_id=user_id,
             created_by_device_id=device_id,
@@ -701,7 +687,9 @@ def confirm_ingestion_request(
 
     # Idempotent replay if already committed
     if row["status"] == "committed":
-        return row["response_payload"]
+        if row["response_payload"]:
+            return row["response_payload"]
+        return {"status": "committed", "request_id": str(request_id)}
 
     if row["status"] != "needs_confirmation":
         raise InvalidRequestStateError(f"Cannot confirm request in status '{row['status']}'.")
@@ -734,15 +722,25 @@ def confirm_ingestion_request(
     if account["status"] != "active":
         raise AccountInactiveError(acc_id)
 
+    payment_mode = draft.get("payment_mode")
+    if not payment_mode or payment_mode not in ("one_off", "installment"):
+        raise InvalidPaymentModeError(f"Cannot confirm request with unresolved or invalid payment_mode: '{payment_mode}'.")
+
     # Branch C: Installment
-    payment_mode = draft.get("payment_mode", "one_off")
     if payment_mode == "installment":
         if account["account_type"] != "credit":
             raise LedgerDomainError(f"Account {account['name']} is not a credit account for installments.", code="NON_CREDIT_INSTALLMENT_ACCOUNT")
 
-        total_periods = int(draft.get("total_periods") or 12)
+        raw_periods = draft.get("total_periods")
+        if raw_periods is None:
+            raise InvalidInstallmentPeriodsError("Installment total_periods is missing in draft.")
+        try:
+            total_periods = int(raw_periods)
+        except (ValueError, TypeError):
+            raise InvalidInstallmentPeriodsError(f"Invalid installment total_periods: {raw_periods}")
+
         if total_periods < 2 or total_periods > 120:
-            raise InvalidTransactionShapeError(f"Installment total_periods must be between 2 and 120. Given: {total_periods}")
+            raise InvalidInstallmentPeriodsError(f"Installment total_periods must be between 2 and 120. Given: {total_periods}")
 
         plan_id = uuid4()
         schedules = calculate_installment_schedule(dec_amount, curr, total_periods)
@@ -821,22 +819,20 @@ def confirm_ingestion_request(
         )
         return response_payload
 
-    # Re-validate category for one-off expense
+    # Branch A / B: One-off
     cat_info = draft.get("category") or {}
     cat_id = UUID(cat_info["id"]) if isinstance(cat_info.get("id"), str) else cat_info.get("id")
     if not cat_id:
-        raise CategoryNotFoundError("Category is not resolved.")
+        raise CategoryNotFoundError("Category is not resolved in draft.")
     category = accounts_repo.get_category(conn, cat_id)
     if not category:
         raise CategoryNotFoundError(cat_id)
     if category["household_id"] != household_id:
         raise HouseholdMismatchError(f"Category {cat_id} does not belong to household.")
-    if category["category_type"] != "expense":
-        raise CategoryMismatchError(f"Category {cat_id} is not an expense category.")
     if category["status"] != "active":
-        raise CategoryMismatchError(f"Category {cat_id} is inactive.")
+        raise CategoryNotFoundError(f"Category {cat_id} is inactive.")
 
-    is_foreign_card = (account["currency"] != curr)
+    is_foreign_card = (account["account_type"] == "credit" and curr != account["currency"])
     if is_foreign_card:
         if account["account_type"] != "credit":
             raise LedgerDomainError(
@@ -996,9 +992,18 @@ def revise_ingestion_request(
                 raise CategoryNotFoundError(f"Expense category {target_cat_id} not found or inactive.")
             draft["category"] = {"id": str(cat["id"]), "name": cat["name"]}
         if "payment_mode" in structured_fields:
-            draft["payment_mode"] = structured_fields["payment_mode"]
+            p_mode = structured_fields["payment_mode"]
+            if p_mode not in ("one_off", "installment"):
+                raise InvalidPaymentModeError(f"Invalid payment_mode '{p_mode}'. Must be 'one_off' or 'installment'.")
+            draft["payment_mode"] = p_mode
         if "total_periods" in structured_fields:
-            draft["total_periods"] = structured_fields["total_periods"]
+            try:
+                t_periods = int(structured_fields["total_periods"])
+                if t_periods < 2 or t_periods > 120:
+                    raise InvalidInstallmentPeriodsError(f"total_periods must be between 2 and 120. Given: {t_periods}")
+                draft["total_periods"] = t_periods
+            except (ValueError, TypeError):
+                raise InvalidInstallmentPeriodsError(f"Invalid total_periods: {structured_fields['total_periods']}")
 
     if correction_note:
         note_lower = correction_note.lower()
@@ -1041,10 +1046,10 @@ def reject_ingestion_request(
 ) -> Dict[str, Any]:
     """
     Rejects a pending or confirmable ingestion request.
-    Strictly follows state machine: only needs_confirmation can be rejected.
-    Already rejected requests return a replay without mutating metadata.
+    Produces zero financial transactions, balance changes, or installment plans.
     """
     device_id = device["device_id"]
+
     row = ingestion_repo.lock_ingestion_request(conn, request_id)
     if not row:
         raise RequestNotFoundError(f"Ingestion request {request_id} not found.")
@@ -1053,25 +1058,24 @@ def reject_ingestion_request(
         raise HouseholdMismatchError("Ingestion request does not belong to the authenticated device.")
 
     if row["status"] == "committed":
-        raise LedgerDomainError("Cannot reject an already committed transaction.", code="CANNOT_REJECT_COMMITTED")
+        raise InvalidRequestStateError("Cannot reject an already committed ingestion request.")
 
     if row["status"] == "rejected":
-        return {
-            "status": "rejected",
-            "request_id": str(request_id)
-        }
+        return row["response_payload"]
 
-    if row["status"] != "needs_confirmation":
+    if row["status"] not in ("needs_confirmation", "received", "processing"):
         raise InvalidRequestStateError(f"Cannot reject request in status '{row['status']}'.")
+
+    response_payload = {
+        "status": "rejected",
+        "request_id": str(request_id),
+        "display_summary": f"已放弃记账: {reason or '用户取消'}"
+    }
 
     ingestion_repo.update_ingestion_request_status(
         conn=conn,
         request_id=request_id,
         status="rejected",
-        failure_code=reason or "User rejected draft"
+        response_payload=response_payload
     )
-
-    return {
-        "status": "rejected",
-        "request_id": str(request_id)
-    }
+    return response_payload

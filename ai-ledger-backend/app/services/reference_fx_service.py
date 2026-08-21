@@ -55,10 +55,11 @@ class FrankfurterFxProvider(FxRateProvider):
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                 if resp.status != 200:
                     return None
-                data = json.loads(resp.read().decode('utf-8'))
+                data = json.loads(resp.read().decode('utf-8'), parse_float=Decimal)
                 rates = data.get("rates", {})
                 if to_curr in rates:
-                    return parse_decimal(str(rates[to_curr]))
+                    rate_val = rates[to_curr]
+                    return parse_decimal(rate_val) if not isinstance(rate_val, Decimal) else rate_val
                 return None
         except urllib.error.HTTPError as e:
             if e.code == 404:
@@ -77,10 +78,16 @@ class FrankfurterFxProvider(FxRateProvider):
                         )
                         with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                             if resp.status == 200:
-                                data = json.loads(resp.read().decode('utf-8'))
+                                data = json.loads(resp.read().decode('utf-8'), parse_float=Decimal)
                                 rates = data.get("rates", {})
                                 if to_curr in rates:
-                                    return parse_decimal(str(rates[to_curr]))
+                                    rate_val = rates[to_curr]
+                                    return parse_decimal(rate_val) if not isinstance(rate_val, Decimal) else rate_val
+                    except urllib.error.HTTPError as fe:
+                        if 500 <= fe.code < 600:
+                            raise FxProviderUnavailableError(f"Reference FX service returned HTTP {fe.code}.")
+                    except (urllib.error.URLError, socket.timeout, TimeoutError) as fe:
+                        raise FxProviderUnavailableError(f"Reference FX service connection timed out or failed: {fe}")
                     except Exception:
                         pass
                 return None
@@ -90,6 +97,8 @@ class FrankfurterFxProvider(FxRateProvider):
         except (urllib.error.URLError, socket.timeout, TimeoutError) as e:
             raise FxProviderUnavailableError(f"Reference FX service connection timed out or failed: {e}")
         except Exception as e:
+            if isinstance(e, (FxProviderUnavailableError, FxRateUnavailableError)):
+                raise
             raise FxProviderUnavailableError(f"Reference FX service error: {e}")
 
 class ReferenceFxService:

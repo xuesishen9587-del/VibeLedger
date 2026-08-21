@@ -109,6 +109,10 @@ class InvalidPaymentModeError(LedgerDomainError):
     def __init__(self, message: str = "Invalid or unsupported payment mode."):
         super().__init__(message, code="INVALID_PAYMENT_MODE")
 
+class InvalidInstallmentPeriodsError(LedgerDomainError):
+    def __init__(self, message: str = "Installment total_periods must be between 2 and 120."):
+        super().__init__(message, code="INVALID_INSTALLMENT_PERIODS")
+
 
 # --- Projection Calculation ---
 

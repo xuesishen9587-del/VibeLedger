@@ -34,9 +34,10 @@ def ensure_extensions(conn) -> Dict[str, str]:
     Queries PostgreSQL catalogs to discover installed extension namespaces.
     If any required extension is missing, attempts safe installation into the dedicated
     shared 'extensions' schema (creating 'extensions' schema if needed) using
-    schema-qualified CREATE EXTENSION ... SCHEMA "extensions".
-    Falls back to 'public' if 'extensions' creation is not permitted, but NEVER installs
-    into a disposable target/test DB_SCHEMA.
+    schema-qualified CREATE EXTENSION ... SCHEMA "extensions", or explicit fallback
+    to SCHEMA "public".
+    NEVER runs schema-less CREATE EXTENSION or installs into disposable target/test DB_SCHEMA.
+    Raises ExtensionBootstrapError if any required extension remains uninstalled.
     Returns mapping from extension name to its discovered/installed schema name.
     """
     with conn.cursor() as cur:
@@ -63,6 +64,8 @@ def ensure_extensions(conn) -> Dict[str, str]:
                 preferred_schema = "public"
 
             for ext in sorted(missing):
+                installed_ok = False
+                # Try preferred schema ("extensions" or "public")
                 try:
                     with transaction(conn):
                         with conn.cursor() as cur_ext:
@@ -72,18 +75,23 @@ def ensure_extensions(conn) -> Dict[str, str]:
                                     schema=sql.Identifier(preferred_schema)
                                 )
                             )
+                    installed_ok = True
                 except Exception as ex:
-                    # Fallback to default schema if custom schema is disallowed
-                    try:
-                        with transaction(conn):
-                            with conn.cursor() as cur_ext:
-                                cur_ext.execute(
-                                    sql.SQL('CREATE EXTENSION IF NOT EXISTS {ext};').format(
-                                        ext=sql.Identifier(ext)
+                    if preferred_schema == "extensions":
+                        # Explicit fallback ONLY to explicit 'public' schema
+                        try:
+                            with transaction(conn):
+                                with conn.cursor() as cur_ext:
+                                    cur_ext.execute(
+                                        sql.SQL('CREATE EXTENSION IF NOT EXISTS {ext} SCHEMA "public";').format(
+                                            ext=sql.Identifier(ext)
+                                        )
                                     )
-                                )
-                    except Exception as fallback_ex:
-                        print(f"WARN: Could not automatically create extension '{ext}': {fallback_ex}")
+                            installed_ok = True
+                        except Exception as pub_ex:
+                            print(f"WARN: Could not install extension '{ext}' in 'public' schema: {pub_ex}")
+                    else:
+                        print(f"WARN: Could not install extension '{ext}' in '{preferred_schema}' schema: {ex}")
 
             # Re-check after installation attempts
             cur.execute(

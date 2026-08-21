@@ -19,6 +19,8 @@ class ReviseRequestPayload(BaseModel):
     original_currency: Optional[str] = Field(None, description="Structured currency revision")
     from_account_id: Optional[UUID] = Field(None, description="Structured account ID revision")
     category_id: Optional[UUID] = Field(None, description="Structured category ID revision")
+    payment_mode: Optional[str] = Field(None, description="Payment mode: one_off or installment")
+    total_periods: Optional[int] = Field(None, description="Total periods for installment plan (2-120)")
 
 class RejectRequestPayload(BaseModel):
     reason: Optional[str] = Field("User rejected draft", description="Reason for rejecting the ingestion request")

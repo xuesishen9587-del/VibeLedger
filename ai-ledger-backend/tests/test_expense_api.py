@@ -39,9 +39,8 @@ from app.domain.transactions import (
 
 # Valid minimal 1x1 image fixture bytes
 VALID_PNG_BYTES = (
-    b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01'
-    b'\x08\x06\x00\x00\x00\x1f\x15c4\x00\x00\x00\rIDATx\x9cc\xf8\xff\xff?'
-    b'\x00\x05\xfe\x02\xfe\xa74e\xf4\x00\x00\x00\x00IEND\xaeB`\x82'
+    b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde'
+    b'\x00\x00\x00\x0cIDATx\x9cc\xf8\xcf\xc0\x00\x00\x03\x01\x01\x00\xc9\xfe\x92\xef\x00\x00\x00\x00IEND\xaeB`\x82'
 )
 VALID_JPEG_BYTES = (
     b'\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x01\x00H\x00H\x00\x00\xff\xdb'
@@ -856,7 +855,7 @@ class TestExpenseApi(unittest.TestCase):
                 category="餐饮美食",
                 payment_mode="one_off",
                 confidence=1.0,
-                field_confidence={"amount": 1.0, "currency": 1.0, "account": 1.0, "category": 1.0}
+                field_confidence={"amount": 1.0, "currency": 1.0, "account": 1.0, "category": 1.0, "date": 1.0}
             ))
             res = self.client.post(
                 "/api/v1/expenses",
@@ -1138,7 +1137,10 @@ class TestExpenseApi(unittest.TestCase):
             original_amount=Decimal("45.00"),
             original_currency="CNY",
             from_account="招商银行储蓄卡",
-            category=None # forces confirmation
+            category=None, # forces confirmation
+            payment_mode="one_off",
+            confidence=1.0,
+            field_confidence={"amount": 1.0, "currency": 1.0, "account": 1.0, "category": 1.0, "date": 1.0}
         ))
         res_draft = self.client.post(
             "/api/v1/expenses",
@@ -1194,7 +1196,10 @@ class TestExpenseApi(unittest.TestCase):
             original_amount=Decimal("80.00"),
             original_currency="CNY",
             from_account="招商银行储蓄卡",
-            category=None
+            category=None,
+            payment_mode="one_off",
+            confidence=1.0,
+            field_confidence={"amount": 1.0, "currency": 1.0, "account": 1.0, "category": 1.0, "date": 1.0}
         ))
         res_draft = self.client.post(
             "/api/v1/expenses",
@@ -1347,6 +1352,252 @@ class TestExpenseApi(unittest.TestCase):
             cur.execute("SELECT COUNT(*) FROM installment_plans WHERE id = %s;", (plan_id,))
             self.assertEqual(cur.fetchone()[0], 0)
             cur.execute("SELECT COUNT(*) FROM installment_periods WHERE plan_id = %s;", (plan_id,))
+            self.assertEqual(cur.fetchone()[0], 0)
+
+    # =========================================================================
+    # 12. PHASE 3 FINAL-FIX REGRESSION TESTS
+    # =========================================================================
+
+    def test_45_confirm_installment_rejects_missing_periods(self):
+        self.mock_gemini.set_next_result(ExpenseExtractionResult(
+            occurred_on=date(2026, 8, 19),
+            merchant="Apple Store",
+            original_amount=Decimal("9000.00"),
+            original_currency="CNY",
+            from_account="招商银行信用卡",
+            category="餐饮美食",
+            payment_mode="installment",
+            total_amount=Decimal("9000.00"),
+            total_periods=None, # Missing total periods
+            confidence=1.0,
+            field_confidence={"amount": 1.0, "currency": 1.0, "account": 1.0, "category": 1.0, "date": 1.0}
+        ))
+
+        res = self.client.post(
+            "/api/v1/expenses",
+            headers={"Authorization": f"Bearer {self.raw_token_1}"},
+            json={
+                "idempotency_key": "test-key-45-missing-periods",
+                "captured_at": "2026-08-19T10:00:00+08:00",
+                "image": self._sample_jpeg_payload()
+            }
+        )
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.json()["status"], "needs_confirmation")
+        req_id = res.json()["request_id"]
+
+        # Directly confirming draft without total_periods must be rejected with 422 (never default to 12)
+        res_conf = self.client.post(
+            f"/api/v1/ingestion-requests/{req_id}/confirm",
+            headers={"Authorization": f"Bearer {self.raw_token_1}"}
+        )
+        self.assertEqual(res_conf.status_code, 422)
+        self.assertEqual(res_conf.json()["error"]["code"], "INVALID_INSTALLMENT_PERIODS")
+
+        # Zero installment plans created
+        with self.conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM installment_plans WHERE source_request_id = %s;", (UUID(req_id),))
+            self.assertEqual(cur.fetchone()[0], 0)
+
+    def test_46_revise_payment_mode_and_total_periods_then_confirm(self):
+        # Start with draft where payment_mode was missing / invalid
+        self.mock_gemini.set_next_result(ExpenseExtractionResult(
+            occurred_on=date(2026, 8, 19),
+            merchant="Apple Store",
+            original_amount=Decimal("6000.00"),
+            original_currency="CNY",
+            from_account="招商银行信用卡",
+            category="餐饮美食",
+            payment_mode=None, # Unresolved
+            confidence=1.0,
+            field_confidence={"amount": 1.0, "currency": 1.0, "account": 1.0, "category": 1.0, "date": 1.0}
+        ))
+
+        res = self.client.post(
+            "/api/v1/expenses",
+            headers={"Authorization": f"Bearer {self.raw_token_1}"},
+            json={
+                "idempotency_key": "test-key-46-revise-installment",
+                "captured_at": "2026-08-19T10:00:00+08:00",
+                "image": self._sample_jpeg_payload()
+            }
+        )
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.json()["status"], "needs_confirmation")
+        req_id = res.json()["request_id"]
+
+        # Revise payment_mode and total_periods
+        res_rev = self.client.post(
+            f"/api/v1/ingestion-requests/{req_id}/revise",
+            headers={"Authorization": f"Bearer {self.raw_token_1}"},
+            json={
+                "payment_mode": "installment",
+                "total_periods": 6
+            }
+        )
+        self.assertEqual(res_rev.status_code, 200)
+        self.assertEqual(res_rev.json()["draft"]["payment_mode"], "installment")
+        self.assertEqual(res_rev.json()["draft"]["total_periods"], 6)
+
+        # Now confirm successfully
+        res_conf = self.client.post(
+            f"/api/v1/ingestion-requests/{req_id}/confirm",
+            headers={"Authorization": f"Bearer {self.raw_token_1}"}
+        )
+        self.assertEqual(res_conf.status_code, 200)
+        self.assertEqual(res_conf.json()["status"], "committed")
+        self.assertEqual(res_conf.json()["payment_mode"], "installment")
+        self.assertEqual(res_conf.json()["total_periods"], 6)
+
+        # Exactly 1 installment plan and 6 periods in DB
+        with self.conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM installment_plans WHERE source_request_id = %s;", (UUID(req_id),))
+            self.assertEqual(cur.fetchone()[0], 1)
+            cur.execute("SELECT total_periods FROM installment_plans WHERE source_request_id = %s;", (UUID(req_id),))
+            self.assertEqual(cur.fetchone()[0], 6)
+
+    def test_47_frankfurter_provider_mocked_network_boundary(self):
+        import urllib.request
+        from unittest.mock import patch, MagicMock
+
+        provider = FrankfurterFxProvider(base_url="https://api.frankfurter.app", timeout_seconds=5.0)
+
+        def make_mock_resp(status: int, body: bytes):
+            m = MagicMock()
+            m.status = status
+            m.read.return_value = body
+            m.__enter__.return_value = m
+            m.__exit__.return_value = False
+            return m
+
+        # 1. Weekend date (Saturday 2026-08-22) queries Friday (2026-08-21)
+        mock_resp_sat = make_mock_resp(200, b'{"rates":{"USD": 1.0850}}')
+
+        with patch("urllib.request.urlopen", return_value=mock_resp_sat) as mock_url:
+            rate = provider.fetch_rate("EUR", "USD", as_of=date(2026, 8, 22))
+            self.assertEqual(rate, Decimal("1.0850"))
+            # Assert Friday was in requested URL
+            req_arg = mock_url.call_args[0][0]
+            self.assertIn("2026-08-21", req_arg.full_url)
+
+        # 2. Historical 404 fallback to previous business day
+        err_404 = urllib.error.HTTPError(url="http://fake", code=404, msg="Not Found", hdrs={}, fp=None)
+        mock_resp_prev = make_mock_resp(200, b'{"rates":{"USD": 1.0825}}')
+
+        with patch("urllib.request.urlopen", side_effect=[err_404, mock_resp_prev]):
+            rate = provider.fetch_rate("EUR", "USD", as_of=date(2026, 8, 19))
+            self.assertEqual(rate, Decimal("1.0825"))
+
+        # 3. Timeout raises FxProviderUnavailableError
+        with patch("urllib.request.urlopen", side_effect=TimeoutError("Connection timed out")):
+            with self.assertRaises(FxProviderUnavailableError):
+                provider.fetch_rate("EUR", "USD", as_of=date(2026, 8, 19))
+
+        # 4. HTTP 500 raises FxProviderUnavailableError
+        err_500 = urllib.error.HTTPError(url="http://fake", code=500, msg="Internal Server Error", hdrs={}, fp=None)
+        with patch("urllib.request.urlopen", side_effect=err_500):
+            with self.assertRaises(FxProviderUnavailableError):
+                provider.fetch_rate("EUR", "USD", as_of=date(2026, 8, 19))
+
+        # 5. Unsupported / missing rate returns None
+        mock_resp_empty = make_mock_resp(200, b'{"rates":{}}')
+        with patch("urllib.request.urlopen", return_value=mock_resp_empty):
+            rate = provider.fetch_rate("EUR", "XYZ", as_of=date(2026, 8, 19))
+            self.assertIsNone(rate)
+
+        # 6. Strict Decimal preservation (no float intermediate)
+        mock_resp_dec = make_mock_resp(200, b'{"rates":{"USD": 1.085000000000000001}}')
+        with patch("urllib.request.urlopen", return_value=mock_resp_dec):
+            rate = provider.fetch_rate("EUR", "USD", as_of=date(2026, 8, 19))
+            self.assertIsInstance(rate, Decimal)
+            self.assertEqual(rate, Decimal("1.085000000000000001"))
+
+        # 7. Inverse rate calculation in ReferenceFxService
+        svc = ReferenceFxService(provider=provider)
+        with patch("urllib.request.urlopen", side_effect=[mock_resp_empty, mock_resp_sat]):
+            inv_rate = svc.get_rate("USD", "EUR", as_of=date(2026, 8, 22))
+            self.assertIsInstance(inv_rate, Decimal)
+            self.assertEqual(inv_rate, Decimal("1") / Decimal("1.0850"))
+
+    def test_48_image_validation_corrupted_payload_with_valid_magic_bytes(self):
+        # Valid JPEG magic bytes (\xff\xd8\xff) followed by corrupted garbage bytes
+        corrupted_jpeg_bytes = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00corrupted_non_image_garbage_payload_12345"
+        res = self.client.post(
+            "/api/v1/expenses",
+            headers={"Authorization": f"Bearer {self.raw_token_1}"},
+            json={
+                "idempotency_key": "test-key-48-corrupted-image",
+                "captured_at": "2026-08-19T10:00:00+08:00",
+                "image": {
+                    "mime_type": "image/jpeg",
+                    "base64": base64.b64encode(corrupted_jpeg_bytes).decode('utf-8')
+                }
+            }
+        )
+        self.assertEqual(res.status_code, 422)
+        self.assertEqual(res.json()["error"]["code"], "INVALID_IMAGE_PAYLOAD")
+
+    def test_49_field_confidence_conservative_branching(self):
+        # Overall confidence is high (1.0), but field_confidence is empty/omits key fields
+        self.mock_gemini.set_next_result(ExpenseExtractionResult(
+            occurred_on=date(2026, 8, 19),
+            merchant="Test Merchant",
+            original_amount=Decimal("100.00"),
+            original_currency="CNY",
+            from_account="招商银行储蓄卡",
+            category="餐饮美食",
+            payment_mode="one_off",
+            confidence=1.0,
+            field_confidence={} # Empty field confidence -> must be treated conservatively
+        ))
+
+        res = self.client.post(
+            "/api/v1/expenses",
+            headers={"Authorization": f"Bearer {self.raw_token_1}"},
+            json={
+                "idempotency_key": "test-key-49-missing-field-conf",
+                "captured_at": "2026-08-19T10:00:00+08:00",
+                "image": self._sample_jpeg_payload()
+            }
+        )
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.json()["status"], "needs_confirmation")
+
+    def test_50_workflow_rollback_on_ingestion_persistence_failure(self):
+        initial_balance = accounts_repo.get_account_state(self.conn, self.acc_cny_checking)["ledger_balance"]
+
+        # Configure high confidence valid extraction
+        self.mock_gemini.set_next_result(ExpenseExtractionResult(
+            occurred_on=date(2026, 8, 19),
+            merchant="Cafe",
+            original_amount=Decimal("50.00"),
+            original_currency="CNY",
+            from_account="招商银行储蓄卡",
+            category="餐饮美食",
+            payment_mode="one_off",
+            confidence=1.0,
+            field_confidence={"amount": 1.0, "currency": 1.0, "account": 1.0, "category": 1.0, "date": 1.0}
+        ))
+
+        from unittest.mock import patch
+        with patch("app.repositories.ingestion.update_ingestion_request_status", side_effect=RuntimeError("DB error updating response status")):
+            with self.assertRaises(RuntimeError):
+                self.client.post(
+                    "/api/v1/expenses",
+                    headers={"Authorization": f"Bearer {self.raw_token_1}"},
+                    json={
+                        "idempotency_key": "test-key-50-workflow-rollback",
+                        "captured_at": "2026-08-19T10:00:00+08:00",
+                        "image": self._sample_jpeg_payload()
+                    }
+                )
+
+        # Assert outer database transaction cleanly rolled back
+        current_balance = accounts_repo.get_account_state(self.conn, self.acc_cny_checking)["ledger_balance"]
+        self.assertEqual(current_balance, initial_balance)
+
+        with self.conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM transactions WHERE merchant = 'Cafe';")
             self.assertEqual(cur.fetchone()[0], 0)
 
 if __name__ == "__main__":

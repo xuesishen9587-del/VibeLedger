@@ -152,3 +152,17 @@ class TestMigrations(unittest.TestCase):
                 )
         finally:
             conn.close()
+
+    def test_missing_extension_fallback_and_bootstrap_error(self):
+        conn = get_connection(self.test_schema)
+        try:
+            # Temporarily inject a non-existent extension to test failure & bootstrap error
+            original_required = runner.REQUIRED_EXTENSIONS
+            try:
+                runner.REQUIRED_EXTENSIONS = original_required | {"non_existent_fake_extension"}
+                with self.assertRaises(runner.ExtensionBootstrapError):
+                    runner.ensure_extensions(conn)
+            finally:
+                runner.REQUIRED_EXTENSIONS = original_required
+        finally:
+            conn.close()

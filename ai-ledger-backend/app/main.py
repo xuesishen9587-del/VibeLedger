@@ -9,6 +9,12 @@ from app.api.errors import (
 )
 from app.api.routes.expenses import router as expenses_router
 from app.api.routes.ingestion import router as ingestion_router
+from app.api.routes.accounts import router as accounts_router
+from app.api.routes.categories import router as categories_router
+from app.api.routes.transactions import router as transactions_router
+from app.api.routes.dashboard import router as dashboard_router
+from app.api.routes.credit_cards import router as credit_cards_router
+from app.api.routes.installments import router as installments_router
 
 def create_app() -> FastAPI:
     """
@@ -29,6 +35,13 @@ def create_app() -> FastAPI:
     # Register Routers
     app.include_router(expenses_router)
     app.include_router(ingestion_router)
+    app.include_router(accounts_router)
+    app.include_router(categories_router)
+    app.include_router(transactions_router)
+    app.include_router(dashboard_router)
+    app.include_router(credit_cards_router)
+    app.include_router(installments_router)
+
 
     @app.get("/api/v1/health", tags=["Health"])
     def health_check():

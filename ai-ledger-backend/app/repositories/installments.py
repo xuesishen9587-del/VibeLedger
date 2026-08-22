@@ -178,3 +178,37 @@ def list_periods_for_plan(conn, plan_id: UUID) -> List[Dict[str, Any]]:
             "created_at": r[9],
             "updated_at": r[10]
         } for r in rows]
+
+def list_installment_plans(conn, household_id: UUID) -> List[Dict[str, Any]]:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT id, household_id, credit_account_id, purchase_occurred_on, merchant,
+                   original_amount, original_currency, account_principal_amount, account_currency,
+                   total_periods, first_statement_month, status, source_request_id,
+                   created_at, updated_at
+            FROM installment_plans
+            WHERE household_id = %s
+            ORDER BY purchase_occurred_on DESC, created_at DESC;
+            """,
+            (household_id,)
+        )
+        rows = cur.fetchall()
+        return [{
+            "id": r[0],
+            "household_id": r[1],
+            "credit_account_id": r[2],
+            "purchase_occurred_on": r[3],
+            "merchant": r[4],
+            "original_amount": r[5],
+            "original_currency": r[6],
+            "account_principal_amount": r[7],
+            "account_currency": r[8],
+            "total_periods": r[9],
+            "first_statement_month": r[10],
+            "status": r[11],
+            "source_request_id": r[12],
+            "created_at": r[13],
+            "updated_at": r[14]
+        } for r in rows]
+

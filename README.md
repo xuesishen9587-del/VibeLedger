@@ -1,5 +1,7 @@
 # VibeLedger
 
+[![Backend CI](https://github.com/xuesishen9587-del/VibeLedger/actions/workflows/backend-ci.yml/badge.svg)](https://github.com/xuesishen9587-del/VibeLedger/actions/workflows/backend-ci.yml)
+
 > **AI-Powered Two-Person Household Ledger & Multi-Modal Asset Management**
 
 ---

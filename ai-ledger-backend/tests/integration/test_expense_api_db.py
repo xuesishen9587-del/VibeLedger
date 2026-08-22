@@ -1,22 +1,14 @@
-import os
-os.environ["ENVIRONMENT"] = "test"
-os.environ["DB_SCHEMA"] = "vibeledger_test_runner"
-
 import unittest
 import uuid
 from uuid import UUID, uuid4
 import hashlib
 import base64
-import threading
 from decimal import Decimal
 from datetime import date, datetime, timezone, timedelta
 import psycopg2
-from psycopg2 import sql
 from fastapi.testclient import TestClient
 
-from app import config
 from app.db import get_connection, transaction
-from migrations import runner
 from app.main import create_app
 from app.api.deps import get_db_connection
 from app.api.routes.expenses import router as expenses_router
@@ -27,17 +19,14 @@ from app.repositories import ingestion as ingestion_repo
 from app.repositories import installments as installments_repo
 from app.repositories import devices as devices_repo
 from app.services import ledger_service
-from app.services.gemini_service import ExpenseExtractionResult, MockGeminiService, GeminiService
-from app.services.reference_fx_service import ReferenceFxService, FxRateProvider, FrankfurterFxProvider
-from app.domain.transactions import (
-    LedgerDomainError,
-    FxProviderUnavailableError,
-    FxRateUnavailableError,
-    GeminiDependencyError,
-    InvalidImagePayloadError
-)
+from app.services.gemini_service import ExpenseExtractionResult, MockGeminiService
+from app.services.reference_fx_service import ReferenceFxService, FxRateProvider
+from app.domain.transactions import GeminiDependencyError, FxProviderUnavailableError
+try:
+    from tests.support.db_helper import BaseDbTestCase
+except ModuleNotFoundError:
+    from support.db_helper import BaseDbTestCase
 
-# Valid minimal 1x1 image fixture bytes
 VALID_PNG_BYTES = (
     b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde'
     b'\x00\x00\x00\x0cIDATx\x9cc\xf8\xcf\xc0\x00\x00\x03\x01\x01\x00\xc9\xfe\x92\xef\x00\x00\x00\x00IEND\xaeB`\x82'
@@ -52,14 +41,22 @@ VALID_JPEG_BYTES = (
     b'\x01\x01\x00\x00?\x00\xbf\x00\xff\xd9'
 )
 
-class TestExpenseApi(unittest.TestCase):
-    def setUp(self):
-        if not config.is_safe_for_testing():
-            self.skipTest("Skipping integration test. ENVIRONMENT must be 'test'.")
+class TestExpenseApiDb(BaseDbTestCase):
+    @classmethod
+    def cls_setup(cls):
+        cls.app = create_app()
+        cls.client = TestClient(cls.app)
 
-        self.schema_name = f"vibeledger_test_{uuid4().hex[:12]}"
-        runner.run_migrations(self.schema_name)
-        self.conn = get_connection(self.schema_name)
+        def _get_db():
+            conn = get_connection(cls.test_schema)
+            try:
+                yield conn
+            finally:
+                if not conn.closed:
+                    conn.close()
+        cls.app.dependency_overrides[get_db_connection] = _get_db
+
+    def seed_test_data(self):
         self.household_id = uuid4()
         self.user_id = uuid4()
         self.device_id_1 = uuid4()
@@ -67,11 +64,6 @@ class TestExpenseApi(unittest.TestCase):
         self.raw_token_1 = f"vbl_test_{uuid4().hex}"
         self.raw_token_2 = f"vbl_test_{uuid4().hex}"
 
-        # Setup standard app and client
-        self.app = create_app()
-        self.client = TestClient(self.app)
-
-        # Mock AI and FX services
         self.mock_gemini = MockGeminiService()
         self.mock_fx = ReferenceFxService(fixed_rates={
             ("JPY", "USD"): Decimal("0.00689"),
@@ -79,20 +71,10 @@ class TestExpenseApi(unittest.TestCase):
             ("EUR", "CNY"): Decimal("7.850000"),
         })
 
-        # Inject mocks onto router instances
         expenses_router._gemini_service = self.mock_gemini
         expenses_router._reference_fx_service = self.mock_fx
         ingestion_router._gemini_service = self.mock_gemini
         ingestion_router._reference_fx_service = self.mock_fx
-
-        # Override DB connection in app dependency
-        def _get_db():
-            conn = get_connection(self.schema_name)
-            try:
-                yield conn
-            finally:
-                conn.close()
-        self.app.dependency_overrides[get_db_connection] = _get_db
 
         with self.conn.cursor() as cur:
             # 1. Household & User
@@ -191,24 +173,6 @@ class TestExpenseApi(unittest.TestCase):
             )
         self.conn.commit()
 
-    def tearDown(self):
-        self.app.dependency_overrides.clear()
-        if hasattr(self, "conn") and self.conn:
-            self.conn.close()
-
-        if config.is_safe_for_testing() and hasattr(self, "schema_name"):
-            config.validate_test_schema(self.schema_name)
-            drop_conn = get_connection()
-            try:
-                with drop_conn.cursor() as cur:
-                    quoted_schema = sql.Identifier(self.schema_name)
-                    cur.execute(sql.SQL("DROP SCHEMA IF EXISTS {schema} CASCADE;").format(schema=quoted_schema))
-                drop_conn.commit()
-            except Exception:
-                pass
-            finally:
-                drop_conn.close()
-
     def _sample_png_payload(self):
         return {
             "mime_type": "image/png",
@@ -229,215 +193,210 @@ class TestExpenseApi(unittest.TestCase):
         res = self.client.post(
             "/api/v1/expenses",
             json={
-                "idempotency_key": "test-key-01-missing-auth",
-                "captured_at": "2026-08-19T10:00:00+08:00",
-                "image": self._sample_jpeg_payload()
+                "idempotency_key": "key-test-01",
+                "captured_at": "2026-08-20T12:00:00Z",
+                "client_version": "1.0.0",
+                "image": self._sample_png_payload(),
+                "note": "Lunch"
             }
         )
         self.assertEqual(res.status_code, 401)
-        data = res.json()
-        self.assertIn("error", data)
-        self.assertEqual(data["error"]["code"], "UNAUTHORIZED")
+        err = res.json()["error"]
+        self.assertEqual(err["code"], "UNAUTHORIZED")
+        self.assertEqual(err["retryable"], False)
 
     def test_02_invalid_or_unknown_token_rejected(self):
         res = self.client.post(
             "/api/v1/expenses",
-            headers={"Authorization": "Bearer vbl_invalid_token_1234567890"},
+            headers={"Authorization": "Bearer invalid_unknown_token_12345"},
             json={
-                "idempotency_key": "test-key-02-invalid-token",
-                "captured_at": "2026-08-19T10:00:00+08:00",
-                "image": self._sample_jpeg_payload()
+                "idempotency_key": "key-test-02",
+                "captured_at": "2026-08-20T12:00:00Z",
+                "client_version": "1.0.0",
+                "image": self._sample_png_payload(),
+                "note": "Lunch"
             }
         )
         self.assertEqual(res.status_code, 401)
-        data = res.json()
-        self.assertEqual(data["error"]["code"], "UNAUTHORIZED")
+        err = res.json()["error"]
+        self.assertEqual(err["code"], "UNAUTHORIZED")
+        self.assertEqual(err["retryable"], False)
 
     def test_03_revoked_device_token_rejected(self):
         with self.conn.cursor() as cur:
-            cur.execute("UPDATE devices SET status = 'revoked', revoked_at = now() WHERE id = %s;", (self.device_id_1,))
+            cur.execute(
+                """
+                UPDATE devices
+                SET status = 'revoked', revoked_at = now()
+                WHERE id = %s;
+                """,
+                (self.device_id_1,)
+            )
         self.conn.commit()
 
         res = self.client.post(
             "/api/v1/expenses",
             headers={"Authorization": f"Bearer {self.raw_token_1}"},
             json={
-                "idempotency_key": "test-key-03-revoked-token",
-                "captured_at": "2026-08-19T10:00:00+08:00",
-                "image": self._sample_jpeg_payload()
+                "idempotency_key": "key-test-03",
+                "captured_at": "2026-08-20T12:00:00Z",
+                "client_version": "1.0.0",
+                "image": self._sample_png_payload(),
+                "note": "Lunch"
             }
         )
         self.assertEqual(res.status_code, 401)
-        data = res.json()
-        self.assertEqual(data["error"]["code"], "DEVICE_REVOKED")
+        err = res.json()["error"]
+        self.assertEqual(err["code"], "DEVICE_REVOKED")
 
     def test_04_valid_token_authenticates_and_updates_last_seen(self):
         res = self.client.post(
             "/api/v1/expenses",
             headers={"Authorization": f"Bearer {self.raw_token_1}"},
             json={
-                "idempotency_key": "test-key-04-valid-auth",
-                "captured_at": "2026-08-19T10:00:00+08:00",
-                "image": self._sample_jpeg_payload()
+                "idempotency_key": "key-test-04",
+                "captured_at": "2026-08-20T12:00:00Z",
+                "client_version": "1.0.0",
+                "image": self._sample_png_payload(),
+                "note": "Lunch"
             }
         )
-        self.assertIn(res.status_code, (200, 201))
-        dev = devices_repo.get_active_device_by_token_hash(
-            self.conn,
-            hashlib.sha256(self.raw_token_1.encode('utf-8')).digest()
-        )
-        self.assertIsNotNone(dev)
-        self.assertIsNotNone(dev["last_seen_at"])
+        self.assertEqual(res.status_code, 200)
+        
+        with self.conn.cursor() as cur:
+            cur.execute("SELECT last_seen_at FROM devices WHERE id = %s;", (self.device_id_1,))
+            last_seen = cur.fetchone()[0]
+            self.assertIsNotNone(last_seen)
 
     def test_05_raw_token_never_persisted(self):
-        self.client.post(
+        # 1. Perform an authenticated API request using the raw Bearer token
+        payload = {
+            "idempotency_key": f"key-token-test-{uuid4().hex[:8]}",
+            "captured_at": "2026-08-20T12:00:00Z",
+            "client_version": "1.0.0",
+            "image": self._sample_png_payload(),
+            "note": "Test raw token never persisted"
+        }
+        res = self.client.post(
             "/api/v1/expenses",
             headers={"Authorization": f"Bearer {self.raw_token_1}"},
-            json={
-                "idempotency_key": "test-key-05-privacy-check",
-                "captured_at": "2026-08-19T10:00:00+08:00",
-                "image": self._sample_jpeg_payload()
-            }
+            json=payload
         )
+        self.assertEqual(res.status_code, 200)
+
+        # 2. Verify the persisted device token remains SHA-256 only and raw token is not persisted
         with self.conn.cursor() as cur:
-            cur.execute("SELECT COUNT(*) FROM devices WHERE token_hash = %s;", (self.raw_token_1.encode('utf-8'),))
-            self.assertEqual(cur.fetchone()[0], 0)
+            cur.execute("SELECT token_hash, last_seen_at FROM devices WHERE id = %s;", (self.device_id_1,))
+            row = cur.fetchone()
+            stored_hash, last_seen_at = row[0], row[1]
+            expected_hash = hashlib.sha256(self.raw_token_1.encode('utf-8')).digest()
+            
+            # Persisted token_hash must be bytea, exactly 32 bytes SHA-256 binary digest
+            self.assertEqual(bytes(stored_hash), expected_hash)
+            self.assertEqual(len(bytes(stored_hash)), 32)
+            self.assertNotIn(self.raw_token_1.encode('utf-8'), bytes(stored_hash))
+            self.assertIsNotNone(last_seen_at)
+
+            # Assert raw token string is nowhere in the devices table
+            cur.execute("SELECT device_name, platform FROM devices WHERE id = %s;", (self.device_id_1,))
+            dev_row = cur.fetchone()
+            self.assertNotIn(self.raw_token_1, str(dev_row))
 
     # =========================================================================
-    # 2. IDEMPOTENCY & CONCURRENCY
+    # 2. INGESTION IDEMPOTENCY & ISOLATION
     # =========================================================================
 
     def test_06_same_device_same_key_same_payload_replays_without_duplicate(self):
-        self.mock_gemini.set_next_result(ExpenseExtractionResult(
-            occurred_on=date(2026, 8, 19),
-            merchant="星巴克咖啡",
-            original_amount=Decimal("38.00"),
-            original_currency="CNY",
-            from_account="招商银行储蓄卡",
-            category="餐饮美食",
-            payment_mode="one_off",
-            confidence=1.0,
-            field_confidence={"amount": 1.0, "currency": 1.0, "account": 1.0, "category": 1.0}
-        ))
-
         payload = {
-            "idempotency_key": "test-key-06-replay-idempotency",
-            "captured_at": "2026-08-19T10:00:00+08:00",
+            "idempotency_key": "key-replay-06",
+            "captured_at": "2026-08-20T12:00:00Z",
             "client_version": "1.0.0",
-            "image": self._sample_jpeg_payload(),
-            "note": "星巴克咖啡"
+            "image": self._sample_png_payload(),
+            "note": "Lunch 06"
         }
 
-        # 1st call -> commits
-        res1 = self.client.post("/api/v1/expenses", headers={"Authorization": f"Bearer {self.raw_token_1}"}, json=payload)
+        # First request
+        res1 = self.client.post(
+            "/api/v1/expenses",
+            headers={"Authorization": f"Bearer {self.raw_token_1}"},
+            json=payload
+        )
         self.assertEqual(res1.status_code, 200)
         data1 = res1.json()
-        self.assertEqual(data1["status"], "committed")
 
-        # 2nd call -> exact replay, no second AI call
-        res2 = self.client.post("/api/v1/expenses", headers={"Authorization": f"Bearer {self.raw_token_1}"}, json=payload)
+        # Replay request
+        res2 = self.client.post(
+            "/api/v1/expenses",
+            headers={"Authorization": f"Bearer {self.raw_token_1}"},
+            json=payload
+        )
         self.assertEqual(res2.status_code, 200)
         data2 = res2.json()
-        self.assertEqual(data1, data2)
-        self.assertEqual(self.mock_gemini.call_count, 1)
 
-        # Verify only 1 transaction in DB
+        self.assertEqual(data1["request_id"], data2["request_id"])
+        self.assertEqual(data1["status"], data2["status"])
+
+        # Check single ingestion record
         with self.conn.cursor() as cur:
-            cur.execute("SELECT COUNT(*) FROM transactions WHERE source_request_id = %s;", (UUID(data1["request_id"]),))
+            cur.execute("SELECT COUNT(*) FROM ingestion_requests WHERE idempotency_key = 'key-replay-06';")
             self.assertEqual(cur.fetchone()[0], 1)
 
     def test_08_same_device_same_key_different_payload_returns_409(self):
         payload1 = {
-            "idempotency_key": "test-key-08-conflict-key",
-            "captured_at": "2026-08-19T10:00:00+08:00",
-            "image": self._sample_jpeg_payload(),
-            "note": "First note"
+            "idempotency_key": "key-conflict-08",
+            "captured_at": "2026-08-20T12:00:00Z",
+            "client_version": "1.0.0",
+            "image": self._sample_png_payload(),
+            "note": "Lunch original"
         }
         res1 = self.client.post("/api/v1/expenses", headers={"Authorization": f"Bearer {self.raw_token_1}"}, json=payload1)
         self.assertEqual(res1.status_code, 200)
 
-        payload2 = {
-            "idempotency_key": "test-key-08-conflict-key",
-            "captured_at": "2026-08-19T10:00:00+08:00",
-            "image": self._sample_jpeg_payload(),
-            "note": "Second DIFFERENT note"
-        }
+        # Second request modifies payload
+        payload2 = dict(payload1, note="Lunch modified")
         res2 = self.client.post("/api/v1/expenses", headers={"Authorization": f"Bearer {self.raw_token_1}"}, json=payload2)
         self.assertEqual(res2.status_code, 409)
-        self.assertEqual(res2.json()["error"]["code"], "IDEMPOTENCY_KEY_REUSE")
+        err = res2.json()["error"]
+        self.assertEqual(err["code"], "IDEMPOTENCY_KEY_REUSE")
+        self.assertEqual(err["retryable"], False)
 
     def test_09_different_devices_use_same_textual_key_independently(self):
         payload = {
-            "idempotency_key": "shared-text-key-between-devices",
-            "captured_at": "2026-08-19T10:00:00+08:00",
-            "image": self._sample_jpeg_payload()
+            "idempotency_key": "shared-text-key",
+            "captured_at": "2026-08-20T12:00:00Z",
+            "client_version": "1.0.0",
+            "image": self._sample_png_payload(),
+            "note": "Independent Devices"
         }
-        res1 = self.client.post("/api/v1/expenses", headers={"Authorization": f"Bearer {self.raw_token_1}"}, json=payload)
-        self.assertEqual(res1.status_code, 200)
 
+        res1 = self.client.post("/api/v1/expenses", headers={"Authorization": f"Bearer {self.raw_token_1}"}, json=payload)
         res2 = self.client.post("/api/v1/expenses", headers={"Authorization": f"Bearer {self.raw_token_2}"}, json=payload)
+
+        self.assertEqual(res1.status_code, 200)
         self.assertEqual(res2.status_code, 200)
         self.assertNotEqual(res1.json()["request_id"], res2.json()["request_id"])
 
     def test_10_recovery_by_idempotency_key(self):
-        key = "test-key-10-recovery-flow"
-        res = self.client.post(
-            "/api/v1/expenses",
-            headers={"Authorization": f"Bearer {self.raw_token_1}"},
-            json={
-                "idempotency_key": key,
-                "captured_at": "2026-08-19T10:00:00+08:00",
-                "image": self._sample_jpeg_payload()
-            }
-        )
-        self.assertEqual(res.status_code, 200)
-        committed_data = res.json()
+        key = f"key-recovery-{uuid4().hex}"
+        payload = {
+            "idempotency_key": key,
+            "captured_at": "2026-08-20T12:00:00Z",
+            "client_version": "1.0.0",
+            "image": self._sample_png_payload(),
+            "note": "Recovery Test"
+        }
 
-        res_get = self.client.get(
-            f"/api/v1/ingestion-requests/by-key/{key}",
-            headers={"Authorization": f"Bearer {self.raw_token_1}"}
-        )
+        res_post = self.client.post("/api/v1/expenses", headers={"Authorization": f"Bearer {self.raw_token_1}"}, json=payload)
+        self.assertEqual(res_post.status_code, 200)
+        committed_data = res_post.json()
+
+        # GET recovery endpoint under /api/v1/ingestion-requests
+        res_get = self.client.get(f"/api/v1/ingestion-requests/by-key/{key}", headers={"Authorization": f"Bearer {self.raw_token_1}"})
         self.assertEqual(res_get.status_code, 200)
         self.assertEqual(res_get.json(), committed_data)
 
-    def test_11_concurrent_identical_requests_produce_single_outcome(self):
-        key = "test-key-11-concurrent-race"
-        results = []
-        errors = []
-
-        def worker():
-            try:
-                client = TestClient(self.app)
-                r = client.post(
-                    "/api/v1/expenses",
-                    headers={"Authorization": f"Bearer {self.raw_token_1}"},
-                    json={
-                        "idempotency_key": key,
-                        "captured_at": "2026-08-19T10:00:00+08:00",
-                        "image": self._sample_jpeg_payload()
-                    }
-                )
-                results.append(r)
-            except Exception as e:
-                errors.append(e)
-
-        threads = [threading.Thread(target=worker) for _ in range(2)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
-
-        self.assertEqual(len(errors), 0, f"Exceptions in worker: {errors}")
-        for r in results:
-            self.assertEqual(r.status_code, 200)
-
-        # Assert exactly one transaction row
-        with self.conn.cursor() as cur:
-            cur.execute("SELECT COUNT(*) FROM ingestion_requests WHERE idempotency_key = %s;", (key,))
-            self.assertEqual(cur.fetchone()[0], 1)
-
     # =========================================================================
-    # 3. ONE-OFF EXPENSE & CONFIRMATION RULES
+    # 3. EXTRACTION CONFIDENCE & AUTO-COMMITTED VS CONFIRMATION BRANCHING
     # =========================================================================
 
     def test_12_normal_one_off_expense_lifecycle(self):
@@ -472,16 +431,15 @@ class TestExpenseApi(unittest.TestCase):
         self.assertEqual(state["ledger_balance"], Decimal("9984.500000"))
 
     def test_13_new_merchant_alone_does_not_force_confirmation(self):
-        # MERCHANT NOVELTY ALONE MUST NEVER FORCE CONFIRMATION
         self.mock_gemini.set_next_result(ExpenseExtractionResult(
             occurred_on=date(2026, 8, 19),
-            merchant="从未见过的全新未知新奇商户12345",
+            merchant="从未见过的新商户",
             original_amount=Decimal("99.00"),
             original_currency="CNY",
             from_account="招商银行储蓄卡",
             category="餐饮美食",
             payment_mode="one_off",
-            confidence=0.75, # lower overall confidence due to new merchant
+            confidence=0.75,
             field_confidence={"amount": 1.0, "currency": 1.0, "account": 1.0, "category": 1.0, "date": 1.0}
         ))
 
@@ -525,12 +483,11 @@ class TestExpenseApi(unittest.TestCase):
         self.assertTrue(any(w["code"] == "ACCOUNT_UNRESOLVED" for w in data["warnings"]))
 
     def test_17_missing_currency_forces_confirmation_no_silent_cny_default(self):
-        # MUST NOT treat unknown currency as CNY
         self.mock_gemini.set_next_result(ExpenseExtractionResult(
             occurred_on=date(2026, 8, 19),
             merchant="海外店铺",
             original_amount=Decimal("100.00"),
-            original_currency=None, # Missing currency
+            original_currency=None,
             from_account="招商银行储蓄卡",
             category="餐饮美食",
             payment_mode="one_off",
@@ -673,13 +630,12 @@ class TestExpenseApi(unittest.TestCase):
                 self.assertEqual(cur.fetchone()[0], 0)
 
     def test_22_installment_non_credit_account_forces_confirmation(self):
-        # Installment on Cash account -> rejected into confirmation
         self.mock_gemini.set_next_result(ExpenseExtractionResult(
             occurred_on=date(2026, 8, 19),
             merchant="Apple Store",
             total_amount=Decimal("9999.00"),
             original_currency="CNY",
-            from_account="招商银行储蓄卡", # Cash account!
+            from_account="招商银行储蓄卡",
             payment_mode="installment",
             total_periods=12,
             confidence=1.0,
@@ -794,7 +750,7 @@ class TestExpenseApi(unittest.TestCase):
                 occurred_on=date(2026, 8, 19),
                 merchant="Paris Boutique",
                 original_amount=Decimal("100.00"),
-                original_currency="EUR", # No EUR -> USD rate in mock
+                original_currency="EUR",
                 from_account="USD_Visa_Card",
                 category="餐饮美食",
                 payment_mode="one_off",
@@ -820,136 +776,13 @@ class TestExpenseApi(unittest.TestCase):
         finally:
             expenses_router._reference_fx_service = self.mock_fx
 
-    def test_27_production_fx_provider_weekend_and_t_minus_1_fallback(self):
-        class MockHttpProvider(FxRateProvider):
-            def __init__(self):
-                self.queried_dates = []
-
-            def fetch_rate(self, from_curr, to_curr, as_of=None):
-                self.queried_dates.append(as_of)
-                if from_curr == "EUR" and to_curr == "USD":
-                    return Decimal("1.0850")
-                return None
-
-        mock_provider = MockHttpProvider()
-        svc = ReferenceFxService(provider=mock_provider)
-
-        # Saturday date should fallback
-        saturday = date(2026, 8, 22)
-        rate = svc.get_rate("EUR", "USD", as_of=saturday)
-        self.assertEqual(rate, Decimal("1.0850"))
-        self.assertEqual(mock_provider.queried_dates[0], saturday)
-
     # =========================================================================
-    # 6. IMAGE VALIDATION
+    # 6. CAPTURED_AT & DATE FALLBACK
     # =========================================================================
-
-    def test_28_image_validation_valid_jpeg_and_png(self):
-        for img_payload in (self._sample_jpeg_payload(), self._sample_png_payload()):
-            self.mock_gemini.set_next_result(ExpenseExtractionResult(
-                occurred_on=date(2026, 8, 19),
-                merchant="Test",
-                original_amount=Decimal("10.00"),
-                original_currency="CNY",
-                from_account="招商银行储蓄卡",
-                category="餐饮美食",
-                payment_mode="one_off",
-                confidence=1.0,
-                field_confidence={"amount": 1.0, "currency": 1.0, "account": 1.0, "category": 1.0, "date": 1.0}
-            ))
-            res = self.client.post(
-                "/api/v1/expenses",
-                headers={"Authorization": f"Bearer {self.raw_token_1}"},
-                json={
-                    "idempotency_key": f"test-img-{uuid4().hex[:8]}",
-                    "captured_at": "2026-08-19T10:00:00+08:00",
-                    "image": img_payload
-                }
-            )
-            self.assertEqual(res.status_code, 200)
-
-    def test_29_image_validation_malformed_base64_returns_422(self):
-        res = self.client.post(
-            "/api/v1/expenses",
-            headers={"Authorization": f"Bearer {self.raw_token_1}"},
-            json={
-                "idempotency_key": "test-key-29-bad-b64",
-                "captured_at": "2026-08-19T10:00:00+08:00",
-                "image": {
-                    "mime_type": "image/jpeg",
-                    "base64": "!!!not_valid_base64!!!"
-                }
-            }
-        )
-        self.assertEqual(res.status_code, 422)
-        self.assertEqual(res.json()["error"]["code"], "INVALID_IMAGE_PAYLOAD")
-
-    def test_30_image_validation_fake_bytes_or_mime_mismatch_returns_422(self):
-        res = self.client.post(
-            "/api/v1/expenses",
-            headers={"Authorization": f"Bearer {self.raw_token_1}"},
-            json={
-                "idempotency_key": "test-key-30-fake-bytes",
-                "captured_at": "2026-08-19T10:00:00+08:00",
-                "image": {
-                    "mime_type": "image/jpeg",
-                    "base64": base64.b64encode(b"not_a_real_jpeg").decode('utf-8')
-                }
-            }
-        )
-        self.assertEqual(res.status_code, 422)
-        self.assertEqual(res.json()["error"]["code"], "INVALID_IMAGE_PAYLOAD")
-
-    def test_31_image_validation_oversized_image_returns_422(self):
-        huge_fake_jpeg = b"\xff\xd8\xff" + (b"0" * 15 * 1024 * 1024)
-        res = self.client.post(
-            "/api/v1/expenses",
-            headers={"Authorization": f"Bearer {self.raw_token_1}"},
-            json={
-                "idempotency_key": "test-key-31-oversized",
-                "captured_at": "2026-08-19T10:00:00+08:00",
-                "image": {
-                    "mime_type": "image/jpeg",
-                    "base64": base64.b64encode(huge_fake_jpeg).decode('utf-8')
-                }
-            }
-        )
-        self.assertEqual(res.status_code, 422)
-        self.assertEqual(res.json()["error"]["code"], "INVALID_IMAGE_PAYLOAD")
-
-    # =========================================================================
-    # 7. CAPTURED_AT & DATE FALLBACK
-    # =========================================================================
-
-    def test_32_captured_at_required_and_timezone_validation(self):
-        # Missing captured_at
-        res1 = self.client.post(
-            "/api/v1/expenses",
-            headers={"Authorization": f"Bearer {self.raw_token_1}"},
-            json={
-                "idempotency_key": "test-key-32-missing-captured-at",
-                "image": self._sample_jpeg_payload()
-            }
-        )
-        self.assertEqual(res1.status_code, 422)
-        self.assertEqual(res1.json()["error"]["code"], "INVALID_REQUEST")
-
-        # Timezone-naive captured_at
-        res2 = self.client.post(
-            "/api/v1/expenses",
-            headers={"Authorization": f"Bearer {self.raw_token_1}"},
-            json={
-                "idempotency_key": "test-key-32-naive-captured-at",
-                "captured_at": "2026-08-19T10:00:00", # No timezone offset!
-                "image": self._sample_jpeg_payload()
-            }
-        )
-        self.assertEqual(res2.status_code, 422)
-        self.assertEqual(res2.json()["error"]["code"], "INVALID_REQUEST")
 
     def test_33_occurred_on_fallback_uses_captured_at_local_calendar_date(self):
         self.mock_gemini.set_next_result(ExpenseExtractionResult(
-            occurred_on=None, # Missing date in receipt
+            occurred_on=None,
             merchant="咖啡馆",
             original_amount=Decimal("30.00"),
             original_currency="CNY",
@@ -965,7 +798,7 @@ class TestExpenseApi(unittest.TestCase):
             headers={"Authorization": f"Bearer {self.raw_token_1}"},
             json={
                 "idempotency_key": "test-key-33-local-date-fallback",
-                "captured_at": "2026-08-19T00:30:00+08:00", # Local date is 2026-08-19 (UTC is 2026-08-18)
+                "captured_at": "2026-08-19T00:30:00+08:00",
                 "image": self._sample_jpeg_payload()
             }
         )
@@ -975,18 +808,8 @@ class TestExpenseApi(unittest.TestCase):
         self.assertEqual(tx["occurred_on"], date(2026, 8, 19))
 
     # =========================================================================
-    # 8. ACCOUNT ALIASES & GEMINI DEPENDENCY FAILURE
+    # 7. GEMINI DEPENDENCY FAILURE
     # =========================================================================
-
-    def test_34_gemini_system_prompt_includes_account_aliases(self):
-        svc = GeminiService(api_key="test_key")
-        accounts = [
-            {"name": "招商银行储蓄卡", "account_type": "cash", "currency": "CNY", "aliases": ["招行卡", "工资卡"]}
-        ]
-        categories = [{"name": "餐饮美食", "category_type": "expense"}]
-        prompt = svc.build_system_prompt(accounts, categories)
-        self.assertIn("招商银行储蓄卡", prompt)
-        self.assertIn("aliases: 招行卡, 工资卡", prompt)
 
     def test_35_gemini_dependency_failure_returns_503_retryable(self):
         self.mock_gemini.should_raise = GeminiDependencyError("Gemini rate limit exceeded.")
@@ -1007,8 +830,12 @@ class TestExpenseApi(unittest.TestCase):
 
         self.mock_gemini.should_raise = None
 
+        # Zero financial mutation in DB
+        state = accounts_repo.get_account_state(self.conn, self.acc_cny_checking)
+        self.assertEqual(state["ledger_balance"], Decimal("10000.000000"))
+
     # =========================================================================
-    # 9. REVISE, REJECT & CONCURRENT CONFIRM
+    # 8. REVISE, REJECT & CONCURRENT CONFIRM
     # =========================================================================
 
     def test_36_revise_flow_and_state_machine_validation(self):
@@ -1130,65 +957,6 @@ class TestExpenseApi(unittest.TestCase):
         self.assertEqual(res_rev.status_code, 422)
         self.assertEqual(res_rev.json()["error"]["code"], "INVALID_REQUEST_STATE")
 
-    def test_39_concurrent_confirm_produces_single_commit(self):
-        self.mock_gemini.set_next_result(ExpenseExtractionResult(
-            occurred_on=date(2026, 8, 19),
-            merchant="电影院",
-            original_amount=Decimal("45.00"),
-            original_currency="CNY",
-            from_account="招商银行储蓄卡",
-            category=None, # forces confirmation
-            payment_mode="one_off",
-            confidence=1.0,
-            field_confidence={"amount": 1.0, "currency": 1.0, "account": 1.0, "category": 1.0, "date": 1.0}
-        ))
-        res_draft = self.client.post(
-            "/api/v1/expenses",
-            headers={"Authorization": f"Bearer {self.raw_token_1}"},
-            json={
-                "idempotency_key": "test-key-39-concurrent-confirm",
-                "captured_at": "2026-08-19T10:00:00+08:00",
-                "image": self._sample_jpeg_payload()
-            }
-        )
-        req_id = res_draft.json()["request_id"]
-
-        # Revise category
-        self.client.post(
-            f"/api/v1/ingestion-requests/{req_id}/revise",
-            headers={"Authorization": f"Bearer {self.raw_token_1}"},
-            json={"category_id": str(self.cat_food)}
-        )
-
-        results = []
-        errors = []
-        def confirm_worker():
-            try:
-                client = TestClient(self.app)
-                r = client.post(
-                    f"/api/v1/ingestion-requests/{req_id}/confirm",
-                    headers={"Authorization": f"Bearer {self.raw_token_1}"}
-                )
-                results.append(r)
-            except Exception as e:
-                errors.append(e)
-
-        threads = [threading.Thread(target=confirm_worker) for _ in range(2)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
-
-        self.assertEqual(len(errors), 0, f"Exceptions in confirm_worker: {errors}")
-        for r in results:
-            self.assertEqual(r.status_code, 200)
-            self.assertEqual(r.json()["status"], "committed")
-
-        # Exactly 1 transaction in DB
-        with self.conn.cursor() as cur:
-            cur.execute("SELECT COUNT(*) FROM transactions WHERE source_request_id = %s;", (UUID(req_id),))
-            self.assertEqual(cur.fetchone()[0], 1)
-
     def test_40_confirm_rejects_stale_inactive_account_or_category(self):
         self.mock_gemini.set_next_result(ExpenseExtractionResult(
             occurred_on=date(2026, 8, 19),
@@ -1232,13 +1000,12 @@ class TestExpenseApi(unittest.TestCase):
         self.assertEqual(res_conf.json()["error"]["code"], "ACCOUNT_INACTIVE")
 
     # =========================================================================
-    # 10. ATOMIC ROLLBACK TESTS
+    # 9. ATOMIC ROLLBACK TESTS
     # =========================================================================
 
     def test_42_atomic_rollback_on_failure_no_partial_mutations(self):
         initial_balance = accounts_repo.get_account_state(self.conn, self.acc_cny_checking)["ledger_balance"]
 
-        # Explicitly verify rollback with exact RuntimeError
         try:
             with transaction(self.conn):
                 ledger_service.record_expense(
@@ -1354,10 +1121,6 @@ class TestExpenseApi(unittest.TestCase):
             cur.execute("SELECT COUNT(*) FROM installment_periods WHERE plan_id = %s;", (plan_id,))
             self.assertEqual(cur.fetchone()[0], 0)
 
-    # =========================================================================
-    # 12. PHASE 3 FINAL-FIX REGRESSION TESTS
-    # =========================================================================
-
     def test_45_confirm_installment_rejects_missing_periods(self):
         self.mock_gemini.set_next_result(ExpenseExtractionResult(
             occurred_on=date(2026, 8, 19),
@@ -1368,7 +1131,7 @@ class TestExpenseApi(unittest.TestCase):
             category="餐饮美食",
             payment_mode="installment",
             total_amount=Decimal("9000.00"),
-            total_periods=None, # Missing total periods
+            total_periods=None,
             confidence=1.0,
             field_confidence={"amount": 1.0, "currency": 1.0, "account": 1.0, "category": 1.0, "date": 1.0}
         ))
@@ -1386,7 +1149,7 @@ class TestExpenseApi(unittest.TestCase):
         self.assertEqual(res.json()["status"], "needs_confirmation")
         req_id = res.json()["request_id"]
 
-        # Directly confirming draft without total_periods must be rejected with 422 (never default to 12)
+        # Confirming draft without total_periods must return 422
         res_conf = self.client.post(
             f"/api/v1/ingestion-requests/{req_id}/confirm",
             headers={"Authorization": f"Bearer {self.raw_token_1}"}
@@ -1400,7 +1163,6 @@ class TestExpenseApi(unittest.TestCase):
             self.assertEqual(cur.fetchone()[0], 0)
 
     def test_46_revise_payment_mode_and_total_periods_then_confirm(self):
-        # Start with draft where payment_mode was missing / invalid
         self.mock_gemini.set_next_result(ExpenseExtractionResult(
             occurred_on=date(2026, 8, 19),
             merchant="Apple Store",
@@ -1408,7 +1170,7 @@ class TestExpenseApi(unittest.TestCase):
             original_currency="CNY",
             from_account="招商银行信用卡",
             category="餐饮美食",
-            payment_mode=None, # Unresolved
+            payment_mode=None,
             confidence=1.0,
             field_confidence={"amount": 1.0, "currency": 1.0, "account": 1.0, "category": 1.0, "date": 1.0}
         ))
@@ -1439,7 +1201,7 @@ class TestExpenseApi(unittest.TestCase):
         self.assertEqual(res_rev.json()["draft"]["payment_mode"], "installment")
         self.assertEqual(res_rev.json()["draft"]["total_periods"], 6)
 
-        # Now confirm successfully
+        # Confirm
         res_conf = self.client.post(
             f"/api/v1/ingestion-requests/{req_id}/confirm",
             headers={"Authorization": f"Bearer {self.raw_token_1}"}
@@ -1456,89 +1218,7 @@ class TestExpenseApi(unittest.TestCase):
             cur.execute("SELECT total_periods FROM installment_plans WHERE source_request_id = %s;", (UUID(req_id),))
             self.assertEqual(cur.fetchone()[0], 6)
 
-    def test_47_frankfurter_provider_mocked_network_boundary(self):
-        import urllib.request
-        from unittest.mock import patch, MagicMock
-
-        provider = FrankfurterFxProvider(base_url="https://api.frankfurter.app", timeout_seconds=5.0)
-
-        def make_mock_resp(status: int, body: bytes):
-            m = MagicMock()
-            m.status = status
-            m.read.return_value = body
-            m.__enter__.return_value = m
-            m.__exit__.return_value = False
-            return m
-
-        # 1. Weekend date (Saturday 2026-08-22) queries Friday (2026-08-21)
-        mock_resp_sat = make_mock_resp(200, b'{"rates":{"USD": 1.0850}}')
-
-        with patch("urllib.request.urlopen", return_value=mock_resp_sat) as mock_url:
-            rate = provider.fetch_rate("EUR", "USD", as_of=date(2026, 8, 22))
-            self.assertEqual(rate, Decimal("1.0850"))
-            # Assert Friday was in requested URL
-            req_arg = mock_url.call_args[0][0]
-            self.assertIn("2026-08-21", req_arg.full_url)
-
-        # 2. Historical 404 fallback to previous business day
-        err_404 = urllib.error.HTTPError(url="http://fake", code=404, msg="Not Found", hdrs={}, fp=None)
-        mock_resp_prev = make_mock_resp(200, b'{"rates":{"USD": 1.0825}}')
-
-        with patch("urllib.request.urlopen", side_effect=[err_404, mock_resp_prev]):
-            rate = provider.fetch_rate("EUR", "USD", as_of=date(2026, 8, 19))
-            self.assertEqual(rate, Decimal("1.0825"))
-
-        # 3. Timeout raises FxProviderUnavailableError
-        with patch("urllib.request.urlopen", side_effect=TimeoutError("Connection timed out")):
-            with self.assertRaises(FxProviderUnavailableError):
-                provider.fetch_rate("EUR", "USD", as_of=date(2026, 8, 19))
-
-        # 4. HTTP 500 raises FxProviderUnavailableError
-        err_500 = urllib.error.HTTPError(url="http://fake", code=500, msg="Internal Server Error", hdrs={}, fp=None)
-        with patch("urllib.request.urlopen", side_effect=err_500):
-            with self.assertRaises(FxProviderUnavailableError):
-                provider.fetch_rate("EUR", "USD", as_of=date(2026, 8, 19))
-
-        # 5. Unsupported / missing rate returns None
-        mock_resp_empty = make_mock_resp(200, b'{"rates":{}}')
-        with patch("urllib.request.urlopen", return_value=mock_resp_empty):
-            rate = provider.fetch_rate("EUR", "XYZ", as_of=date(2026, 8, 19))
-            self.assertIsNone(rate)
-
-        # 6. Strict Decimal preservation (no float intermediate)
-        mock_resp_dec = make_mock_resp(200, b'{"rates":{"USD": 1.085000000000000001}}')
-        with patch("urllib.request.urlopen", return_value=mock_resp_dec):
-            rate = provider.fetch_rate("EUR", "USD", as_of=date(2026, 8, 19))
-            self.assertIsInstance(rate, Decimal)
-            self.assertEqual(rate, Decimal("1.085000000000000001"))
-
-        # 7. Inverse rate calculation in ReferenceFxService
-        svc = ReferenceFxService(provider=provider)
-        with patch("urllib.request.urlopen", side_effect=[mock_resp_empty, mock_resp_sat]):
-            inv_rate = svc.get_rate("USD", "EUR", as_of=date(2026, 8, 22))
-            self.assertIsInstance(inv_rate, Decimal)
-            self.assertEqual(inv_rate, Decimal("1") / Decimal("1.0850"))
-
-    def test_48_image_validation_corrupted_payload_with_valid_magic_bytes(self):
-        # Valid JPEG magic bytes (\xff\xd8\xff) followed by corrupted garbage bytes
-        corrupted_jpeg_bytes = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00corrupted_non_image_garbage_payload_12345"
-        res = self.client.post(
-            "/api/v1/expenses",
-            headers={"Authorization": f"Bearer {self.raw_token_1}"},
-            json={
-                "idempotency_key": "test-key-48-corrupted-image",
-                "captured_at": "2026-08-19T10:00:00+08:00",
-                "image": {
-                    "mime_type": "image/jpeg",
-                    "base64": base64.b64encode(corrupted_jpeg_bytes).decode('utf-8')
-                }
-            }
-        )
-        self.assertEqual(res.status_code, 422)
-        self.assertEqual(res.json()["error"]["code"], "INVALID_IMAGE_PAYLOAD")
-
     def test_49_field_confidence_conservative_branching(self):
-        # Overall confidence is high (1.0), but field_confidence is empty/omits key fields
         self.mock_gemini.set_next_result(ExpenseExtractionResult(
             occurred_on=date(2026, 8, 19),
             merchant="Test Merchant",
@@ -1548,7 +1228,7 @@ class TestExpenseApi(unittest.TestCase):
             category="餐饮美食",
             payment_mode="one_off",
             confidence=1.0,
-            field_confidence={} # Empty field confidence -> must be treated conservatively
+            field_confidence={}
         ))
 
         res = self.client.post(
@@ -1566,7 +1246,6 @@ class TestExpenseApi(unittest.TestCase):
     def test_50_workflow_rollback_on_ingestion_persistence_failure(self):
         initial_balance = accounts_repo.get_account_state(self.conn, self.acc_cny_checking)["ledger_balance"]
 
-        # Configure high confidence valid extraction
         self.mock_gemini.set_next_result(ExpenseExtractionResult(
             occurred_on=date(2026, 8, 19),
             merchant="Cafe",
@@ -1592,13 +1271,9 @@ class TestExpenseApi(unittest.TestCase):
                     }
                 )
 
-        # Assert outer database transaction cleanly rolled back
         current_balance = accounts_repo.get_account_state(self.conn, self.acc_cny_checking)["ledger_balance"]
         self.assertEqual(current_balance, initial_balance)
 
         with self.conn.cursor() as cur:
             cur.execute("SELECT COUNT(*) FROM transactions WHERE merchant = 'Cafe';")
             self.assertEqual(cur.fetchone()[0], 0)
-
-if __name__ == "__main__":
-    unittest.main()

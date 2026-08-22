@@ -1,7 +1,4 @@
 import os
-os.environ["ENVIRONMENT"] = "test"
-os.environ["DB_SCHEMA"] = "vibeledger_test_runner"
-
 import unittest
 import uuid
 import psycopg2
@@ -10,8 +7,14 @@ from app import config
 from app.db import get_connection
 from migrations import runner
 
+os.environ["ENVIRONMENT"] = "test"
+os.environ["DB_SCHEMA"] = "vibeledger_test_runner"
+config.settings = config.Settings()
+
 class TestMigrations(unittest.TestCase):
     def setUp(self):
+        if not config.is_safe_for_testing():
+            config.settings = config.Settings()
         if not config.is_safe_for_testing():
             self.skipTest("Skipping DB integration test. ENVIRONMENT must be set to 'test'.")
             
@@ -20,7 +23,6 @@ class TestMigrations(unittest.TestCase):
         
     def tearDown(self):
         if config.is_safe_for_testing() and hasattr(self, "test_schema"):
-            # Enforce strict validation before dropping test schema
             config.validate_test_schema(self.test_schema)
             settings = config.get_settings()
             conn = get_connection(settings.DB_SCHEMA)

@@ -269,12 +269,38 @@ class TestExpenseApiDb(BaseDbTestCase):
             self.assertIsNotNone(last_seen)
 
     def test_05_raw_token_never_persisted(self):
+        # 1. Perform an authenticated API request using the raw Bearer token
+        payload = {
+            "idempotency_key": f"key-token-test-{uuid4().hex[:8]}",
+            "captured_at": "2026-08-20T12:00:00Z",
+            "client_version": "1.0.0",
+            "image": self._sample_png_payload(),
+            "note": "Test raw token never persisted"
+        }
+        res = self.client.post(
+            "/api/v1/expenses",
+            headers={"Authorization": f"Bearer {self.raw_token_1}"},
+            json=payload
+        )
+        self.assertEqual(res.status_code, 200)
+
+        # 2. Verify the persisted device token remains SHA-256 only and raw token is not persisted
         with self.conn.cursor() as cur:
-            cur.execute("SELECT token_hash FROM devices WHERE id = %s;", (self.device_id_1,))
-            stored_hash = cur.fetchone()[0]
-            # Must be bytes and exactly 32 bytes (SHA-256 binary)
+            cur.execute("SELECT token_hash, last_seen_at FROM devices WHERE id = %s;", (self.device_id_1,))
+            row = cur.fetchone()
+            stored_hash, last_seen_at = row[0], row[1]
+            expected_hash = hashlib.sha256(self.raw_token_1.encode('utf-8')).digest()
+            
+            # Persisted token_hash must be bytea, exactly 32 bytes SHA-256 binary digest
+            self.assertEqual(bytes(stored_hash), expected_hash)
             self.assertEqual(len(bytes(stored_hash)), 32)
             self.assertNotIn(self.raw_token_1.encode('utf-8'), bytes(stored_hash))
+            self.assertIsNotNone(last_seen_at)
+
+            # Assert raw token string is nowhere in the devices table
+            cur.execute("SELECT device_name, platform FROM devices WHERE id = %s;", (self.device_id_1,))
+            dev_row = cur.fetchone()
+            self.assertNotIn(self.raw_token_1, str(dev_row))
 
     # =========================================================================
     # 2. INGESTION IDEMPOTENCY & ISOLATION

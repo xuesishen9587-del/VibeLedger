@@ -1,3 +1,8 @@
+import os
+os.environ.setdefault("ENVIRONMENT", "test")
+os.environ.setdefault("DATABASE_URL", "postgresql://test_user:test_pass@127.0.0.1:5432/vibeledger_test")
+os.environ.setdefault("DB_SCHEMA", "vibeledger_test_runner")
+
 import unittest
 from decimal import Decimal
 from app.domain import money

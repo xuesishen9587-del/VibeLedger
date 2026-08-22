@@ -1,3 +1,8 @@
+import os
+os.environ.setdefault("ENVIRONMENT", "test")
+os.environ.setdefault("DATABASE_URL", "postgresql://test_user:test_pass@127.0.0.1:5432/vibeledger_test")
+os.environ.setdefault("DB_SCHEMA", "vibeledger_test_runner")
+
 import unittest
 from decimal import Decimal
 from datetime import date
@@ -20,7 +25,8 @@ class TestReferenceFxUnit(unittest.TestCase):
         self.assertEqual(service.get_rate("USD", "USD"), Decimal("1"))
         # Inverse rate
         inv = service.get_rate("CNY", "USD")
-        self.assertAlmostEqual(float(inv), float(Decimal("1") / Decimal("7.20")), places=6)
+        self.assertEqual(inv, Decimal("1") / Decimal("7.20"))
+        self.assertIsInstance(inv, Decimal)
         
         # Settlement estimation
         est_cny, rate = service.estimate_settlement(Decimal("100.00"), "USD", "CNY")

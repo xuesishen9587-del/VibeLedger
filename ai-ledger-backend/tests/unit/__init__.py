@@ -1,9 +1,10 @@
 import os
-from app import config
 
+# Safe dummy test config for hermetic unit test bootstrap (0 DB connections, no .env dependency)
 os.environ["ENVIRONMENT"] = "test"
+os.environ.setdefault("DATABASE_URL", "postgresql://test_user:test_pass@127.0.0.1:5432/vibeledger_test")
 os.environ.setdefault("DB_SCHEMA", "vibeledger_test_runner")
-if "DATABASE_URL" not in os.environ:
-    os.environ["DATABASE_URL"] = "postgresql://postgres:postgres@localhost:5432/postgres"
+
+from app import config
 
 config.settings = config.Settings()

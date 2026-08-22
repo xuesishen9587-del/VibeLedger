@@ -76,15 +76,8 @@ else:
     settings_load_error = None
 
 def get_settings() -> Settings:
-    global settings, settings_load_error
     if settings is None:
-        try:
-            settings = Settings()
-            settings_load_error = None
-        except Exception as e:
-            settings = None
-            settings_load_error = e
-            raise ValueError(f"Failed to initialize configuration settings. Details: {settings_load_error}")
+        raise ValueError(f"Failed to initialize configuration settings. Details: {settings_load_error}")
     return settings
 
 def validate_safety() -> None:

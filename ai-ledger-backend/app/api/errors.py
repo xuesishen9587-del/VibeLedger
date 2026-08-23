@@ -40,7 +40,12 @@ from app.domain.transactions import (
     CurrencyImmutableError,
     AccountTypeImmutableError,
     UserNotInHouseholdError,
-    LinkedAccountInvalidError
+    LinkedAccountInvalidError,
+    BatchResourceNotFoundError,
+    BatchNotFoundError,
+    BatchVersionConflictError,
+    InvalidSnapshotError,
+    InvalidBatchStateError
 )
 
 def build_error_response(

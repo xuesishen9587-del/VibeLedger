@@ -137,9 +137,20 @@ class AliasResourceNotFoundError(ResourceNotFoundError):
     def __init__(self, alias_id: UUID):
         super().__init__(f"Account alias {alias_id} not found.", code="ALIAS_NOT_FOUND")
 
+class BatchResourceNotFoundError(ResourceNotFoundError):
+    def __init__(self, batch_id: UUID):
+        super().__init__(f"Reconciliation batch {batch_id} not found.", code="BATCH_NOT_FOUND")
+
+class BatchNotFoundError(BatchResourceNotFoundError):
+    pass
+
 class RowVersionConflictError(LedgerDomainError):
-    def __init__(self, message: str = "The resource has been modified concurrently. Reload before updating."):
-        super().__init__(message, code="ROW_VERSION_CONFLICT")
+    def __init__(self, message: str = "The resource has been modified concurrently. Reload before updating.", code: str = "ROW_VERSION_CONFLICT"):
+        super().__init__(message, code=code)
+
+class BatchVersionConflictError(RowVersionConflictError):
+    def __init__(self, message: str = "Reconciliation batch was concurrently modified. Reload before updating."):
+        super().__init__(message, code="BATCH_VERSION_CONFLICT")
 
 class AccountNameConflictError(LedgerDomainError):
     def __init__(self, name: str):
@@ -175,6 +186,14 @@ class LinkedAccountInvalidError(LedgerDomainError):
 
 class InvalidCursorError(LedgerDomainError):
     def __init__(self, message: str = "Invalid pagination cursor provided."):
+        super().__init__(message, code="INVALID_REQUEST")
+
+class InvalidSnapshotError(LedgerDomainError):
+    def __init__(self, message: str = "Invalid account snapshot payload."):
+        super().__init__(message, code="INVALID_REQUEST")
+
+class InvalidBatchStateError(LedgerDomainError):
+    def __init__(self, message: str = "Reconciliation batch is in an invalid state for this operation."):
         super().__init__(message, code="INVALID_REQUEST")
 
 

@@ -226,7 +226,7 @@ def create_statement_reconciliation_batch(
             if "line" not in cand.payload["evidence"]:
                 cand.payload["evidence"]["line"] = {}
             cand.payload["evidence"]["line"].update({
-                "original_amount": str(src_line.original_amount) if src_line.original_amount is not None else None,
+                "original_amount": f"{parse_decimal(src_line.original_amount):.2f}" if src_line.original_amount is not None else None,
                 "original_currency": src_line.original_currency,
                 "merchant_hint": src_line.merchant_hint,
                 "external_reference": src_line.external_reference
@@ -367,12 +367,57 @@ def commit_statement_batch(
 
     # 3. Reconstruct NormalizedStatementLines using candidate evidence where available
     line_evidence_map: Dict[UUID, Dict[str, Any]] = {}
+    for sl in statement_lines:
+        line_ev: Dict[str, Any] = {}
+        if sl.get("original_amount") is not None:
+            line_ev["original_amount"] = f"{parse_decimal(sl['original_amount']):.2f}"
+        if sl.get("original_currency") is not None:
+            line_ev["original_currency"] = sl["original_currency"]
+        if sl.get("merchant_hint") is not None:
+            line_ev["merchant_hint"] = sl["merchant_hint"]
+        if sl.get("external_reference") is not None:
+            line_ev["external_reference"] = sl["external_reference"]
+        if line_ev:
+            line_evidence_map[sl["id"]] = line_ev
+
     for c in candidates:
         sl_id = c.get("statement_line_id")
         if sl_id:
             ev_line = c.get("payload", {}).get("evidence", {}).get("line", {})
             if ev_line:
-                line_evidence_map[sl_id] = ev_line
+                if sl_id not in line_evidence_map:
+                    line_evidence_map[sl_id] = {}
+                ev_copy = dict(ev_line)
+                if ev_copy.get("original_amount") is not None:
+                    ev_copy["original_amount"] = f"{parse_decimal(ev_copy['original_amount']):.2f}"
+                line_evidence_map[sl_id].update(ev_copy)
+
+    def merge_canonical_line_evidence(
+        payload: Optional[Dict[str, Any]],
+        statement_line_id: Optional[UUID]
+    ) -> Dict[str, Any]:
+        merged_payload = dict(payload) if payload else {}
+        if not statement_line_id or statement_line_id not in line_evidence_map:
+            return merged_payload
+        canonical_line_ev = line_evidence_map[statement_line_id]
+        if not canonical_line_ev:
+            return merged_payload
+        if "evidence" not in merged_payload:
+            merged_payload["evidence"] = {}
+        else:
+            merged_payload["evidence"] = dict(merged_payload["evidence"])
+        if "line" not in merged_payload["evidence"]:
+            merged_payload["evidence"]["line"] = {}
+        else:
+            merged_payload["evidence"]["line"] = dict(merged_payload["evidence"]["line"])
+        for k, v in canonical_line_ev.items():
+            if v is not None:
+                if k not in merged_payload["evidence"]["line"] or merged_payload["evidence"]["line"][k] is None:
+                    merged_payload["evidence"]["line"][k] = v
+                elif k in ("original_amount", "original_currency", "merchant_hint", "external_reference"):
+                    if not merged_payload["evidence"]["line"][k]:
+                        merged_payload["evidence"]["line"][k] = v
+        return merged_payload
 
     norm_lines: List[NormalizedStatementLine] = []
     for sl in statement_lines:
@@ -462,14 +507,33 @@ def commit_statement_batch(
     for c in candidates:
         if c.get("candidate_type") == "create_transfer" and c.get("status") in ("accepted", "applied"):
             t_data = c.get("payload", {}).get("transfer", {})
-            to_acc = t_data.get("to_account_id")
-            if to_acc:
+            from_acc_str = t_data.get("from_account_id")
+            to_acc_str = t_data.get("to_account_id")
+            if not from_acc_str or not to_acc_str:
+                continue
+
+            from_acc_id = UUID(from_acc_str)
+            to_acc_id = UUID(to_acc_str)
+            occ_on_val = date.fromisoformat(t_data["occurred_on"]) if t_data.get("occurred_on") else as_of_date
+
+            if primary_account_id == from_acc_id:
+                # Outbound transfer from selected account: counter leg is to_account (credit)
                 hh_movements.append({
-                    "account_id": UUID(to_acc),
+                    "account_id": to_acc_id,
                     "direction": "credit",
                     "amount": parse_decimal(t_data.get("to_amount")),
                     "currency": t_data.get("to_currency"),
-                    "occurred_on": date.fromisoformat(t_data.get("occurred_on")) if t_data.get("occurred_on") else as_of_date,
+                    "occurred_on": occ_on_val,
+                    "is_counter_statement_leg": True
+                })
+            elif primary_account_id == to_acc_id:
+                # Inbound transfer to selected account: counter leg is from_account (debit)
+                hh_movements.append({
+                    "account_id": from_acc_id,
+                    "direction": "debit",
+                    "amount": parse_decimal(t_data.get("from_amount")),
+                    "currency": t_data.get("from_currency"),
+                    "occurred_on": occ_on_val,
                     "is_counter_statement_leg": True
                 })
 
@@ -539,13 +603,14 @@ def commit_statement_batch(
         for fc in fresh_result.candidates:
             if fc.statement_line_id:
                 old_c = old_cand_by_line.get(fc.statement_line_id)
+                persisted_payload = merge_canonical_line_evidence(fc.payload, fc.statement_line_id)
                 if old_c:
                     reconciliation_repo.update_reconciliation_candidate_full(
                         conn=conn,
                         candidate_id=old_c["id"],
                         candidate_type=fc.candidate_type,
                         status=fc.status,
-                        payload=fc.payload,
+                        payload=persisted_payload,
                         target_transaction_id=fc.target_transaction_id,
                         confidence=fc.confidence,
                         reason_code=fc.reason_code,
@@ -560,7 +625,7 @@ def commit_statement_batch(
                         candidate_type=fc.candidate_type,
                         status=fc.status,
                         target_transaction_id=fc.target_transaction_id,
-                        payload=fc.payload,
+                        payload=persisted_payload,
                         confidence=fc.confidence,
                         reason_code=fc.reason_code,
                         reason_detail=fc.reason_detail
@@ -649,13 +714,14 @@ def commit_statement_batch(
                     statement_batch_id=batch_id
                 )
                 applied_tx_ids.append(target_tx_id)
+                persisted_payload = merge_canonical_line_evidence(fresh_cand.payload, stmt_line_id)
                 if old_cand:
                     reconciliation_repo.update_reconciliation_candidate_full(
                         conn=conn,
                         candidate_id=old_cand["id"],
                         candidate_type="match",
                         status="applied",
-                        payload=fresh_cand.payload,
+                        payload=persisted_payload,
                         target_transaction_id=target_tx_id,
                         applied_transaction_id=target_tx_id,
                         confidence=fresh_cand.confidence
@@ -670,7 +736,7 @@ def commit_statement_batch(
                         status="applied",
                         target_transaction_id=target_tx_id,
                         applied_transaction_id=target_tx_id,
-                        payload=fresh_cand.payload,
+                        payload=persisted_payload,
                         confidence=fresh_cand.confidence
                     )
                 if stmt_line_id:
@@ -722,13 +788,14 @@ def commit_statement_batch(
             )
             applied_tx_ids.append(new_tx_id)
 
+            persisted_payload = merge_canonical_line_evidence(fresh_cand.payload, stmt_line_id)
             if old_cand:
                 reconciliation_repo.update_reconciliation_candidate_full(
                     conn=conn,
                     candidate_id=old_cand["id"],
                     candidate_type="create_transaction",
                     status="applied",
-                    payload=fresh_cand.payload,
+                    payload=persisted_payload,
                     applied_transaction_id=new_tx_id,
                     confidence=fresh_cand.confidence
                 )
@@ -741,7 +808,7 @@ def commit_statement_batch(
                     candidate_type="create_transaction",
                     status="applied",
                     applied_transaction_id=new_tx_id,
-                    payload=fresh_cand.payload,
+                    payload=persisted_payload,
                     confidence=fresh_cand.confidence
                 )
 
@@ -811,13 +878,14 @@ def commit_statement_batch(
             )
             applied_tx_ids.append(new_tx_id)
 
+            persisted_payload = merge_canonical_line_evidence(fresh_cand.payload, stmt_line_id)
             if old_cand:
                 reconciliation_repo.update_reconciliation_candidate_full(
                     conn=conn,
                     candidate_id=old_cand["id"],
                     candidate_type="create_transfer",
                     status="applied",
-                    payload=fresh_cand.payload,
+                    payload=persisted_payload,
                     applied_transaction_id=new_tx_id,
                     confidence=fresh_cand.confidence
                 )
@@ -830,7 +898,7 @@ def commit_statement_batch(
                     candidate_type="create_transfer",
                     status="applied",
                     applied_transaction_id=new_tx_id,
-                    payload=fresh_cand.payload,
+                    payload=persisted_payload,
                     confidence=fresh_cand.confidence
                 )
 
@@ -842,10 +910,13 @@ def commit_statement_batch(
                     matched_transaction_id=new_tx_id
                 )
 
-            if from_acc_id in account_deltas:
-                account_deltas[from_acc_id] -= from_amt
-            if to_acc_id in account_deltas:
-                account_deltas[to_acc_id] += to_amt
+            if from_acc_id not in account_deltas:
+                account_deltas[from_acc_id] = Decimal("0.00")
+            account_deltas[from_acc_id] -= from_amt
+
+            if to_acc_id not in account_deltas:
+                account_deltas[to_acc_id] = Decimal("0.00")
+            account_deltas[to_acc_id] += to_amt
 
             audit_repo.insert_audit_event(
                 conn=conn,
@@ -913,13 +984,14 @@ def commit_statement_batch(
             )
             applied_tx_ids.append(new_tx_id)
 
+            persisted_payload = merge_canonical_line_evidence(fresh_cand.payload, stmt_line_id)
             if old_cand:
                 reconciliation_repo.update_reconciliation_candidate_full(
                     conn=conn,
                     candidate_id=old_cand["id"],
                     candidate_type="refund",
                     status="applied",
-                    payload=fresh_cand.payload,
+                    payload=persisted_payload,
                     applied_transaction_id=new_tx_id,
                     confidence=fresh_cand.confidence
                 )
@@ -932,7 +1004,7 @@ def commit_statement_batch(
                     candidate_type="refund",
                     status="applied",
                     applied_transaction_id=new_tx_id,
-                    payload=fresh_cand.payload,
+                    payload=persisted_payload,
                     confidence=fresh_cand.confidence
                 )
 
@@ -1016,13 +1088,14 @@ def commit_statement_batch(
 
                 applied_tx_ids.append(new_tx_id)
 
+                persisted_payload = merge_canonical_line_evidence(fresh_cand.payload, stmt_line_id)
                 if old_cand:
                     reconciliation_repo.update_reconciliation_candidate_full(
                         conn=conn,
                         candidate_id=old_cand["id"],
                         candidate_type="recognize_installment",
                         status="applied",
-                        payload=fresh_cand.payload,
+                        payload=persisted_payload,
                         applied_transaction_id=new_tx_id,
                         confidence=fresh_cand.confidence
                     )
@@ -1035,7 +1108,7 @@ def commit_statement_batch(
                         candidate_type="recognize_installment",
                         status="applied",
                         applied_transaction_id=new_tx_id,
-                        payload=fresh_cand.payload,
+                        payload=persisted_payload,
                         confidence=fresh_cand.confidence
                     )
 
@@ -1046,6 +1119,7 @@ def commit_statement_batch(
                         match_status="matched",
                         matched_transaction_id=new_tx_id
                     )
+
 
                 account_deltas[primary_account_id] -= amt
 

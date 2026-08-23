@@ -1157,9 +1157,100 @@ class TestReconciliationEngineUnit(unittest.TestCase):
         self.assertEqual(len(res.candidates), 1)
         self.assertEqual(res.candidates[0].candidate_type, "match")
         self.assertEqual(res.candidates[0].status, "accepted")
-        self.assertIn("settlement_patch", res.candidates[0].payload)
+        self.assertIn("settlement_patch", res.candidates[0].payload.get("evidence", {}))
+
+    def test_41_inbound_same_currency_transfer_resolution(self):
+        """
+        Inbound transfer resolution:
+        Selected Account A receives 500 CNY (credit).
+        Counter movement on Account B: 500 CNY debit.
+        Creates transfer B -> A.
+        """
+        acc_b = uuid4()
+        line = NormalizedStatementLine(
+            transaction_on=date(2026, 8, 10),
+            description_raw="Transfer from B",
+            direction="credit",
+            line_type="transfer",
+            settlement_amount=Decimal("500.00"),
+            settlement_currency="CNY"
+        )
+        counter_legs = [{
+            "account_id": acc_b,
+            "direction": "debit",
+            "amount": Decimal("500.00"),
+            "currency": "CNY",
+            "occurred_on": date(2026, 8, 10),
+            "is_counter_statement_leg": True
+        }]
+        res = run_deterministic_reconciliation(
+            lines=[line],
+            transactions=[],
+            selected_account_id=self.account_id,
+            account_currency="CNY",
+            baseline_projected_balance=Decimal("1000.00"),
+            authoritative_balance=Decimal("1500.00"),
+            household_movements=counter_legs
+        )
+        self.assertEqual(res.batch_status, "ready")
+        self.assertEqual(res.created_count, 1)
+        cand = res.candidates[0]
+        self.assertEqual(cand.candidate_type, "create_transfer")
+        self.assertEqual(cand.status, "accepted")
+        t_data = cand.payload["transfer"]
+        self.assertEqual(t_data["from_account_id"], str(acc_b))
+        self.assertEqual(t_data["to_account_id"], str(self.account_id))
+        self.assertEqual(t_data["from_amount"], "500.00")
+        self.assertEqual(t_data["to_amount"], "500.00")
+
+    def test_42_inbound_cross_currency_transfer_resolution(self):
+        """
+        Inbound cross-currency transfer resolution:
+        Selected Account A receives 725 CNY (credit).
+        Counter movement on Account B (USD): 100 USD debit.
+        Creates transfer B (USD) -> A (CNY) with exact amounts without reference FX fabrication.
+        """
+        acc_b = uuid4()
+        line = NormalizedStatementLine(
+            transaction_on=date(2026, 8, 10),
+            description_raw="Cross Currency Inbound",
+            direction="credit",
+            line_type="transfer",
+            settlement_amount=Decimal("725.00"),
+            settlement_currency="CNY"
+        )
+        counter_legs = [{
+            "account_id": acc_b,
+            "direction": "debit",
+            "amount": Decimal("100.00"),
+            "currency": "USD",
+            "occurred_on": date(2026, 8, 10),
+            "is_counter_statement_leg": True
+        }]
+        res = run_deterministic_reconciliation(
+            lines=[line],
+            transactions=[],
+            selected_account_id=self.account_id,
+            account_currency="CNY",
+            baseline_projected_balance=Decimal("1000.00"),
+            authoritative_balance=Decimal("1725.00"),
+            household_movements=counter_legs
+        )
+        self.assertEqual(res.batch_status, "ready")
+        self.assertEqual(res.created_count, 1)
+        cand = res.candidates[0]
+        self.assertEqual(cand.candidate_type, "create_transfer")
+        self.assertEqual(cand.status, "accepted")
+        t_data = cand.payload["transfer"]
+        self.assertEqual(t_data["from_account_id"], str(acc_b))
+        self.assertEqual(t_data["to_account_id"], str(self.account_id))
+        self.assertEqual(t_data["from_amount"], "100.00")
+        self.assertEqual(t_data["from_currency"], "USD")
+        self.assertEqual(t_data["to_amount"], "725.00")
+        self.assertEqual(t_data["to_currency"], "CNY")
 
 
 if __name__ == "__main__":
     unittest.main()
+
 

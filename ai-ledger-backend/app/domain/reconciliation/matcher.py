@@ -321,11 +321,15 @@ def match_statement_lines_to_transactions(
         
         # If this was an estimated foreign card settlement, include settlement patch details in payload
         if best_cand.transaction.get("account_leg_status") == "estimated":
-            payload["settlement_patch"] = {
+            patch = {
+                "actual_settlement_amount": str(line.settlement_amount),
                 "settlement_amount": str(line.settlement_amount),
+                "estimated_amount": str(best_cand.transaction.get("from_amount") or best_cand.transaction.get("to_amount") or best_cand.transaction.get("original_amount")),
                 "settlement_currency": line.settlement_currency,
                 "posted_on": line.posted_on.isoformat() if line.posted_on else None
             }
+            payload["settlement_patch"] = patch
+            payload["evidence"]["settlement_patch"] = patch
 
         match_candidates.append(CandidateProposal(
             candidate_type="match",

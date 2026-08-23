@@ -1272,11 +1272,36 @@ class TestStatementReconciliationDb(BaseDbTestCase):
 
     def test_21_foreign_line_evidence_round_trip(self):
         """
-        Regression for Item 4:
-        Foreign line evidence (original_amount=10000 JPY) is preserved in candidate payload across DB round-trip.
+        Regression for Fix 1:
+        1. Foreign line evidence (original_amount=10000 JPY, original_currency=JPY, merchant_hint, external_reference)
+           is preserved in candidate payload across DB preview -> commit -> reload candidate.
+        2. Candidate status is applied, settlement_patch is retained in evidence.
+        3. Also verify the needs_review refresh path preserves evidence.line.
         """
         conn = get_connection(self.test_schema)
         try:
+            # 1. Pre-seed estimated foreign transaction
+            est_tx_id = uuid4()
+            with transaction(conn):
+                tx_repo.create_transaction(
+                    conn=conn,
+                    tx_id=est_tx_id,
+                    household_id=self.household_id,
+                    transaction_type="expense",
+                    occurred_on=date(2026, 8, 10),
+                    original_amount=Decimal("10000.00"),
+                    original_currency="JPY",
+                    from_amount=Decimal("68.90"),
+                    from_currency="USD",
+                    from_account_id=self.acc_usd_id,
+                    category_id=self.cat_expense_id,
+                    merchant="Tokyo Hotel JPY",
+                    account_leg_status="estimated",
+                    source="shortcut",
+                    status="committed"
+                )
+                accounts_repo.update_account_state_projection(conn, self.acc_usd_id, Decimal("1931.10"), datetime.now(timezone.utc))
+
             line = NormalizedStatementLine(
                 transaction_on=date(2026, 8, 10),
                 description_raw="Tokyo Hotel JPY",
@@ -1285,7 +1310,9 @@ class TestStatementReconciliationDb(BaseDbTestCase):
                 settlement_amount=Decimal("68.20"),
                 settlement_currency="USD",
                 original_amount=Decimal("10000.00"),
-                original_currency="JPY"
+                original_currency="JPY",
+                merchant_hint="Tokyo Hotel JPY",
+                external_reference="EXT-9988"
             )
             with transaction(conn):
                 preview = create_statement_reconciliation_batch(
@@ -1297,12 +1324,78 @@ class TestStatementReconciliationDb(BaseDbTestCase):
 
             cands = reconciliation_repo.list_candidates_for_batch(conn, batch_id)
             cand = cands[0]
-            self.assertEqual(Decimal(cand["payload"]["evidence"]["line"]["original_amount"]), Decimal("10000.00"))
+            self.assertEqual(cand["payload"]["evidence"]["line"]["original_amount"], "10000.00")
             self.assertEqual(cand["payload"]["evidence"]["line"]["original_currency"], "JPY")
+            self.assertEqual(cand["payload"]["evidence"]["line"]["merchant_hint"], "Tokyo Hotel JPY")
+            self.assertEqual(cand["payload"]["evidence"]["line"]["external_reference"], "EXT-9988")
 
             with transaction(conn):
                 res = commit_statement_batch(conn, batch_id, user_id=self.user_id, fx_service=self.mock_fx)
                 self.assertEqual(res["status"], "committed")
+
+            cands_after = reconciliation_repo.list_candidates_for_batch(conn, batch_id)
+            cand_after = cands_after[0]
+            self.assertEqual(cand_after["status"], "applied")
+            self.assertEqual(cand_after["payload"]["evidence"]["line"]["original_amount"], "10000.00")
+            self.assertEqual(cand_after["payload"]["evidence"]["line"]["original_currency"], "JPY")
+            self.assertEqual(cand_after["payload"]["evidence"]["line"]["merchant_hint"], "Tokyo Hotel JPY")
+            self.assertEqual(cand_after["payload"]["evidence"]["line"]["external_reference"], "EXT-9988")
+            self.assertIn("settlement_patch", cand_after["payload"]["evidence"])
+            self.assertEqual(cand_after["payload"]["evidence"]["settlement_patch"]["actual_settlement_amount"], "68.20")
+
+            # 4. Verify needs_review refresh path preserves evidence.line
+            line2 = NormalizedStatementLine(
+                transaction_on=date(2026, 8, 25),
+                description_raw="Tokyo Electronics JPY",
+                direction="debit",
+                line_type="expense",
+                settlement_amount=Decimal("150.00"),
+                settlement_currency="USD",
+                original_amount=Decimal("22000.00"),
+                original_currency="JPY",
+                merchant_hint="Tokyo Electronics",
+                external_reference="EXT-5555"
+            )
+            with transaction(conn):
+                # Preview created as ready (authoritative balance = 1781.10)
+                preview2 = create_statement_reconciliation_batch(
+                    conn=conn, household_id=self.household_id, account_id=self.acc_usd_id,
+                    lines=[line2], authoritative_balance=Decimal("1781.10"), user_id=self.user_id,
+                    default_expense_category_id=self.cat_expense_id, fx_service=self.mock_fx
+                )
+                self.assertEqual(preview2["status"], "ready")
+                batch_id_2 = UUID(preview2["batch_id"])
+
+            # Concurrent transaction introduces a 500 USD shift before commit
+            with transaction(conn):
+                tx_repo.create_transaction(
+                    conn=conn,
+                    tx_id=uuid4(),
+                    household_id=self.household_id,
+                    transaction_type="expense",
+                    occurred_on=date(2026, 8, 25),
+                    original_amount=Decimal("500.00"),
+                    original_currency="USD",
+                    from_amount=Decimal("500.00"),
+                    from_currency="USD",
+                    from_account_id=self.acc_usd_id,
+                    category_id=self.cat_expense_id,
+                    merchant="Concurrent Expense",
+                    source="shortcut",
+                    status="committed"
+                )
+
+            with transaction(conn):
+                res2 = commit_statement_batch(conn, batch_id_2, user_id=self.user_id, fx_service=self.mock_fx)
+                self.assertEqual(res2["status"], "needs_review")
+
+            cands2 = reconciliation_repo.list_candidates_for_batch(conn, batch_id_2)
+            cand2 = next(c for c in cands2 if c.get("statement_line_id"))
+            self.assertEqual(cand2["status"], "needs_review")
+            self.assertEqual(cand2["payload"]["evidence"]["line"]["original_amount"], "22000.00")
+            self.assertEqual(cand2["payload"]["evidence"]["line"]["original_currency"], "JPY")
+            self.assertEqual(cand2["payload"]["evidence"]["line"]["merchant_hint"], "Tokyo Electronics")
+            self.assertEqual(cand2["payload"]["evidence"]["line"]["external_reference"], "EXT-5555")
         finally:
             conn.close()
 
@@ -1363,7 +1456,6 @@ class TestStatementReconciliationDb(BaseDbTestCase):
                 )
                 accounts_repo.update_account_state_projection(conn, self.acc_cny_id, Decimal("9500.00"), datetime.now(timezone.utc))
 
-
             with transaction(conn):
                 res = commit_statement_batch(conn, batch_id, user_id=self.user_id, fx_service=self.mock_fx)
                 self.assertEqual(res["status"], "committed")
@@ -1381,8 +1473,169 @@ class TestStatementReconciliationDb(BaseDbTestCase):
         finally:
             conn.close()
 
+    def test_23_inbound_same_currency_transfer_commit(self):
+        """
+        Regression for Fix 2 (A):
+        Selected Account A receives 500 CNY (credit).
+        Counterparty Account B debited 500 CNY.
+        Preview creates create_transfer B -> A.
+        Commit creates exactly one transfer B -> A:
+        - A account_state +500 (10000 -> 10500)
+        - B account_state -500 (5000 -> 4500)
+        - candidate applied
+        - statement line matched
+        """
+        conn = get_connection(self.test_schema)
+        try:
+            line = NormalizedStatementLine(
+                transaction_on=date(2026, 8, 10),
+                description_raw="Transfer from ICBC",
+                direction="credit",
+                line_type="transfer",
+                settlement_amount=Decimal("500.00"),
+                settlement_currency="CNY"
+            )
+            counter_legs = [{
+                "account_id": self.acc_cny2_id,
+                "direction": "debit",
+                "amount": Decimal("500.00"),
+                "currency": "CNY",
+                "occurred_on": date(2026, 8, 10),
+                "is_counter_statement_leg": True
+            }]
+            with transaction(conn):
+                preview = create_statement_reconciliation_batch(
+                    conn=conn,
+                    household_id=self.household_id,
+                    account_id=self.acc_cny_id,
+                    lines=[line],
+                    authoritative_balance=Decimal("10500.00"),
+                    user_id=self.user_id,
+                    fx_service=self.mock_fx,
+                    household_movements=counter_legs
+                )
+                self.assertEqual(preview["created_count"], 1)
+                batch_id = UUID(preview["batch_id"])
+
+            cands = reconciliation_repo.list_candidates_for_batch(conn, batch_id)
+            self.assertEqual(len(cands), 1)
+            self.assertEqual(cands[0]["candidate_type"], "create_transfer")
+            self.assertEqual(cands[0]["status"], "accepted")
+            t_data = cands[0]["payload"]["transfer"]
+            self.assertEqual(t_data["from_account_id"], str(self.acc_cny2_id))
+            self.assertEqual(t_data["to_account_id"], str(self.acc_cny_id))
+
+            with transaction(conn):
+                res = commit_statement_batch(conn, batch_id, user_id=self.user_id, fx_service=self.mock_fx)
+                self.assertEqual(res["status"], "committed")
+
+            # Check account balances
+            state_a = accounts_repo.get_account_state(conn, self.acc_cny_id)
+            state_b = accounts_repo.get_account_state(conn, self.acc_cny2_id)
+            self.assertEqual(Decimal(str(state_a["ledger_balance"])), Decimal("10500.00"))
+            self.assertEqual(Decimal(str(state_b["ledger_balance"])), Decimal("4500.00"))
+
+            # Check created transfer transaction
+            with conn.cursor() as cur:
+                cur.execute("SELECT from_account_id, to_account_id, from_amount, to_amount FROM transactions WHERE transaction_type = 'transfer';")
+                rows = cur.fetchall()
+                self.assertEqual(len(rows), 1)
+                self.assertEqual(rows[0][0], self.acc_cny2_id)
+                self.assertEqual(rows[0][1], self.acc_cny_id)
+                self.assertEqual(Decimal(str(rows[0][2])), Decimal("500.00"))
+                self.assertEqual(Decimal(str(rows[0][3])), Decimal("500.00"))
+
+            # Check candidate applied and line matched
+            cands_after = reconciliation_repo.list_candidates_for_batch(conn, batch_id)
+            self.assertEqual(cands_after[0]["status"], "applied")
+            lines_after = reconciliation_repo.list_statement_lines_for_batch(conn, batch_id)
+            self.assertEqual(lines_after[0]["match_status"], "matched")
+        finally:
+            conn.close()
+
+    def test_24_inbound_cross_currency_transfer_commit(self):
+        """
+        Regression for Fix 2 (C):
+        Selected Account A (CNY) receives 725 CNY (credit).
+        Counterparty Account B (USD) debited 100 USD.
+        Commit creates explicit two-leg transfer:
+        - from_account: B, from_amount: 100 USD
+        - to_account: A, to_amount: 725 CNY
+        - A account_state +725 CNY (10000 -> 10725)
+        - B account_state -100 USD (2000 -> 1900)
+        - candidate applied, line matched
+        """
+        conn = get_connection(self.test_schema)
+        try:
+            line = NormalizedStatementLine(
+                transaction_on=date(2026, 8, 10),
+                description_raw="Cross Currency Wire from US Account",
+                direction="credit",
+                line_type="transfer",
+                settlement_amount=Decimal("725.00"),
+                settlement_currency="CNY"
+            )
+            counter_legs = [{
+                "account_id": self.acc_usd_id,
+                "direction": "debit",
+                "amount": Decimal("100.00"),
+                "currency": "USD",
+                "occurred_on": date(2026, 8, 10),
+                "is_counter_statement_leg": True
+            }]
+            with transaction(conn):
+                preview = create_statement_reconciliation_batch(
+                    conn=conn,
+                    household_id=self.household_id,
+                    account_id=self.acc_cny_id,
+                    lines=[line],
+                    authoritative_balance=Decimal("10725.00"),
+                    user_id=self.user_id,
+                    fx_service=self.mock_fx,
+                    household_movements=counter_legs
+                )
+                self.assertEqual(preview["created_count"], 1)
+                batch_id = UUID(preview["batch_id"])
+
+            cands = reconciliation_repo.list_candidates_for_batch(conn, batch_id)
+            self.assertEqual(len(cands), 1)
+            t_data = cands[0]["payload"]["transfer"]
+            self.assertEqual(t_data["from_account_id"], str(self.acc_usd_id))
+            self.assertEqual(t_data["to_account_id"], str(self.acc_cny_id))
+            self.assertEqual(t_data["from_amount"], "100.00")
+            self.assertEqual(t_data["from_currency"], "USD")
+            self.assertEqual(t_data["to_amount"], "725.00")
+            self.assertEqual(t_data["to_currency"], "CNY")
+
+            with transaction(conn):
+                res = commit_statement_batch(conn, batch_id, user_id=self.user_id, fx_service=self.mock_fx)
+                self.assertEqual(res["status"], "committed")
+
+            state_a = accounts_repo.get_account_state(conn, self.acc_cny_id)
+            state_b = accounts_repo.get_account_state(conn, self.acc_usd_id)
+            self.assertEqual(Decimal(str(state_a["ledger_balance"])), Decimal("10725.00"))
+            self.assertEqual(Decimal(str(state_b["ledger_balance"])), Decimal("1900.00"))
+
+            with conn.cursor() as cur:
+                cur.execute("SELECT from_account_id, to_account_id, from_amount, from_currency, to_amount, to_currency FROM transactions WHERE transaction_type = 'transfer';")
+                row = cur.fetchone()
+                self.assertEqual(row[0], self.acc_usd_id)
+                self.assertEqual(row[1], self.acc_cny_id)
+                self.assertEqual(Decimal(str(row[2])), Decimal("100.00"))
+                self.assertEqual(row[3], "USD")
+                self.assertEqual(Decimal(str(row[4])), Decimal("725.00"))
+                self.assertEqual(row[5], "CNY")
+
+            cands_after = reconciliation_repo.list_candidates_for_batch(conn, batch_id)
+            self.assertEqual(cands_after[0]["status"], "applied")
+            lines_after = reconciliation_repo.list_statement_lines_for_batch(conn, batch_id)
+            self.assertEqual(lines_after[0]["match_status"], "matched")
+        finally:
+            conn.close()
+
 
 if __name__ == "__main__":
     unittest.main()
+
 
 

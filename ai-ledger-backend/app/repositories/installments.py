@@ -231,6 +231,29 @@ def update_installment_period_billed(
             (expense_transaction_id, statement_line_id, period_id)
         )
 
+def update_installment_period_billed_atomic(
+    conn,
+    period_id: UUID,
+    expense_transaction_id: UUID,
+    statement_line_id: Optional[UUID] = None
+) -> bool:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE installment_periods
+            SET status = 'billed',
+                expense_transaction_id = %s,
+                statement_line_id = %s,
+                updated_at = now()
+            WHERE id = %s AND status = 'scheduled'
+            RETURNING id;
+            """,
+            (expense_transaction_id, statement_line_id, period_id)
+        )
+        row = cur.fetchone()
+        return row is not None
+
+
 def update_installment_plan_status(
     conn,
     plan_id: UUID,

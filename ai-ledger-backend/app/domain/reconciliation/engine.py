@@ -94,14 +94,24 @@ def run_deterministic_reconciliation(
     7. Candidate simulation & residual calculation
     8. Batch readiness determination & statistics computation
     """
-    # 1. Normalize line descriptions
-    for line in lines:
+    # 1. Deterministically sort and normalize lines to guarantee input permutation invariance
+    sorted_lines = sorted(
+        lines,
+        key=lambda l: (
+            l.effective_date or date.min,
+            l.settlement_amount,
+            l.description_raw or "",
+            str(l.id)
+        )
+    )
+
+    for line in sorted_lines:
         if not line.description_normalized:
             line.description_normalized = normalize_description(line.description_raw)
 
     # 2. Existing transaction matching
     matched_candidates, remaining_lines = match_statement_lines_to_transactions(
-        lines=lines,
+        lines=sorted_lines,
         transactions=transactions,
         selected_account_id=selected_account_id
     )
@@ -119,7 +129,8 @@ def run_deterministic_reconciliation(
                 line=line,
                 selected_account_id=selected_account_id,
                 installment_plans=installment_plans,
-                installment_periods=installment_periods or {}
+                installment_periods=installment_periods or {},
+                default_expense_category_id=default_expense_category_id
             )
             if inst_cand:
                 all_candidates.append(inst_cand)
@@ -156,15 +167,69 @@ def run_deterministic_reconciliation(
     # 4. Process remaining unmatched lines into missing transactions
     for line in unmatched_after_special:
         line_date = line.effective_date
-        line_desc = line.merchant_hint or line.description_normalized or line.description_raw
-        
+
+        # Invariant 1: No effective date -> automatic financial creation forbidden -> needs_review!
+        if line_date is None:
+            all_candidates.append(CandidateProposal(
+                candidate_type="create_transaction",
+                status="needs_review",
+                statement_line_id=line.id,
+                payload={
+                    "line": {
+                        "direction": line.direction,
+                        "line_type": line.line_type,
+                        "amount": str(line.settlement_amount),
+                        "currency": line.settlement_currency,
+                        "description": line.description_raw
+                    }
+                },
+                reason_code="DATE_OUTSIDE_WINDOW",
+                reason_detail="Statement line has no effective transaction/posting date; manual verification required"
+            ))
+            continue
+
+        # Invariant 2: line_type == "unknown" -> needs_review TYPE_AMBIGUOUS, never automatic expense!
+        if line.line_type == "unknown":
+            all_candidates.append(CandidateProposal(
+                candidate_type="create_transaction",
+                status="needs_review",
+                statement_line_id=line.id,
+                payload={
+                    "line": {
+                        "direction": line.direction,
+                        "line_type": line.line_type,
+                        "amount": str(line.settlement_amount),
+                        "currency": line.settlement_currency,
+                        "occurred_on": line_date.isoformat(),
+                        "description": line.description_raw
+                    }
+                },
+                reason_code=TYPE_AMBIGUOUS,
+                reason_detail="Statement line type is unknown; cannot auto-create transaction"
+            ))
+            continue
+
         if line.direction == "debit":
             # Debit: expense or fee
-            tx_type = "fee" if _is_fee_line(line) else "expense"
-            cat_id = default_expense_category_id
-            status = "accepted" if cat_id is not None else "needs_review"
-            reason_code = None if cat_id is not None else "CATEGORY_REQUIRED"
-            reason_detail = None if cat_id is not None else "Category resolution is required to commit this expense"
+            if _is_fee_line(line):
+                tx_type = "fee"
+                cat_id = default_expense_category_id
+                status = "accepted" if cat_id is not None else "needs_review"
+                reason_code = None if cat_id is not None else "CATEGORY_REQUIRED"
+                reason_detail = None if cat_id is not None else "Category resolution is required to commit this fee"
+            elif line.line_type == "expense":
+                tx_type = "expense"
+                cat_id = default_expense_category_id
+                status = "accepted" if cat_id is not None else "needs_review"
+                reason_code = None if cat_id is not None else "CATEGORY_REQUIRED"
+                reason_detail = None if cat_id is not None else "Category resolution is required to commit this expense"
+            else:
+                # Debit but not explicit expense/fee -> needs_review
+                tx_type = "expense"
+                cat_id = default_expense_category_id
+                status = "needs_review"
+                reason_code = TYPE_AMBIGUOUS
+                reason_detail = "Statement debit line semantics are ambiguous; manual confirmation required"
 
             all_candidates.append(CandidateProposal(
                 candidate_type="create_transaction",
@@ -176,7 +241,7 @@ def run_deterministic_reconciliation(
                         "from_account_id": str(selected_account_id),
                         "amount": str(line.settlement_amount),
                         "currency": line.settlement_currency,
-                        "occurred_on": line_date.isoformat() if line_date else None,
+                        "occurred_on": line_date.isoformat(),
                         "merchant": line.merchant_hint or line.description_raw,
                         "category_id": str(cat_id) if cat_id else None
                     }
@@ -188,9 +253,11 @@ def run_deterministic_reconciliation(
 
         elif line.direction == "credit":
             # Credit: cash_income or ambiguous credit
-            if _is_income_line(line):
+            if _is_income_line(line) or line.line_type == "income":
                 cat_id = default_income_category_id
                 status = "accepted" if cat_id is not None else "needs_review"
+                reason_code = None if cat_id is not None else "CATEGORY_REQUIRED"
+                reason_detail = None if cat_id is not None else "Category resolution is required to commit this income"
                 all_candidates.append(CandidateProposal(
                     candidate_type="create_transaction",
                     status=status,
@@ -201,14 +268,15 @@ def run_deterministic_reconciliation(
                             "to_account_id": str(selected_account_id),
                             "amount": str(line.settlement_amount),
                             "currency": line.settlement_currency,
-                            "occurred_on": line_date.isoformat() if line_date else None,
+                            "occurred_on": line_date.isoformat(),
                             "merchant": line.merchant_hint or line.description_raw,
                             "category_id": str(cat_id) if cat_id else None
                         }
                     },
-                    confidence=line.confidence or Decimal("0.90")
+                    confidence=line.confidence or Decimal("0.90"),
+                    reason_code=reason_code,
+                    reason_detail=reason_detail
                 ))
-
             else:
                 # Unexplained credit line -> must NOT default to income -> needs_review!
                 all_candidates.append(CandidateProposal(
@@ -220,7 +288,7 @@ def run_deterministic_reconciliation(
                             "direction": "credit",
                             "amount": str(line.settlement_amount),
                             "currency": line.settlement_currency,
-                            "occurred_on": line_date.isoformat() if line_date else None,
+                            "occurred_on": line_date.isoformat(),
                             "description": line.description_raw
                         }
                     },
@@ -236,17 +304,19 @@ def run_deterministic_reconciliation(
                 statement_line_id=line.id,
                 payload={
                     "line": {
-                        "direction": "unknown",
+                        "direction": line.direction,
                         "amount": str(line.settlement_amount),
                         "currency": line.settlement_currency,
+                        "occurred_on": line_date.isoformat(),
                         "description": line.description_raw
                     }
                 },
                 reason_code=TYPE_AMBIGUOUS,
-                reason_detail="Line direction is unknown; requires human review"
+                reason_detail="Statement line has unknown direction and cannot be created automatically"
             ))
 
     # 5. Evaluate residual after candidate simulation
+
     batch_status, residual, adj_cand = evaluate_residual_and_batch_readiness(
         baseline_projected_balance=baseline_projected_balance,
         authoritative_balance=authoritative_balance,

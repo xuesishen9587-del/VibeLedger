@@ -1,4 +1,4 @@
-﻿from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional, Tuple
 from decimal import Decimal
 from uuid import UUID
 from datetime import date
@@ -20,22 +20,47 @@ def process_transfer_line(
 ) -> CandidateProposal:
     """
     Evaluates transfer matching & counter-account resolution for a transfer statement line:
-    - Same-currency two-leg matching
-    - Cross-currency two-leg matching (requires both explicit legs)
+    - Same-currency two-leg matching from explicit trustworthy counter-leg evidence
+    - Cross-currency two-leg matching (requires both explicit real legs)
+    - Rejects committed ordinary movements (e.g. cash_income) as fake transfer legs
     - Ambiguity detection (multiple counter-accounts -> needs_review)
     - Missing counterparty / missing cross-currency leg -> needs_review
     """
+    if line.direction not in ("debit", "credit"):
+        return CandidateProposal(
+            candidate_type="create_transfer",
+            status="needs_review",
+            statement_line_id=line.id,
+            payload={
+                "line": {
+                    "direction": line.direction,
+                    "amount": str(line.settlement_amount),
+                    "currency": line.settlement_currency,
+                    "occurred_on": line.effective_date.isoformat() if line.effective_date else None
+                }
+            },
+            reason_code="TYPE_AMBIGUOUS",
+            reason_detail="Transfer statement line has unknown direction and cannot be auto-created"
+        )
+
     sel_acc_str = str(selected_account_id)
     line_date = line.effective_date
-    line_amount = line.settlement_amount
     line_curr = line.settlement_currency
+    line_amount = quantize_money(line.settlement_amount, line_curr)
 
-    # Search household movements for opposite leg
-    # Opposite direction: if line is debit -> movement is credit (or to_account)
-    #                      if line is credit -> movement is debit (or from_account)
+    # Search household movements for trustworthy opposite counter-statement leg
     matching_counter_legs = []
 
-    for mov in household_movements:
+    for mov in (household_movements or []):
+        # Must be trustworthy uncommitted statement counter-leg evidence
+        is_trustworthy_counter_leg = (
+            mov.get("is_counter_statement_leg") is True
+            or mov.get("evidence_type") in ("statement_counter_leg", "uncommitted_transfer_leg")
+        )
+        if not is_trustworthy_counter_leg:
+            # Committed transactions (cash_income, expense, etc.) must NEVER be treated as a free transfer leg
+            continue
+
         mov_acc_id = str(mov.get("account_id"))
         if mov_acc_id == sel_acc_str:
             continue  # Must be a different account in the household
@@ -53,8 +78,10 @@ def process_transfer_line(
         if line.direction == "credit" and mov_dir != "debit":
             continue
 
-        mov_amount = parse_decimal(mov.get("amount", "0"))
         mov_curr = mov.get("currency")
+        if not mov_curr:
+            continue
+        mov_amount = quantize_money(parse_decimal(mov.get("amount", "0")), mov_curr)
 
         # Same currency match
         if mov_curr == line_curr and mov_amount == line_amount:
@@ -66,9 +93,8 @@ def process_transfer_line(
                 "is_cross_currency": False,
                 "raw_movement": mov
             })
-        # Cross currency match candidate
-        elif mov_curr != line_curr and mov_amount > 0 and line_amount > 0:
-            # Check if this movement is explicitly paired or transfer-like
+        # Cross currency match candidate (both explicit real amounts must exist)
+        elif mov_curr != line_curr and mov_amount > Decimal("0.00") and line_amount > Decimal("0.00"):
             matching_counter_legs.append({
                 "account_id": UUID(mov_acc_id),
                 "amount": mov_amount,
@@ -80,7 +106,6 @@ def process_transfer_line(
 
     # Case 1: Multiple counter-accounts matched -> Ambiguity!
     if len(matching_counter_legs) > 1:
-        # Check if all same currency
         return CandidateProposal(
             candidate_type="create_transfer",
             status="needs_review",
@@ -149,14 +174,13 @@ def process_transfer_line(
                         "to_account_id": str(to_acc),
                         "to_amount": str(line_amount),
                         "to_currency": line_curr,
-                        "effective_fx_rate": "1.000000000000",
+                        "effective_fx_rate": "1.000000",
                         "occurred_on": line_date.isoformat() if line_date else None
                     }
                 }
             )
 
     # Case 3: No counter-account found
-    # If statement line indicated cross-currency intent (e.g. original currency != settlement currency) but counter-leg missing:
     if line.original_currency and line.original_currency != line_curr:
         return CandidateProposal(
             candidate_type="create_transfer",
@@ -191,3 +215,4 @@ def process_transfer_line(
         reason_code=COUNTER_ACCOUNT_UNRESOLVED,
         reason_detail="No unique counter-account found for this transfer"
     )
+

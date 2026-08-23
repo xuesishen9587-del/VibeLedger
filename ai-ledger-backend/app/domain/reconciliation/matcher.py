@@ -16,9 +16,11 @@ from app.domain.reconciliation.models import (
     AMOUNT_CONFLICT,
     ORIGINAL_AMOUNT_CONFLICT,
     DATE_OUTSIDE_WINDOW,
-    AUTHORITATIVE_DATA_CONFLICT
+    AUTHORITATIVE_DATA_CONFLICT,
+    SETTLEMENT_DEVIATION_SUSPICIOUS
 )
 from app.domain.reconciliation.scoring import compute_match_score
+
 
 
 def match_statement_lines_to_transactions(
@@ -54,9 +56,12 @@ def match_statement_lines_to_transactions(
     # 2. Score all valid candidate pairs for each line
     # Map: line.id -> List[ScoredCandidate]
     line_candidates: Dict[UUID, List[ScoredCandidate]] = {}
+    line_conflicts: Dict[UUID, List[ScoredCandidate]] = {}
     
     for line in lines:
         scored_for_line: List[ScoredCandidate] = []
+        conflicts_for_line: List[ScoredCandidate] = []
+
         for tx in eligible_txs:
             from_acc = _extract_acc(tx.get("from_account_id") or tx.get("from_account"))
             to_acc = _extract_acc(tx.get("to_account_id") or tx.get("to_account"))
@@ -65,14 +70,30 @@ def match_statement_lines_to_transactions(
             if line.direction == "debit" and from_acc != sel_acc:
                 continue
             if line.direction == "credit" and to_acc != sel_acc:
-
                 continue
             if line.direction == "unknown" and from_acc != sel_acc and to_acc != sel_acc:
                 continue
 
             score = compute_match_score(line, tx, selected_account_id)
             if score.is_blocked:
+                # Check for material same-event conflict evidence
+                is_material = False
+                if score.block_reason in (AMOUNT_CONFLICT, ORIGINAL_AMOUNT_CONFLICT):
+                    if score.merchant_similarity >= Decimal("0.40") or (score.date_diff_days is not None and score.date_diff_days <= 5):
+                        is_material = True
+                elif score.block_reason == SETTLEMENT_DEVIATION_SUSPICIOUS:
+                    is_material = True
+                elif score.block_reason == AUTHORITATIVE_DATA_CONFLICT:
+                    if score.merchant_similarity >= Decimal("0.40") or (score.date_diff_days is not None and score.date_diff_days <= 5):
+                        is_material = True
+                elif score.block_reason == DATE_OUTSIDE_WINDOW:
+                    if score.merchant_similarity >= Decimal("0.80") and score.amount_score >= 35:
+                        is_material = True
+
+                if is_material:
+                    conflicts_for_line.append(ScoredCandidate(statement_line=line, transaction=tx, score=score))
                 continue
+
             if score.date_diff_days is not None and score.date_diff_days > 5:
                 continue
             
@@ -86,7 +107,15 @@ def match_statement_lines_to_transactions(
                 str(sc.transaction.get("id"))
             )
         )
+        conflicts_for_line.sort(
+            key=lambda sc: (
+                -sc.score.merchant_similarity,
+                sc.score.date_diff_days if sc.score.date_diff_days is not None else 999,
+                str(sc.transaction.get("id"))
+            )
+        )
         line_candidates[line.id] = scored_for_line
+        line_conflicts[line.id] = conflicts_for_line
 
     # 3. Find transaction -> List of lines mapping to verify mutual-best uniqueness
     # Map: tx_id -> List[(line_id, ScoredCandidate)]
@@ -114,9 +143,41 @@ def match_statement_lines_to_transactions(
 
     for line in lines:
         candidates = line_candidates.get(line.id, [])
+        conflicts = line_conflicts.get(line.id, [])
+
         if not candidates:
-            unmatched_lines.append(line)
+            if conflicts:
+                # Material conflict exists: record needs_review candidate and DO NOT treat line as unmatched
+                best_conf = conflicts[0]
+                conf_score = best_conf.score
+                conf_tx_id = best_conf.transaction["id"]
+                match_candidates.append(CandidateProposal(
+                    candidate_type="match",
+                    status="needs_review",
+                    statement_line_id=line.id,
+                    target_transaction_id=conf_tx_id,
+                    payload={
+                        "evidence": {
+                            "block_reason": conf_score.block_reason,
+                            "date_diff_days": conf_score.date_diff_days,
+                            "merchant_similarity": str(conf_score.merchant_similarity)
+                        },
+                        "matched_transaction": {
+                            "id": str(conf_tx_id),
+                            "occurred_on": best_conf.transaction.get("occurred_on").isoformat() if isinstance(best_conf.transaction.get("occurred_on"), date) else str(best_conf.transaction.get("occurred_on")),
+                            "amount": str(best_conf.transaction.get("from_amount") or best_conf.transaction.get("to_amount") or best_conf.transaction.get("original_amount")),
+                            "currency": str(best_conf.transaction.get("from_currency") or best_conf.transaction.get("to_currency") or best_conf.transaction.get("original_currency")),
+                            "merchant": best_conf.transaction.get("merchant")
+                        }
+                    },
+                    confidence=Decimal("0.50"),
+                    reason_code=conf_score.block_reason,
+                    reason_detail=f"Material conflict with candidate transaction: {conf_score.block_reason}"
+                ))
+            else:
+                unmatched_lines.append(line)
             continue
+
 
         best_cand = candidates[0]
         best_score = best_cand.score.total_score

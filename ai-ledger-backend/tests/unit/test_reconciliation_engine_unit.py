@@ -401,6 +401,10 @@ class TestReconciliationEngineUnit(unittest.TestCase):
     # 5. TRANSFER TESTS (Section 19, 20 & Section 43)
     # =========================================================================
 
+    # =========================================================================
+    # 5. TRANSFER TESTS (Section 19, 20 & Section 43)
+    # =========================================================================
+
     def test_15_transfer_same_currency_two_leg_accepted(self):
         line = NormalizedStatementLine(
             transaction_on=date(2026, 8, 10),
@@ -415,7 +419,8 @@ class TestReconciliationEngineUnit(unittest.TestCase):
             "direction": "credit",
             "amount": Decimal("5000.00"),
             "currency": "CNY",
-            "occurred_on": date(2026, 8, 10)
+            "occurred_on": date(2026, 8, 10),
+            "is_counter_statement_leg": True
         }]
         cand = process_transfer_line(line, self.account_id, [], hh_movements)
         self.assertEqual(cand.status, "accepted")
@@ -423,7 +428,7 @@ class TestReconciliationEngineUnit(unittest.TestCase):
         t_data = cand.payload["transfer"]
         self.assertEqual(t_data["from_amount"], "5000.00")
         self.assertEqual(t_data["to_amount"], "5000.00")
-        self.assertEqual(t_data["effective_fx_rate"], "1.000000000000")
+        self.assertEqual(t_data["effective_fx_rate"], "1.000000")
 
     def test_16_transfer_cross_currency_two_leg_accepted(self):
         line = NormalizedStatementLine(
@@ -439,7 +444,8 @@ class TestReconciliationEngineUnit(unittest.TestCase):
             "direction": "credit",
             "amount": Decimal("1000.00"),
             "currency": "USD",
-            "occurred_on": date(2026, 8, 10)
+            "occurred_on": date(2026, 8, 10),
+            "is_counter_statement_leg": True
         }]
         cand = process_transfer_line(line, self.account_id, [], hh_movements)
         self.assertEqual(cand.status, "accepted")
@@ -459,7 +465,6 @@ class TestReconciliationEngineUnit(unittest.TestCase):
             original_amount=Decimal("1000.00"),
             original_currency="USD"
         )
-        # No counter-account movements in evidence
         cand = process_transfer_line(line, self.account_id, [], [])
         self.assertEqual(cand.status, "needs_review")
         self.assertEqual(cand.reason_code, CROSS_CURRENCY_MISSING_LEG)
@@ -473,12 +478,11 @@ class TestReconciliationEngineUnit(unittest.TestCase):
             settlement_amount=Decimal("5000.00"),
             settlement_currency="CNY"
         )
-        # Two other accounts both have +5000 CNY on same day
         acc_b = uuid4()
         acc_c = uuid4()
         hh_movements = [
-            {"account_id": acc_b, "direction": "credit", "amount": Decimal("5000.00"), "currency": "CNY", "occurred_on": date(2026, 8, 10)},
-            {"account_id": acc_c, "direction": "credit", "amount": Decimal("5000.00"), "currency": "CNY", "occurred_on": date(2026, 8, 10)}
+            {"account_id": acc_b, "direction": "credit", "amount": Decimal("5000.00"), "currency": "CNY", "occurred_on": date(2026, 8, 10), "is_counter_statement_leg": True},
+            {"account_id": acc_c, "direction": "credit", "amount": Decimal("5000.00"), "currency": "CNY", "occurred_on": date(2026, 8, 10), "is_counter_statement_leg": True}
         ]
         cand = process_transfer_line(line, self.account_id, [], hh_movements)
         self.assertEqual(cand.status, "needs_review")
@@ -491,7 +495,8 @@ class TestReconciliationEngineUnit(unittest.TestCase):
     def test_19_refund_exact_original_accepted(self):
         line = NormalizedStatementLine(
             transaction_on=date(2026, 8, 10),
-            description_raw="Apple Store Refund",
+            description_raw="Apple Store",
+            merchant_hint="Apple Store",
             direction="credit",
             line_type="refund",
             settlement_amount=Decimal("300.00"),
@@ -517,7 +522,7 @@ class TestReconciliationEngineUnit(unittest.TestCase):
     def test_20_refund_exceeds_remaining_refundable_needs_review(self):
         line = NormalizedStatementLine(
             transaction_on=date(2026, 8, 10),
-            description_raw="Apple Store Refund",
+            description_raw="Apple Store",
             direction="credit",
             line_type="refund",
             settlement_amount=Decimal("300.00"),
@@ -534,7 +539,6 @@ class TestReconciliationEngineUnit(unittest.TestCase):
             "transaction_type": "expense",
             "status": "committed"
         }]
-        # Already refunded 800.00 (remaining is 200.00 < 300.00)
         existing_totals = {orig_exp_id: Decimal("800.00")}
         cand = process_refund_line(line, self.account_id, candidate_expenses, existing_totals)
         self.assertEqual(cand.status, "needs_review")
@@ -543,7 +547,7 @@ class TestReconciliationEngineUnit(unittest.TestCase):
     def test_21_refund_outside_180_days_needs_review(self):
         line = NormalizedStatementLine(
             transaction_on=date(2026, 8, 10),
-            description_raw="Apple Store Refund",
+            description_raw="Apple Store",
             direction="credit",
             line_type="refund",
             settlement_amount=Decimal("300.00"),
@@ -579,6 +583,7 @@ class TestReconciliationEngineUnit(unittest.TestCase):
         )
         plan_id = uuid4()
         period_1_id = uuid4()
+        cat_id = uuid4()
         plans = [{
             "id": plan_id,
             "credit_account_id": self.account_id,
@@ -592,7 +597,7 @@ class TestReconciliationEngineUnit(unittest.TestCase):
                 {"id": uuid4(), "period_no": 2, "scheduled_amount": Decimal("1000.00"), "currency": "CNY", "status": "scheduled"}
             ]
         }
-        cand = process_installment_line(line, self.account_id, plans, periods)
+        cand = process_installment_line(line, self.account_id, plans, periods, default_expense_category_id=cat_id)
         self.assertIsNotNone(cand)
         self.assertEqual(cand.status, "accepted")
         self.assertEqual(cand.candidate_type, "recognize_installment")
@@ -601,7 +606,6 @@ class TestReconciliationEngineUnit(unittest.TestCase):
         self.assertFalse(cand.payload["installment"]["is_last_period"])
 
     def test_23_installment_remainder_allocation_recognition(self):
-        # 10000 / 3 -> 3333.33, 3333.33, 3333.34
         line_p3 = NormalizedStatementLine(
             transaction_on=date(2026, 10, 10),
             description_raw="MacBook Air",
@@ -612,11 +616,13 @@ class TestReconciliationEngineUnit(unittest.TestCase):
         )
         plan_id = uuid4()
         period_3_id = uuid4()
+        cat_id = uuid4()
         plans = [{
             "id": plan_id,
             "credit_account_id": self.account_id,
             "total_periods": 3,
             "merchant": "MacBook Air",
+            "first_statement_month": date(2026, 8, 1),
             "status": "active"
         }]
         periods = {
@@ -626,7 +632,7 @@ class TestReconciliationEngineUnit(unittest.TestCase):
                 {"id": period_3_id, "period_no": 3, "scheduled_amount": Decimal("3333.34"), "currency": "CNY", "status": "scheduled"}
             ]
         }
-        cand = process_installment_line(line_p3, self.account_id, plans, periods)
+        cand = process_installment_line(line_p3, self.account_id, plans, periods, default_expense_category_id=cat_id)
         self.assertIsNotNone(cand)
         self.assertEqual(cand.status, "accepted")
         self.assertEqual(cand.payload["installment"]["period_no"], 3)
@@ -658,8 +664,6 @@ class TestReconciliationEngineUnit(unittest.TestCase):
     # =========================================================================
 
     def test_25_explainable_missing_expense_explains_entire_residual(self):
-        # Baseline = 1500, Auth = 1000 -> Pre-candidate residual = -500
-        # Missing expense candidate = 500 -> Simulated delta = -500 -> Projected = 1000 -> Residual = 0 -> No adjustment!
         cand = CandidateProposal(
             candidate_type="create_transaction",
             status="accepted",
@@ -677,7 +681,6 @@ class TestReconciliationEngineUnit(unittest.TestCase):
         self.assertIsNone(adj)
 
     def test_26_small_unexplained_residual_auto_adjusts(self):
-        # Baseline = 1000, Auth = 1047 -> Residual = +47.00 CNY (<= 200) -> Adjustment candidate accepted
         status, residual, adj = evaluate_residual_and_batch_readiness(
             baseline_projected_balance=Decimal("1000.00"),
             authoritative_balance=Decimal("1047.00"),
@@ -692,7 +695,6 @@ class TestReconciliationEngineUnit(unittest.TestCase):
         self.assertEqual(adj.payload["adjustment_amount"], "47.00")
 
     def test_27_residual_boundary_200_cny(self):
-        # +200.00 CNY -> Eligible
         st_200, res_200, adj_200 = evaluate_residual_and_batch_readiness(
             baseline_projected_balance=Decimal("1000.00"),
             authoritative_balance=Decimal("1200.00"),
@@ -703,7 +705,6 @@ class TestReconciliationEngineUnit(unittest.TestCase):
         self.assertEqual(st_200, "ready")
         self.assertEqual(adj_200.status, "accepted")
 
-        # 200.01 CNY -> Needs review
         st_200_01, res_200_01, adj_200_01 = evaluate_residual_and_batch_readiness(
             baseline_projected_balance=Decimal("1000.00"),
             authoritative_balance=Decimal("1200.01"),
@@ -716,8 +717,6 @@ class TestReconciliationEngineUnit(unittest.TestCase):
         self.assertEqual(adj_200_01.reason_code, RECONCILIATION_RESIDUAL_TOO_LARGE)
 
     def test_28_non_cny_residual_uses_cny_conversion(self):
-        # USD Account, USD/CNY = 7.20
-        # 20 USD = 144 CNY <= 200 -> Ready
         st_usd_20, _, adj_usd_20 = evaluate_residual_and_batch_readiness(
             baseline_projected_balance=Decimal("100.00"),
             authoritative_balance=Decimal("120.00"),
@@ -729,7 +728,6 @@ class TestReconciliationEngineUnit(unittest.TestCase):
         self.assertEqual(st_usd_20, "ready")
         self.assertEqual(adj_usd_20.status, "accepted")
 
-        # 30 USD = 216 CNY > 200 -> Needs review
         st_usd_30, _, adj_usd_30 = evaluate_residual_and_batch_readiness(
             baseline_projected_balance=Decimal("100.00"),
             authoritative_balance=Decimal("130.00"),
@@ -741,6 +739,327 @@ class TestReconciliationEngineUnit(unittest.TestCase):
         self.assertEqual(st_usd_30, "needs_review")
         self.assertEqual(adj_usd_30.status, "needs_review")
         self.assertEqual(adj_usd_30.reason_code, RECONCILIATION_RESIDUAL_TOO_LARGE)
+
+    # =========================================================================
+    # 9. CORRECTNESS FINAL-FIX REGRESSIONS (Items 1 - 12)
+    # =========================================================================
+
+    def test_29_hard_conflict_preserves_evidence_and_prevents_unmatched_creation(self):
+        # Existing Starbucks 38 CNY vs Statement Starbucks 35 CNY (amount conflict)
+        line = NormalizedStatementLine(
+            transaction_on=date(2026, 8, 10),
+            description_raw="Starbucks Coffee",
+            direction="debit",
+            line_type="expense",
+            settlement_amount=Decimal("35.00"),
+            settlement_currency="CNY"
+        )
+        tx_starbucks_38 = {
+            "id": uuid4(),
+            "occurred_on": date(2026, 8, 10),
+            "from_account_id": self.account_id,
+            "from_amount": Decimal("38.00"),
+            "from_currency": "CNY",
+            "merchant": "Starbucks Coffee",
+            "transaction_type": "expense",
+            "status": "committed"
+        }
+        res = run_deterministic_reconciliation(
+            lines=[line],
+            transactions=[tx_starbucks_38],
+            selected_account_id=self.account_id,
+            account_currency="CNY",
+            baseline_projected_balance=Decimal("1000.00"),
+            authoritative_balance=Decimal("965.00"),
+            default_expense_category_id=uuid4()
+        )
+        self.assertEqual(res.batch_status, "needs_review")
+        # Assert exactly one candidate exists (the conflict review candidate) and NO create_transaction candidate!
+        create_cands = [c for c in res.candidates if c.candidate_type == "create_transaction"]
+        self.assertEqual(len(create_cands), 0)
+        match_cands = [c for c in res.candidates if c.candidate_type == "match"]
+        self.assertEqual(len(match_cands), 1)
+        self.assertEqual(match_cands[0].status, "needs_review")
+        self.assertEqual(match_cands[0].reason_code, AMOUNT_CONFLICT)
+
+    def test_30_foreign_original_amount_conflict_preserves_evidence(self):
+        # Existing tx has original 10000 JPY, statement has original 12000 JPY
+        line = NormalizedStatementLine(
+            transaction_on=date(2026, 8, 10),
+            description_raw="Tokyo Hotel",
+            direction="debit",
+            line_type="expense",
+            settlement_amount=Decimal("560.00"),
+            settlement_currency="CNY",
+            original_amount=Decimal("12000.00"),
+            original_currency="JPY"
+        )
+        tx_hotel = {
+            "id": uuid4(),
+            "occurred_on": date(2026, 8, 10),
+            "from_account_id": self.account_id,
+            "from_amount": Decimal("480.00"),
+            "from_currency": "CNY",
+            "original_amount": Decimal("10000.00"),
+            "original_currency": "JPY",
+            "merchant": "Tokyo Hotel",
+            "transaction_type": "expense",
+            "account_leg_status": "estimated",
+            "status": "committed"
+        }
+        res = run_deterministic_reconciliation(
+            lines=[line],
+            transactions=[tx_hotel],
+            selected_account_id=self.account_id,
+            account_currency="CNY",
+            baseline_projected_balance=Decimal("1000.00"),
+            authoritative_balance=Decimal("440.00"),
+            default_expense_category_id=uuid4()
+        )
+        self.assertEqual(res.batch_status, "needs_review")
+        create_cands = [c for c in res.candidates if c.candidate_type == "create_transaction"]
+        self.assertEqual(len(create_cands), 0)
+        match_cands = [c for c in res.candidates if c.candidate_type == "match"]
+        self.assertEqual(len(match_cands), 1)
+        self.assertEqual(match_cands[0].reason_code, ORIGINAL_AMOUNT_CONFLICT)
+
+    def test_31_strict_type_scoring_no_cross_type_points(self):
+        line_expense = NormalizedStatementLine(
+            transaction_on=date(2026, 8, 10),
+            description_raw="Service Fee",
+            direction="debit",
+            line_type="expense",
+            settlement_amount=Decimal("50.00"),
+            settlement_currency="CNY"
+        )
+        tx_fee = {
+            "id": uuid4(),
+            "occurred_on": date(2026, 8, 10),
+            "from_account_id": self.account_id,
+            "from_amount": Decimal("50.00"),
+            "from_currency": "CNY",
+            "merchant": "Service Fee",
+            "transaction_type": "fee",
+            "status": "committed"
+        }
+        score = compute_match_score(line_expense, tx_fee, self.account_id)
+        # expense <-> fee must get type_score == 0
+        self.assertEqual(score.type_score, 0)
+
+        # fee <-> fee must get type_score == 10
+        line_fee = NormalizedStatementLine(
+            transaction_on=date(2026, 8, 10),
+            description_raw="Service Fee",
+            direction="debit",
+            line_type="fee",
+            settlement_amount=Decimal("50.00"),
+            settlement_currency="CNY"
+        )
+        score_same = compute_match_score(line_fee, tx_fee, self.account_id)
+        self.assertEqual(score_same.type_score, 10)
+
+    def test_32_minor_unit_quantization_comparison(self):
+        line = NormalizedStatementLine(
+            transaction_on=date(2026, 8, 10),
+            description_raw="Supermarket",
+            direction="debit",
+            line_type="expense",
+            settlement_amount=Decimal("100.000"),
+            settlement_currency="CNY"
+        )
+        tx = {
+            "id": uuid4(),
+            "occurred_on": date(2026, 8, 10),
+            "from_account_id": self.account_id,
+            "from_amount": Decimal("100.00"),
+            "from_currency": "CNY",
+            "merchant": "Supermarket",
+            "transaction_type": "expense",
+            "status": "committed"
+        }
+        score = compute_match_score(line, tx, self.account_id)
+        self.assertEqual(score.amount_score, 40)
+        self.assertFalse(score.is_blocked)
+
+    def test_33_committed_cash_income_does_not_justify_transfer_creation(self):
+        line = NormalizedStatementLine(
+            transaction_on=date(2026, 8, 10),
+            description_raw="转账",
+            direction="debit",
+            line_type="transfer",
+            settlement_amount=Decimal("5000.00"),
+            settlement_currency="CNY"
+        )
+        # Account B has committed cash_income +5000 without statement counter leg flag
+        hh_movements = [{
+            "account_id": self.counter_account_id,
+            "direction": "credit",
+            "amount": Decimal("5000.00"),
+            "currency": "CNY",
+            "occurred_on": date(2026, 8, 10),
+            "is_counter_statement_leg": False
+        }]
+        cand = process_transfer_line(line, self.account_id, [], hh_movements)
+        self.assertEqual(cand.status, "needs_review")
+        self.assertEqual(cand.reason_code, COUNTER_ACCOUNT_UNRESOLVED)
+
+    def test_34_weak_refund_similarity_triggers_needs_review(self):
+        line = NormalizedStatementLine(
+            transaction_on=date(2026, 8, 10),
+            description_raw="Apple Store Online",
+            direction="credit",
+            line_type="refund",
+            settlement_amount=Decimal("300.00"),
+            settlement_currency="CNY"
+        )
+        orig_exp_id = uuid4()
+        candidate_expenses = [{
+            "id": orig_exp_id,
+            "occurred_on": date(2026, 7, 15),
+            "from_account_id": self.account_id,
+            "from_amount": Decimal("1000.00"),
+            "from_currency": "CNY",
+            "merchant": "Apple Store",
+            "transaction_type": "expense",
+            "status": "committed"
+        }]
+        cand = process_refund_line(line, self.account_id, candidate_expenses, {})
+        # Similarity is between 0.40 and 0.80 -> needs_review
+        self.assertEqual(cand.status, "needs_review")
+        self.assertEqual(cand.reason_code, "MERCHANT_WEAK_MATCH")
+
+
+    def test_35_installment_wrong_month_not_recognized(self):
+        # Period 2 expected in Sep 2026, statement line is in Nov 2026
+        line_nov = NormalizedStatementLine(
+            transaction_on=date(2026, 11, 10),
+            description_raw="MacBook Air",
+            direction="debit",
+            line_type="expense",
+            settlement_amount=Decimal("3333.33"),
+            settlement_currency="CNY"
+        )
+        plan_id = uuid4()
+        plans = [{
+            "id": plan_id,
+            "credit_account_id": self.account_id,
+            "total_periods": 3,
+            "merchant": "MacBook Air",
+            "first_statement_month": date(2026, 8, 1),
+            "status": "active"
+        }]
+        periods = {
+            plan_id: [
+                {"id": uuid4(), "period_no": 1, "scheduled_amount": Decimal("3333.33"), "currency": "CNY", "status": "billed"},
+                {"id": uuid4(), "period_no": 2, "scheduled_amount": Decimal("3333.33"), "currency": "CNY", "status": "scheduled"},
+                {"id": uuid4(), "period_no": 3, "scheduled_amount": Decimal("3333.34"), "currency": "CNY", "status": "scheduled"}
+            ]
+        }
+        cand = process_installment_line(line_nov, self.account_id, plans, periods, default_expense_category_id=uuid4())
+        self.assertIsNone(cand)
+
+    def test_36_installment_missing_category_needs_review(self):
+        line = NormalizedStatementLine(
+            transaction_on=date(2026, 8, 10),
+            description_raw="Apple Store",
+            direction="debit",
+            line_type="expense",
+            settlement_amount=Decimal("1000.00"),
+            settlement_currency="CNY"
+        )
+        plan_id = uuid4()
+        plans = [{
+            "id": plan_id,
+            "credit_account_id": self.account_id,
+            "total_periods": 12,
+            "merchant": "Apple Store",
+            "status": "pending_first_bill"
+        }]
+        periods = {plan_id: [{"id": uuid4(), "period_no": 1, "scheduled_amount": Decimal("1000.00"), "currency": "CNY", "status": "scheduled"}]}
+        cand = process_installment_line(line, self.account_id, plans, periods, default_expense_category_id=None)
+        self.assertIsNotNone(cand)
+        self.assertEqual(cand.status, "needs_review")
+        self.assertEqual(cand.reason_code, "CATEGORY_REQUIRED")
+
+    def test_37_unknown_debit_and_no_date_lines_trigger_needs_review(self):
+        line_unknown_type = NormalizedStatementLine(
+            transaction_on=date(2026, 8, 10),
+            description_raw="Unspecified Movement",
+            direction="debit",
+            line_type="unknown",
+            settlement_amount=Decimal("100.00"),
+            settlement_currency="CNY"
+        )
+        line_no_date = NormalizedStatementLine(
+            transaction_on=None,
+            posted_on=None,
+            description_raw="Coffee Shop",
+            direction="debit",
+            line_type="expense",
+            settlement_amount=Decimal("35.00"),
+            settlement_currency="CNY"
+        )
+        res = run_deterministic_reconciliation(
+            lines=[line_unknown_type, line_no_date],
+            transactions=[],
+            selected_account_id=self.account_id,
+            account_currency="CNY",
+            baseline_projected_balance=Decimal("1000.00"),
+            authoritative_balance=Decimal("865.00"),
+            default_expense_category_id=uuid4()
+        )
+        self.assertEqual(res.batch_status, "needs_review")
+        self.assertTrue(all(c.status == "needs_review" for c in res.candidates))
+
+    def test_38_input_line_order_permutation_invariance(self):
+        cat_id = uuid4()
+        line_a = NormalizedStatementLine(
+            transaction_on=date(2026, 8, 1),
+            description_raw="Alpha Store",
+            direction="debit",
+            line_type="expense",
+            settlement_amount=Decimal("10.00"),
+            settlement_currency="CNY"
+        )
+        line_b = NormalizedStatementLine(
+            transaction_on=date(2026, 8, 5),
+            description_raw="Beta Store",
+            direction="debit",
+            line_type="expense",
+            settlement_amount=Decimal("20.00"),
+            settlement_currency="CNY"
+        )
+        line_c = NormalizedStatementLine(
+            transaction_on=date(2026, 8, 10),
+            description_raw="Gamma Store",
+            direction="debit",
+            line_type="expense",
+            settlement_amount=Decimal("30.00"),
+            settlement_currency="CNY"
+        )
+        res_order1 = run_deterministic_reconciliation(
+            lines=[line_a, line_b, line_c],
+            transactions=[],
+            selected_account_id=self.account_id,
+            account_currency="CNY",
+            baseline_projected_balance=Decimal("1000.00"),
+            authoritative_balance=Decimal("940.00"),
+            default_expense_category_id=cat_id
+        )
+        res_order2 = run_deterministic_reconciliation(
+            lines=[line_c, line_a, line_b],
+            transactions=[],
+            selected_account_id=self.account_id,
+            account_currency="CNY",
+            baseline_projected_balance=Decimal("1000.00"),
+            authoritative_balance=Decimal("940.00"),
+            default_expense_category_id=cat_id
+        )
+        self.assertEqual(res_order1.batch_status, res_order2.batch_status)
+        self.assertEqual(res_order1.residual_amount, res_order2.residual_amount)
+        self.assertEqual(res_order1.matched_count, res_order2.matched_count)
+        self.assertEqual(res_order1.created_count, res_order2.created_count)
+
 
 
 if __name__ == "__main__":

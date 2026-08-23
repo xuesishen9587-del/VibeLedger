@@ -1,4 +1,4 @@
-﻿from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional, Tuple
 from decimal import Decimal
 from uuid import UUID
 from datetime import date
@@ -25,15 +25,35 @@ def process_refund_line(
     """
     Evaluates refund matching for a refund statement line:
     - Lookback <= 180 days
+    - Direction must be credit
     - Prior expenses in same household/account
-    - Merchant similarity
+    - Strong merchant similarity (>= 0.80) required for auto-accept
     - Refund amount <= remaining refundable amount
     - Detects multiple originals or missing original
     """
     line_date = line.effective_date
-    line_amount = line.settlement_amount
     line_curr = line.settlement_currency
+    line_amount = quantize_money(line.settlement_amount, line_curr)
     line_desc = line.merchant_hint or line.description_normalized or line.description_raw
+
+    # Direction check: refund must be a credit
+    if line.direction != "credit":
+        return CandidateProposal(
+            candidate_type="refund",
+            status="needs_review",
+            statement_line_id=line.id,
+            payload={
+                "line": {
+                    "direction": line.direction,
+                    "amount": str(line_amount),
+                    "currency": line_curr,
+                    "occurred_on": line_date.isoformat() if line_date else None,
+                    "description": line.description_raw
+                }
+            },
+            reason_code="TYPE_AMBIGUOUS",
+            reason_detail="Refund statement line has non-credit direction; manual review required"
+        )
 
     plausible_expenses = []
 
@@ -45,7 +65,7 @@ def process_refund_line(
         if isinstance(exp_date, str):
             exp_date = date.fromisoformat(exp_date)
 
-        # Must occur on or before the refund date
+        # Must occur on or before the refund date within 180 days
         if line_date and exp_date:
             days_diff = (line_date - exp_date).days
             if days_diff < 0 or days_diff > REFUND_LOOKBACK_DAYS:
@@ -55,16 +75,15 @@ def process_refund_line(
         if exp_curr != line_curr:
             continue
 
-        exp_orig_amount = parse_decimal(exp.get("from_amount") or exp.get("original_amount"))
+        exp_orig_amount = quantize_money(parse_decimal(exp.get("from_amount") or exp.get("original_amount")), exp_curr)
         exp_id = exp["id"]
-        already_refunded = existing_refund_totals.get(exp_id, Decimal("0.00"))
+        already_refunded = quantize_money(existing_refund_totals.get(exp_id, Decimal("0.00")), exp_curr)
         remaining_refundable = exp_orig_amount - already_refunded
 
-        # Check if refund exceeds original
+        # Check if refund exceeds remaining refundable
         if line_amount > remaining_refundable:
-            # If this is the exact merchant but exceeds remaining, we note it
             sim = trigram_similarity(line_desc, exp.get("merchant") or exp.get("remarks"))
-            if sim >= Decimal("0.40") or line_desc in (exp.get("merchant") or ""):
+            if sim >= Decimal("0.40") or (exp.get("merchant") and line_desc in exp["merchant"].lower()):
                 return CandidateProposal(
                     candidate_type="refund",
                     status="needs_review",
@@ -109,7 +128,7 @@ def process_refund_line(
     # Sort plausible expenses: exact amount match first, similarity DESC, date_diff ASC
     plausible_expenses.sort(
         key=lambda item: (
-            -(1 if item[0].get("from_amount") == line_amount else 0),
+            -(1 if quantize_money(parse_decimal(item[0].get("from_amount") or item[0].get("original_amount")), line_curr) == line_amount else 0),
             -item[1],
             (line_date - item[0]["occurred_on"]).days if line_date and item[0].get("occurred_on") else 999
         )
@@ -119,8 +138,7 @@ def process_refund_line(
     if len(plausible_expenses) > 1:
         top_exp, top_sim, _ = plausible_expenses[0]
         second_exp, second_sim, _ = plausible_expenses[1]
-        # If similarity or amount is not distinctly unique
-        if top_sim == second_sim or (top_sim - second_sim < Decimal("0.15") and top_exp.get("from_amount") == second_exp.get("from_amount")):
+        if top_sim == second_sim or (top_sim - second_sim < Decimal("0.15") and quantize_money(parse_decimal(top_exp.get("from_amount") or top_exp.get("original_amount")), line_curr) == quantize_money(parse_decimal(second_exp.get("from_amount") or second_exp.get("original_amount")), line_curr)):
             return CandidateProposal(
                 candidate_type="refund",
                 status="needs_review",
@@ -132,11 +150,20 @@ def process_refund_line(
                 reason_detail="Multiple plausible original expenses found for this refund"
             )
 
-    # Case 3: Unique matching original expense -> Auto Accepted!
+    # Case 3: Unique matching original expense -> Check strong similarity threshold (>= 0.80)
     best_exp, best_sim, rem_ref = plausible_expenses[0]
+    if best_sim >= MERCHANT_STRONG_SIMILARITY:
+        status = "accepted"
+        reason_code = None
+        reason_detail = None
+    else:
+        status = "needs_review"
+        reason_code = "MERCHANT_WEAK_MATCH"
+        reason_detail = f"Merchant similarity ({best_sim}) is below strong threshold (0.80); manual confirmation required"
+
     return CandidateProposal(
         candidate_type="refund",
-        status="accepted",
+        status=status,
         statement_line_id=line.id,
         target_transaction_id=best_exp["id"],
         payload={
@@ -150,5 +177,8 @@ def process_refund_line(
                 "relation_type": "refund_of"
             }
         },
-        confidence=best_sim
+        confidence=best_sim,
+        reason_code=reason_code,
+        reason_detail=reason_detail
     )
+

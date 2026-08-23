@@ -58,17 +58,12 @@ def simulate_candidate_effects(
             amt = parse_decimal(inst_data.get("scheduled_amount", "0"))
             total_delta -= amt
         elif cand.candidate_type == "match":
-            # If foreign estimated settlement was patched, add projection delta
-            if "settlement_patch" in cand.payload:
-                patch = cand.payload["settlement_patch"]
-                new_amt = parse_decimal(patch["settlement_amount"])
-                matched_tx = cand.payload.get("matched_transaction") or cand.payload.get("evidence", {}).get("matched_transaction", {})
-                orig_amt = parse_decimal(matched_tx.get("amount", "0"))
-                # If debit: delta is -(new - orig) = orig - new
-                total_delta += (orig_amt - new_amt)
-
+            # Existing matched transaction is already in ledger.
+            # Authoritative settlement financial enrichment is owned and finalized in Phase 8.
+            pass
 
     return quantize_money(total_delta, account_currency)
+
 
 
 def evaluate_residual_and_batch_readiness(

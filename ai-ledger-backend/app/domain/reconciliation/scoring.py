@@ -151,10 +151,11 @@ def compute_match_score(
     # Check original amount agreement / contradiction
     orig_amount_match = False
     if line.original_amount is not None and tx.get("original_amount") is not None:
-        tx_orig_amount = parse_decimal(tx["original_amount"])
         tx_orig_curr = tx.get("original_currency")
-        if line.original_currency == tx_orig_curr:
-            if line.original_amount == tx_orig_amount:
+        if line.original_currency == tx_orig_curr and tx_orig_curr is not None:
+            tx_orig_amt_q = quantize_money(parse_decimal(tx["original_amount"]), tx_orig_curr)
+            line_orig_amt_q = quantize_money(line.original_amount, line.original_currency)
+            if line_orig_amt_q == tx_orig_amt_q:
                 orig_amount_match = True
             else:
                 score.is_blocked = True
@@ -164,10 +165,13 @@ def compute_match_score(
     # Check settlement amount
     settlement_matched = False
     if tx_selected_amount is not None and tx_selected_currency == line.settlement_currency:
+        tx_selected_amount_q = quantize_money(tx_selected_amount, tx_selected_currency)
+        line_settlement_amount_q = quantize_money(line.settlement_amount, line.settlement_currency)
+
         if tx_account_leg_status == "estimated":
             # Estimated settlement: compute deviation percentage
-            diff = abs(line.settlement_amount - tx_selected_amount)
-            deviation = diff / tx_selected_amount if tx_selected_amount > 0 else Decimal("1.0")
+            diff = abs(line_settlement_amount_q - tx_selected_amount_q)
+            deviation = diff / tx_selected_amount_q if tx_selected_amount_q > 0 else Decimal("1.0")
             if deviation <= Decimal("0.05"):
                 score.amount_score = 35
                 settlement_matched = True
@@ -184,14 +188,17 @@ def compute_match_score(
                 return score
         else:
             # Authoritative settlement
-            if line.settlement_amount == tx_selected_amount:
+            if line_settlement_amount_q == tx_selected_amount_q:
                 score.amount_score = 40
                 settlement_matched = True
             else:
                 # Authoritative amount conflict
                 score.amount_score = 0
                 score.is_blocked = True
-                score.block_reason = AMOUNT_CONFLICT
+                if tx.get("verification_status") == "statement_confirmed":
+                    score.block_reason = AUTHORITATIVE_DATA_CONFLICT
+                else:
+                    score.block_reason = AMOUNT_CONFLICT
                 return score
     elif orig_amount_match and not settlement_matched:
         score.amount_score = 35
@@ -212,17 +219,16 @@ def compute_match_score(
         score.merchant_score = 0
 
     # --- 4. Type Compatibility Score ---
+    # Frozen rule:
+    # expense <-> expense = 10, fee <-> fee = 10, refund <-> refund = 10, transfer <-> transfer = 10
+    # Mismatches (e.g. expense <-> fee) get 0
     line_type = line.line_type
     tx_type = tx.get("transaction_type")
     if line_type != "unknown" and tx_type is not None:
         if line_type == tx_type:
             score.type_score = 10
-        elif line_type in ("expense", "fee") and tx_type in ("expense", "fee"):
-            score.type_score = 10
-        elif line_type == "transfer" and tx_type == "transfer":
-            score.type_score = 10
-        elif line_type == "refund" and tx_type == "refund":
-            score.type_score = 10
+        else:
+            score.type_score = 0
 
     # --- 5. Extra Evidence Score ---
     # If both settlement and original currency independently match
@@ -234,5 +240,6 @@ def compute_match_score(
         100,
         score.amount_score + score.date_score + score.merchant_score + score.type_score + score.extra_score
     )
+
 
     return score

@@ -212,3 +212,38 @@ def list_installment_plans(conn, household_id: UUID) -> List[Dict[str, Any]]:
             "updated_at": r[14]
         } for r in rows]
 
+def update_installment_period_billed(
+    conn,
+    period_id: UUID,
+    expense_transaction_id: UUID,
+    statement_line_id: Optional[UUID] = None
+) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE installment_periods
+            SET status = 'billed',
+                expense_transaction_id = %s,
+                statement_line_id = %s,
+                updated_at = now()
+            WHERE id = %s;
+            """,
+            (expense_transaction_id, statement_line_id, period_id)
+        )
+
+def update_installment_plan_status(
+    conn,
+    plan_id: UUID,
+    status: str
+) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE installment_plans
+            SET status = %s,
+                updated_at = now()
+            WHERE id = %s;
+            """,
+            (status, plan_id)
+        )
+

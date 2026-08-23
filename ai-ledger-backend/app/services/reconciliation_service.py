@@ -216,8 +216,22 @@ def create_statement_reconciliation_batch(
         line_id_map[line.id] = db_line
 
     # 9. Persist reconciliation candidates
+    line_by_id = {l.id: l for l in lines}
     persisted_candidates = []
     for cand in result.candidates:
+        if cand.statement_line_id and cand.statement_line_id in line_by_id:
+            src_line = line_by_id[cand.statement_line_id]
+            if "evidence" not in cand.payload:
+                cand.payload["evidence"] = {}
+            if "line" not in cand.payload["evidence"]:
+                cand.payload["evidence"]["line"] = {}
+            cand.payload["evidence"]["line"].update({
+                "original_amount": str(src_line.original_amount) if src_line.original_amount is not None else None,
+                "original_currency": src_line.original_currency,
+                "merchant_hint": src_line.merchant_hint,
+                "external_reference": src_line.external_reference
+            })
+
         db_cand = reconciliation_repo.create_reconciliation_candidate(
             conn=conn,
             candidate_id=cand.id,
@@ -232,6 +246,7 @@ def create_statement_reconciliation_batch(
             reason_detail=cand.reason_detail
         )
         persisted_candidates.append(db_cand)
+
         
         # Update statement line match_status if applicable
         if cand.statement_line_id:
@@ -350,31 +365,44 @@ def commit_statement_batch(
 
     account_states = accounts_repo.lock_account_states(conn, list(affected_account_ids))
 
-    # 3. Reconstruct NormalizedStatementLines and re-run full deterministic engine against fresh ledger
+    # 3. Reconstruct NormalizedStatementLines using candidate evidence where available
+    line_evidence_map: Dict[UUID, Dict[str, Any]] = {}
+    for c in candidates:
+        sl_id = c.get("statement_line_id")
+        if sl_id:
+            ev_line = c.get("payload", {}).get("evidence", {}).get("line", {})
+            if ev_line:
+                line_evidence_map[sl_id] = ev_line
+
     norm_lines: List[NormalizedStatementLine] = []
     for sl in statement_lines:
         line_no = sl.get("source_row_no") or 0
         amt = sl.get("amount") or Decimal("0.00")
-        curr = sl.get("currency") or batch["currency"]
+        line_curr = sl.get("currency") or batch["currency"]
+        ev = line_evidence_map.get(sl["id"], {})
+        orig_amt_val = ev.get("original_amount") or sl.get("original_amount")
+        orig_curr_val = ev.get("original_currency") or sl.get("original_currency")
+        merchant_hint_val = ev.get("merchant_hint") or sl.get("merchant_hint")
+        ext_ref_val = ev.get("external_reference") or sl.get("external_reference")
+
         norm_lines.append(NormalizedStatementLine(
             id=sl["id"],
             description_raw=sl["description_raw"],
             direction=sl["direction"],
             line_type=sl.get("line_type", "unknown"),
             settlement_amount=parse_decimal(amt),
-            settlement_currency=curr,
+            settlement_currency=line_curr,
             transaction_on=sl.get("transaction_on"),
             posted_on=sl.get("posted_on"),
             description_normalized=sl.get("description_normalized") or sl["description_raw"],
-            original_amount=parse_decimal(sl["original_amount"]) if sl.get("original_amount") else None,
-            original_currency=sl.get("original_currency"),
-            merchant_hint=sl.get("merchant_hint"),
+            original_amount=parse_decimal(orig_amt_val) if orig_amt_val is not None else None,
+            original_currency=orig_curr_val,
+            merchant_hint=merchant_hint_val,
+            external_reference=ext_ref_val,
             source_page_no=sl.get("source_page_no"),
             source_row_no=line_no,
             line_fingerprint=sl.get("line_fingerprint")
         ))
-
-
 
     if norm_lines:
         valid_dates = [l.effective_date for l in norm_lines if l.effective_date is not None]
@@ -427,6 +455,8 @@ def commit_statement_batch(
     for exp in refund_txs:
         active_refunds = tx_repo.get_active_refunds_for_expense(conn, exp["id"])
         tot = sum((parse_decimal(r.get("from_amount") or r.get("to_amount") or r.get("original_amount")) for r in active_refunds), Decimal("0.00"))
+        existing_refund_totals[exp["id"]] = tot
+
     hh_accounts = accounts_repo.list_accounts(conn, household_id)
     hh_movements: List[Dict[str, Any]] = []
     for c in candidates:
@@ -443,8 +473,7 @@ def commit_statement_batch(
                     "is_counter_statement_leg": True
                 })
 
-
-    # Extract default categories from accepted candidates in preview
+    # Extract default categories from accepted candidates in preview and revalidate against DB
     batch_exp_cat_id: Optional[UUID] = None
     batch_inc_cat_id: Optional[UUID] = None
     for c in candidates:
@@ -461,10 +490,23 @@ def commit_statement_batch(
             if cat_str:
                 batch_exp_cat_id = UUID(cat_str)
 
+    # Revalidate categories against current DB
+    valid_batch_exp_cat_id: Optional[UUID] = None
+    if batch_exp_cat_id:
+        exp_cat = accounts_repo.get_category(conn, batch_exp_cat_id)
+        if exp_cat and exp_cat["household_id"] == household_id and exp_cat["category_type"] == "expense" and exp_cat["status"] == "active":
+            valid_batch_exp_cat_id = batch_exp_cat_id
 
+    valid_batch_inc_cat_id: Optional[UUID] = None
+    if batch_inc_cat_id:
+        inc_cat = accounts_repo.get_category(conn, batch_inc_cat_id)
+        if inc_cat and inc_cat["household_id"] == household_id and inc_cat["category_type"] == "income" and inc_cat["status"] == "active":
+            valid_batch_inc_cat_id = batch_inc_cat_id
+
+    # Use injected fx_service or fallback to ReferenceFxService
+    fx_srv = fx_service or ReferenceFxService()
     fx_rate_cny = Decimal("1.00")
     if curr != "CNY":
-        fx_srv = ReferenceFxService()
         fx_rate_cny = fx_srv.get_rate(curr, "CNY", as_of=as_of_date)
 
     auth_balance = quantize_money(batch.get("authoritative_balance", Decimal("0.00")), curr)
@@ -484,44 +526,119 @@ def commit_statement_batch(
         existing_refund_totals=existing_refund_totals,
         household_accounts=hh_accounts,
         household_movements=hh_movements,
-        default_expense_category_id=batch_exp_cat_id,
-        default_income_category_id=batch_inc_cat_id,
+        default_expense_category_id=valid_batch_exp_cat_id,
+        default_income_category_id=valid_batch_inc_cat_id,
         fx_rate_to_cny=fx_rate_cny
     )
 
+    old_cand_by_line = {c["statement_line_id"]: c for c in candidates if c.get("statement_line_id")}
+    old_adj_cand = next((c for c in candidates if c["candidate_type"] == "adjustment"), None)
 
+    # If fresh re-evaluation produces needs_review: persist workflow state and return needs_review result
     if fresh_result.batch_status == "needs_review":
-        reconciliation_repo.update_reconciliation_batch(conn, batch_id, status="needs_review", residual_amount=fresh_result.residual_amount)
-        raise ValueError(f"Fresh ledger state requires review: {fresh_result.candidates[0].reason_code if fresh_result.candidates else 'NEEDS_REVIEW'}")
+        for fc in fresh_result.candidates:
+            if fc.statement_line_id:
+                old_c = old_cand_by_line.get(fc.statement_line_id)
+                if old_c:
+                    reconciliation_repo.update_reconciliation_candidate_full(
+                        conn=conn,
+                        candidate_id=old_c["id"],
+                        candidate_type=fc.candidate_type,
+                        status=fc.status,
+                        payload=fc.payload,
+                        target_transaction_id=fc.target_transaction_id,
+                        confidence=fc.confidence,
+                        reason_code=fc.reason_code,
+                        reason_detail=fc.reason_detail
+                    )
+                else:
+                    reconciliation_repo.create_reconciliation_candidate(
+                        conn=conn,
+                        candidate_id=fc.id,
+                        batch_id=batch_id,
+                        statement_line_id=fc.statement_line_id,
+                        candidate_type=fc.candidate_type,
+                        status=fc.status,
+                        target_transaction_id=fc.target_transaction_id,
+                        payload=fc.payload,
+                        confidence=fc.confidence,
+                        reason_code=fc.reason_code,
+                        reason_detail=fc.reason_detail
+                    )
+                m_status = "ambiguous" if fc.status == "needs_review" else ("matched" if fc.candidate_type == "match" and fc.status == "accepted" else "new_candidate")
+                reconciliation_repo.update_statement_line_status(
+                    conn=conn,
+                    line_id=fc.statement_line_id,
+                    match_status=m_status,
+                    matched_transaction_id=fc.target_transaction_id if fc.status == "accepted" else None
+                )
+            elif fc.candidate_type == "adjustment":
+                if old_adj_cand:
+                    reconciliation_repo.update_reconciliation_candidate_full(
+                        conn=conn,
+                        candidate_id=old_adj_cand["id"],
+                        candidate_type="adjustment",
+                        status=fc.status,
+                        payload=fc.payload,
+                        confidence=fc.confidence,
+                        reason_code=fc.reason_code,
+                        reason_detail=fc.reason_detail
+                    )
+                else:
+                    reconciliation_repo.create_reconciliation_candidate(
+                        conn=conn,
+                        candidate_id=fc.id,
+                        batch_id=batch_id,
+                        statement_line_id=None,
+                        candidate_type="adjustment",
+                        status=fc.status,
+                        payload=fc.payload,
+                        confidence=fc.confidence,
+                        reason_code=fc.reason_code,
+                        reason_detail=fc.reason_detail
+                    )
 
-    # Map candidate proposals by line_id
-    fresh_line_cands: Dict[UUID, CandidateProposal] = {}
-    fresh_adj_cand: Optional[CandidateProposal] = None
-    for fc in fresh_result.candidates:
-        if fc.statement_line_id:
-            fresh_line_cands[fc.statement_line_id] = fc
-        elif fc.candidate_type == "adjustment":
-            fresh_adj_cand = fc
+        reconciliation_repo.update_reconciliation_batch_stats(
+            conn=conn,
+            batch_id=batch_id,
+            status="needs_review",
+            matched_count=fresh_result.matched_count,
+            created_count=fresh_result.created_count,
+            pending_count=fresh_result.pending_count,
+            residual_amount=fresh_result.residual_amount,
+            adjustment_amount=fresh_result.adjustment_amount,
+            engine_version=fresh_result.engine_version
+        )
 
+        return {
+            "status": "needs_review",
+            "batch_id": str(batch_id),
+            "residual_amount": str(fresh_result.residual_amount),
+            "adjustment_amount": str(fresh_result.adjustment_amount) if fresh_result.adjustment_amount else None,
+            "matched_count": fresh_result.matched_count,
+            "created_count": fresh_result.created_count,
+            "pending_count": fresh_result.pending_count,
+            "applied_transaction_ids": [],
+            "message": f"Fresh ledger state requires review: {fresh_result.candidates[0].reason_code if fresh_result.candidates else 'NEEDS_REVIEW'}"
+        }
+
+    # 4. Commit is driven strictly by fresh_result.candidates
     applied_tx_ids: List[UUID] = []
     account_deltas: Dict[UUID, Decimal] = {acc_id: Decimal("0.00") for acc_id in affected_account_ids}
     committed_adjustment_amount: Optional[Decimal] = None
 
-    # 4. Apply all fresh accepted candidates
-
-    for c in candidates:
-        cand_status = c["status"]
-        if cand_status not in ("accepted", "applied"):
+    for fresh_cand in fresh_result.candidates:
+        if fresh_cand.status != "accepted":
             continue
 
-        c_type = c["candidate_type"]
-        stmt_line_id = c.get("statement_line_id")
+        c_type = fresh_cand.candidate_type
+        stmt_line_id = fresh_cand.statement_line_id
         stmt_line = line_map.get(stmt_line_id) if stmt_line_id else None
-        fresh_cand = fresh_line_cands.get(stmt_line_id) if stmt_line_id else None
+        old_cand = old_cand_by_line.get(stmt_line_id) if stmt_line_id else None
 
         # Case A: Existing Match
         if c_type == "match":
-            target_tx_id = (fresh_cand.target_transaction_id if fresh_cand else None) or c.get("target_transaction_id")
+            target_tx_id = fresh_cand.target_transaction_id
             if target_tx_id:
                 posted_on = stmt_line.get("posted_on") if stmt_line else None
                 # Phase 8 foreign-card boundary: mark statement-confirmed without mutating from_amount or account_leg_status
@@ -532,94 +649,136 @@ def commit_statement_batch(
                     statement_batch_id=batch_id
                 )
                 applied_tx_ids.append(target_tx_id)
-                reconciliation_repo.update_candidate_applied(conn, c["id"], status="applied", applied_transaction_id=target_tx_id)
+                if old_cand:
+                    reconciliation_repo.update_reconciliation_candidate_full(
+                        conn=conn,
+                        candidate_id=old_cand["id"],
+                        candidate_type="match",
+                        status="applied",
+                        payload=fresh_cand.payload,
+                        target_transaction_id=target_tx_id,
+                        applied_transaction_id=target_tx_id,
+                        confidence=fresh_cand.confidence
+                    )
+                else:
+                    reconciliation_repo.create_reconciliation_candidate(
+                        conn=conn,
+                        candidate_id=fresh_cand.id,
+                        batch_id=batch_id,
+                        statement_line_id=stmt_line_id,
+                        candidate_type="match",
+                        status="applied",
+                        target_transaction_id=target_tx_id,
+                        applied_transaction_id=target_tx_id,
+                        payload=fresh_cand.payload,
+                        confidence=fresh_cand.confidence
+                    )
                 if stmt_line_id:
-                    reconciliation_repo.update_statement_line_status(conn, stmt_line_id, match_status="matched", matched_transaction_id=target_tx_id)
+                    reconciliation_repo.update_statement_line_status(
+                        conn=conn,
+                        line_id=stmt_line_id,
+                        match_status="matched",
+                        matched_transaction_id=target_tx_id
+                    )
 
         # Case B: Create Transaction (Expense, Income, Fee)
         elif c_type == "create_transaction":
-            # Check if fresh engine matched an existing transaction (e.g. concurrent shortcut inserted it)
-            if fresh_cand and fresh_cand.candidate_type == "match" and fresh_cand.target_transaction_id:
-                matched_id = fresh_cand.target_transaction_id
-                tx_repo.update_transaction_statement_confirmed(
+            tx_data = fresh_cand.payload.get("transaction", {})
+            amt = parse_decimal(tx_data.get("amount", "0"))
+            c_curr = tx_data.get("currency", curr)
+            ttype = tx_data.get("transaction_type", "expense")
+            occ_on = date.fromisoformat(tx_data["occurred_on"]) if tx_data.get("occurred_on") else (stmt_line.get("transaction_on") if stmt_line else date.today())
+            merchant = tx_data.get("merchant") or (stmt_line.get("description_raw") if stmt_line else "Merchant")
+            cat_id = UUID(tx_data["category_id"]) if tx_data.get("category_id") else None
+
+            new_tx_id = uuid4()
+            from_acc = primary_account_id if ttype in ("expense", "fee") else None
+            to_acc = primary_account_id if ttype in ("income", "cash_income") else None
+            from_amt = amt if from_acc else None
+            from_cur = c_curr if from_acc else None
+            to_amt = amt if to_acc else None
+            to_cur = c_curr if to_acc else None
+
+            tx_repo.create_transaction(
+                conn=conn,
+                tx_id=new_tx_id,
+                household_id=household_id,
+                transaction_type=ttype,
+                occurred_on=occ_on,
+                original_amount=amt,
+                original_currency=c_curr,
+                from_amount=from_amt,
+                from_currency=from_cur,
+                to_amount=to_amt,
+                to_currency=to_cur,
+                from_account_id=from_acc,
+                to_account_id=to_acc,
+                category_id=cat_id,
+                merchant=merchant,
+                source="statement",
+                status="committed",
+                verification_status="statement_confirmed",
+                statement_batch_id=batch_id
+            )
+            applied_tx_ids.append(new_tx_id)
+
+            if old_cand:
+                reconciliation_repo.update_reconciliation_candidate_full(
                     conn=conn,
-                    transaction_id=matched_id,
-                    posted_on=stmt_line.get("posted_on") if stmt_line else None,
-                    statement_batch_id=batch_id
+                    candidate_id=old_cand["id"],
+                    candidate_type="create_transaction",
+                    status="applied",
+                    payload=fresh_cand.payload,
+                    applied_transaction_id=new_tx_id,
+                    confidence=fresh_cand.confidence
                 )
-                applied_tx_ids.append(matched_id)
-                reconciliation_repo.update_candidate_applied(conn, c["id"], status="applied", applied_transaction_id=matched_id)
-                if stmt_line_id:
-                    reconciliation_repo.update_statement_line_status(conn, stmt_line_id, match_status="matched", matched_transaction_id=matched_id)
             else:
-                # Create new transaction
-                tx_data = c["payload"].get("transaction", {})
-                amt = parse_decimal(tx_data.get("amount", "0"))
-                c_curr = tx_data.get("currency", curr)
-                ttype = tx_data.get("transaction_type", "expense")
-                occ_on = date.fromisoformat(tx_data["occurred_on"]) if tx_data.get("occurred_on") else (stmt_line.get("transaction_on") if stmt_line else date.today())
-                merchant = tx_data.get("merchant") or (stmt_line.get("description_raw") if stmt_line else "Merchant")
-                cat_id = UUID(tx_data["category_id"]) if tx_data.get("category_id") else None
-
-                new_tx_id = uuid4()
-                from_acc = primary_account_id if ttype in ("expense", "fee") else None
-                to_acc = primary_account_id if ttype in ("income", "cash_income") else None
-                from_amt = amt if from_acc else None
-                from_cur = c_curr if from_acc else None
-                to_amt = amt if to_acc else None
-                to_cur = c_curr if to_acc else None
-
-                tx_repo.create_transaction(
+                reconciliation_repo.create_reconciliation_candidate(
                     conn=conn,
-                    tx_id=new_tx_id,
-                    household_id=household_id,
-                    transaction_type=ttype,
-                    occurred_on=occ_on,
-                    original_amount=amt,
-                    original_currency=c_curr,
-                    from_amount=from_amt,
-                    from_currency=from_cur,
-                    to_amount=to_amt,
-                    to_currency=to_cur,
-                    from_account_id=from_acc,
-                    to_account_id=to_acc,
-                    category_id=cat_id,
-                    merchant=merchant,
-                    source="statement",
-                    status="committed",
-                    verification_status="statement_confirmed"
+                    candidate_id=fresh_cand.id,
+                    batch_id=batch_id,
+                    statement_line_id=stmt_line_id,
+                    candidate_type="create_transaction",
+                    status="applied",
+                    applied_transaction_id=new_tx_id,
+                    payload=fresh_cand.payload,
+                    confidence=fresh_cand.confidence
                 )
-                applied_tx_ids.append(new_tx_id)
-                reconciliation_repo.update_candidate_applied(conn, c["id"], status="applied", applied_transaction_id=new_tx_id)
-                if stmt_line_id:
-                    reconciliation_repo.update_statement_line_status(conn, stmt_line_id, match_status="matched", matched_transaction_id=new_tx_id)
 
-                if ttype in ("expense", "fee"):
-                    account_deltas[primary_account_id] -= amt
-                else:
-                    account_deltas[primary_account_id] += amt
-
-                audit_repo.insert_audit_event(
+            if stmt_line_id:
+                reconciliation_repo.update_statement_line_status(
                     conn=conn,
-                    household_id=household_id,
-                    actor_type="device" if device_id else "user",
-                    actor_user_id=user_id,
-                    actor_device_id=device_id,
-                    reconciliation_batch_id=batch_id,
-                    entity_type="transaction",
-                    entity_id=new_tx_id,
-                    action="create",
-                    after_data={
-                        "transaction_type": ttype,
-                        "amount": str(amt),
-                        "currency": c_curr,
-                        "merchant": merchant
-                    }
+                    line_id=stmt_line_id,
+                    match_status="matched",
+                    matched_transaction_id=new_tx_id
                 )
+
+            if ttype in ("expense", "fee"):
+                account_deltas[primary_account_id] -= amt
+            else:
+                account_deltas[primary_account_id] += amt
+
+            audit_repo.insert_audit_event(
+                conn=conn,
+                household_id=household_id,
+                actor_type="device" if device_id else "user",
+                actor_user_id=user_id,
+                actor_device_id=device_id,
+                reconciliation_batch_id=batch_id,
+                entity_type="transaction",
+                entity_id=new_tx_id,
+                action="create",
+                after_data={
+                    "transaction_type": ttype,
+                    "amount": str(amt),
+                    "currency": c_curr,
+                    "merchant": merchant
+                }
+            )
 
         # Case C: Create Transfer
         elif c_type == "create_transfer":
-            t_data = c["payload"].get("transfer", {})
+            t_data = fresh_cand.payload.get("transfer", {})
             from_acc_id = UUID(t_data["from_account_id"])
             to_acc_id = UUID(t_data["to_account_id"])
             from_amt = parse_decimal(t_data["from_amount"])
@@ -647,12 +806,41 @@ def commit_statement_batch(
                 effective_fx_rate=fx_rate,
                 source="statement",
                 status="committed",
-                verification_status="statement_confirmed"
+                verification_status="statement_confirmed",
+                statement_batch_id=batch_id
             )
             applied_tx_ids.append(new_tx_id)
-            reconciliation_repo.update_candidate_applied(conn, c["id"], status="applied", applied_transaction_id=new_tx_id)
+
+            if old_cand:
+                reconciliation_repo.update_reconciliation_candidate_full(
+                    conn=conn,
+                    candidate_id=old_cand["id"],
+                    candidate_type="create_transfer",
+                    status="applied",
+                    payload=fresh_cand.payload,
+                    applied_transaction_id=new_tx_id,
+                    confidence=fresh_cand.confidence
+                )
+            else:
+                reconciliation_repo.create_reconciliation_candidate(
+                    conn=conn,
+                    candidate_id=fresh_cand.id,
+                    batch_id=batch_id,
+                    statement_line_id=stmt_line_id,
+                    candidate_type="create_transfer",
+                    status="applied",
+                    applied_transaction_id=new_tx_id,
+                    payload=fresh_cand.payload,
+                    confidence=fresh_cand.confidence
+                )
+
             if stmt_line_id:
-                reconciliation_repo.update_statement_line_status(conn, stmt_line_id, match_status="matched", matched_transaction_id=new_tx_id)
+                reconciliation_repo.update_statement_line_status(
+                    conn=conn,
+                    line_id=stmt_line_id,
+                    match_status="matched",
+                    matched_transaction_id=new_tx_id
+                )
 
             if from_acc_id in account_deltas:
                 account_deltas[from_acc_id] -= from_amt
@@ -680,7 +868,7 @@ def commit_statement_batch(
 
         # Case D: Refund
         elif c_type == "refund":
-            ref_data = c["payload"].get("refund", {})
+            ref_data = fresh_cand.payload.get("refund", {})
             orig_exp_id = UUID(ref_data["original_expense_id"])
             amt = parse_decimal(ref_data["amount"])
             ref_curr = ref_data["currency"]
@@ -712,9 +900,9 @@ def commit_statement_batch(
                 merchant=merchant,
                 source="statement",
                 status="committed",
-                verification_status="statement_confirmed"
+                verification_status="statement_confirmed",
+                statement_batch_id=batch_id
             )
-            # Create transaction_link
             link_id = uuid4()
             tx_repo.create_transaction_link(
                 conn=conn,
@@ -724,9 +912,37 @@ def commit_statement_batch(
                 relation_type="refund_of"
             )
             applied_tx_ids.append(new_tx_id)
-            reconciliation_repo.update_candidate_applied(conn, c["id"], status="applied", applied_transaction_id=new_tx_id)
+
+            if old_cand:
+                reconciliation_repo.update_reconciliation_candidate_full(
+                    conn=conn,
+                    candidate_id=old_cand["id"],
+                    candidate_type="refund",
+                    status="applied",
+                    payload=fresh_cand.payload,
+                    applied_transaction_id=new_tx_id,
+                    confidence=fresh_cand.confidence
+                )
+            else:
+                reconciliation_repo.create_reconciliation_candidate(
+                    conn=conn,
+                    candidate_id=fresh_cand.id,
+                    batch_id=batch_id,
+                    statement_line_id=stmt_line_id,
+                    candidate_type="refund",
+                    status="applied",
+                    applied_transaction_id=new_tx_id,
+                    payload=fresh_cand.payload,
+                    confidence=fresh_cand.confidence
+                )
+
             if stmt_line_id:
-                reconciliation_repo.update_statement_line_status(conn, stmt_line_id, match_status="matched", matched_transaction_id=new_tx_id)
+                reconciliation_repo.update_statement_line_status(
+                    conn=conn,
+                    line_id=stmt_line_id,
+                    match_status="matched",
+                    matched_transaction_id=new_tx_id
+                )
 
             account_deltas[primary_account_id] += amt
 
@@ -750,7 +966,7 @@ def commit_statement_batch(
 
         # Case E: Recognize Installment
         elif c_type == "recognize_installment":
-            inst_data = c["payload"].get("installment", {})
+            inst_data = fresh_cand.payload.get("installment", {})
             plan_id = UUID(inst_data["plan_id"])
             period_id = UUID(inst_data["period_id"])
             amt = parse_decimal(inst_data["scheduled_amount"])
@@ -760,9 +976,8 @@ def commit_statement_batch(
             cat_id = UUID(inst_data["category_id"]) if inst_data.get("category_id") else None
             is_first = inst_data.get("is_first_period", False)
             is_last = inst_data.get("is_last_period", False)
-            # Atomic guard: create transaction and attempt to bill the period atomically
-            new_tx_id = uuid4()
 
+            new_tx_id = uuid4()
             tx_repo.create_transaction(
                 conn=conn,
                 tx_id=new_tx_id,
@@ -778,7 +993,8 @@ def commit_statement_batch(
                 merchant=merchant,
                 source="installment",
                 status="committed",
-                verification_status="statement_confirmed"
+                verification_status="statement_confirmed",
+                statement_batch_id=batch_id
             )
             billed_ok = installments_repo.update_installment_period_billed_atomic(
                 conn=conn,
@@ -788,22 +1004,50 @@ def commit_statement_batch(
             )
 
             if not billed_ok:
-                # Period already billed concurrently: clean up created transaction
                 with conn.cursor() as cur:
                     cur.execute("DELETE FROM transactions WHERE id = %s;", (new_tx_id,))
             else:
-                if is_last:
+                if is_first:
+                    first_stmt_month = date(occ_on.year, occ_on.month, 1)
+                    installments_repo.update_installment_plan_first_statement_month_and_status(conn, plan_id, "active", first_stmt_month)
+                    installments_repo.populate_scheduled_period_recognition_months(conn, plan_id, first_stmt_month)
+                elif is_last:
                     installments_repo.update_installment_plan_status(conn, plan_id, "completed")
-                elif is_first:
-                    installments_repo.update_installment_plan_status(conn, plan_id, "active")
 
                 applied_tx_ids.append(new_tx_id)
-                reconciliation_repo.update_candidate_applied(conn, c["id"], status="applied", applied_transaction_id=new_tx_id)
+
+                if old_cand:
+                    reconciliation_repo.update_reconciliation_candidate_full(
+                        conn=conn,
+                        candidate_id=old_cand["id"],
+                        candidate_type="recognize_installment",
+                        status="applied",
+                        payload=fresh_cand.payload,
+                        applied_transaction_id=new_tx_id,
+                        confidence=fresh_cand.confidence
+                    )
+                else:
+                    reconciliation_repo.create_reconciliation_candidate(
+                        conn=conn,
+                        candidate_id=fresh_cand.id,
+                        batch_id=batch_id,
+                        statement_line_id=stmt_line_id,
+                        candidate_type="recognize_installment",
+                        status="applied",
+                        applied_transaction_id=new_tx_id,
+                        payload=fresh_cand.payload,
+                        confidence=fresh_cand.confidence
+                    )
+
                 if stmt_line_id:
-                    reconciliation_repo.update_statement_line_status(conn, stmt_line_id, match_status="matched", matched_transaction_id=new_tx_id)
+                    reconciliation_repo.update_statement_line_status(
+                        conn=conn,
+                        line_id=stmt_line_id,
+                        match_status="matched",
+                        matched_transaction_id=new_tx_id
+                    )
 
                 account_deltas[primary_account_id] -= amt
-
 
                 audit_repo.insert_audit_event(
                     conn=conn,
@@ -825,8 +1069,8 @@ def commit_statement_batch(
 
         # Case F: Adjustment
         elif c_type == "adjustment":
-            adj_amt = fresh_result.adjustment_amount
-            if adj_amt is not None and adj_amt != Decimal("0.00"):
+            adj_amt = parse_decimal(fresh_cand.payload.get("adjustment_amount", "0"))
+            if adj_amt != Decimal("0.00"):
                 new_tx_id = uuid4()
                 adj_date = batch.get("period_end") or date.today()
                 if adj_amt > 0:
@@ -852,11 +1096,33 @@ def commit_statement_batch(
                     to_account_id=to_acc,
                     source="reconciliation",
                     status="committed",
-                    verification_status="statement_confirmed"
+                    verification_status="statement_confirmed",
+                    statement_batch_id=batch_id
                 )
                 committed_adjustment_amount = adj_amt
                 applied_tx_ids.append(new_tx_id)
-                reconciliation_repo.update_candidate_applied(conn, c["id"], status="applied", applied_transaction_id=new_tx_id)
+
+                if old_adj_cand:
+                    reconciliation_repo.update_reconciliation_candidate_full(
+                        conn=conn,
+                        candidate_id=old_adj_cand["id"],
+                        candidate_type="adjustment",
+                        status="applied",
+                        payload=fresh_cand.payload,
+                        applied_transaction_id=new_tx_id
+                    )
+                else:
+                    reconciliation_repo.create_reconciliation_candidate(
+                        conn=conn,
+                        candidate_id=fresh_cand.id,
+                        batch_id=batch_id,
+                        statement_line_id=None,
+                        candidate_type="adjustment",
+                        status="applied",
+                        applied_transaction_id=new_tx_id,
+                        payload=fresh_cand.payload
+                    )
+
                 account_deltas[primary_account_id] += adj_amt
 
                 audit_repo.insert_audit_event(
@@ -875,6 +1141,25 @@ def commit_statement_batch(
                         "currency": curr
                     }
                 )
+            else:
+                if old_adj_cand:
+                    reconciliation_repo.update_reconciliation_candidate_full(
+                        conn=conn,
+                        candidate_id=old_adj_cand["id"],
+                        candidate_type="adjustment",
+                        status="applied",
+                        payload=fresh_cand.payload
+                    )
+
+    # If old batch had an adjustment candidate but fresh result generated zero adjustment:
+    if old_adj_cand and not any(fc.candidate_type == "adjustment" for fc in fresh_result.candidates):
+        reconciliation_repo.update_reconciliation_candidate_full(
+            conn=conn,
+            candidate_id=old_adj_cand["id"],
+            candidate_type="adjustment",
+            status="applied",
+            payload={"adjustment_amount": "0.00", "currency": curr}
+        )
 
     # 5. Update account_state for all affected accounts
     for acc_id, delta in account_deltas.items():
@@ -904,8 +1189,6 @@ def commit_statement_batch(
         committed_at=now_dt
     )
 
-
-
     audit_repo.insert_audit_event(
         conn=conn,
         household_id=household_id,
@@ -926,8 +1209,11 @@ def commit_statement_batch(
         "status": "committed",
         "batch_id": str(batch_id),
         "residual_amount": str(fresh_result.residual_amount),
+        "adjustment_amount": str(committed_adjustment_amount) if committed_adjustment_amount is not None else None,
         "matched_count": fresh_result.matched_count,
         "created_count": fresh_result.created_count,
+        "pending_count": fresh_result.pending_count,
         "applied_transaction_ids": [str(tid) for tid in applied_tx_ids]
     }
+
 

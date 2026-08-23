@@ -1060,7 +1060,106 @@ class TestReconciliationEngineUnit(unittest.TestCase):
         self.assertEqual(res_order1.matched_count, res_order2.matched_count)
         self.assertEqual(res_order1.created_count, res_order2.created_count)
 
+    def test_39_authoritative_data_conflict_runtime_path(self):
+        """
+        Regression for Item 1:
+        Existing transaction is statement_confirmed with authoritative 100 CNY.
+        New statement line has same date/merchant but 120 CNY.
+        Must produce needs_review with AUTHORITATIVE_DATA_CONFLICT without exception or duplicate.
+        """
+        from app.domain.reconciliation.models import AUTHORITATIVE_DATA_CONFLICT
+        line = NormalizedStatementLine(
+            transaction_on=date(2026, 8, 10),
+            description_raw="Starbucks Coffee",
+            direction="debit",
+            line_type="expense",
+            settlement_amount=Decimal("120.00"),
+            settlement_currency="CNY"
+        )
+        tx_id = uuid4()
+        existing_txs = [{
+            "id": tx_id,
+            "occurred_on": date(2026, 8, 10),
+            "from_account_id": self.account_id,
+            "from_amount": Decimal("100.00"),
+            "from_currency": "CNY",
+            "merchant": "Starbucks Coffee",
+            "transaction_type": "expense",
+            "account_leg_status": "authoritative",
+            "verification_status": "statement_confirmed",
+            "status": "committed"
+        }]
+        res = run_deterministic_reconciliation(
+            lines=[line],
+            transactions=existing_txs,
+            selected_account_id=self.account_id,
+            account_currency="CNY",
+            baseline_projected_balance=Decimal("1000.00"),
+            authoritative_balance=Decimal("880.00"),
+            default_expense_category_id=uuid4()
+        )
+        self.assertEqual(res.batch_status, "needs_review")
+        self.assertEqual(res.created_count, 0)
+        self.assertFalse(any(c.candidate_type == "create_transaction" for c in res.candidates))
+        match_cands = [c for c in res.candidates if c.candidate_type == "match"]
+        self.assertEqual(len(match_cands), 1)
+        cand = match_cands[0]
+        self.assertEqual(cand.status, "needs_review")
+        self.assertEqual(cand.reason_code, AUTHORITATIVE_DATA_CONFLICT)
+        self.assertEqual(cand.target_transaction_id, tx_id)
+
+
+    def test_40_foreign_card_estimated_settlement_residual_simulation(self):
+        """
+        Regression for Item 9:
+        Ledger has estimated expense 68.90 USD (baseline projected balance = 1931.10 USD).
+        Statement has settlement 68.20 USD, authoritative balance = 1931.80 USD.
+        During residual simulation, signed delta (+0.70) is simulated.
+        Resulting residual = 0.00, batch is ready, NO reconciliation adjustment created!
+        """
+        line = NormalizedStatementLine(
+            transaction_on=date(2026, 8, 10),
+            description_raw="Tokyo Hotel JPY",
+            direction="debit",
+            line_type="expense",
+            settlement_amount=Decimal("68.20"),
+            settlement_currency="USD",
+            original_amount=Decimal("10000.00"),
+            original_currency="JPY"
+        )
+        tx_id = uuid4()
+        existing_txs = [{
+            "id": tx_id,
+            "occurred_on": date(2026, 8, 10),
+            "from_account_id": self.account_id,
+            "from_amount": Decimal("68.90"),
+            "from_currency": "USD",
+            "original_amount": Decimal("10000.00"),
+            "original_currency": "JPY",
+            "merchant": "Tokyo Hotel JPY",
+            "transaction_type": "expense",
+            "account_leg_status": "estimated",
+            "verification_status": "unverified",
+            "status": "committed"
+        }]
+        res = run_deterministic_reconciliation(
+            lines=[line],
+            transactions=existing_txs,
+            selected_account_id=self.account_id,
+            account_currency="USD",
+            baseline_projected_balance=Decimal("1931.10"),
+            authoritative_balance=Decimal("1931.80"),
+            default_expense_category_id=uuid4()
+        )
+        self.assertEqual(res.batch_status, "ready")
+        self.assertEqual(res.residual_amount, Decimal("0.00"))
+        self.assertIsNone(res.adjustment_amount)
+        self.assertEqual(len(res.candidates), 1)
+        self.assertEqual(res.candidates[0].candidate_type, "match")
+        self.assertEqual(res.candidates[0].status, "accepted")
+        self.assertIn("settlement_patch", res.candidates[0].payload)
 
 
 if __name__ == "__main__":
     unittest.main()
+

@@ -59,8 +59,17 @@ def simulate_candidate_effects(
             total_delta -= amt
         elif cand.candidate_type == "match":
             # Existing matched transaction is already in ledger.
-            # Authoritative settlement financial enrichment is owned and finalized in Phase 8.
-            pass
+            # If the matched transaction had an estimated leg status and a settlement_patch:
+            # During RESIDUAL SIMULATION ONLY, simulate the signed settlement delta as an explainable effect.
+            # Phase 8 will finalize the settlement mutation and reporting FX freeze.
+            if cand.status == "accepted" and "settlement_patch" in cand.payload:
+                sp = cand.payload.get("settlement_patch") or {}
+                mt = cand.payload.get("matched_transaction") or {}
+                if sp.get("settlement_currency") == account_currency:
+                    actual_settle = parse_decimal(sp.get("settlement_amount", "0"))
+                    est_amt = parse_decimal(mt.get("amount", "0"))
+                    total_delta += (est_amt - actual_settle)
+
 
     return quantize_money(total_delta, account_currency)
 

@@ -1,4 +1,4 @@
-﻿import json
+import json
 from typing import Optional, Dict, Any, List
 from uuid import UUID
 from datetime import datetime, date
@@ -244,6 +244,7 @@ def create_reconciliation_candidate(
     payload: Dict[str, Any],
     statement_line_id: Optional[UUID] = None,
     target_transaction_id: Optional[UUID] = None,
+    applied_transaction_id: Optional[UUID] = None,
     confidence: Optional[Decimal] = None,
     reason_code: Optional[str] = None,
     reason_detail: Optional[str] = None
@@ -253,8 +254,8 @@ def create_reconciliation_candidate(
             """
             INSERT INTO reconciliation_candidates (
                 id, batch_id, statement_line_id, candidate_type, status,
-                target_transaction_id, payload, confidence, reason_code, reason_detail
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                target_transaction_id, applied_transaction_id, payload, confidence, reason_code, reason_detail
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id, batch_id, statement_line_id, candidate_type, status,
                       target_transaction_id, payload, confidence, reason_code,
                       reason_detail, resolved_by_user_id, resolved_at,
@@ -262,11 +263,12 @@ def create_reconciliation_candidate(
             """,
             (
                 candidate_id, batch_id, statement_line_id, candidate_type, status,
-                target_transaction_id, json.dumps(payload), confidence, reason_code, reason_detail
+                target_transaction_id, applied_transaction_id, json.dumps(payload), confidence, reason_code, reason_detail
             )
         )
         row = cur.fetchone()
         return _map_candidate_row(row)
+
 
 def list_candidates_for_batch(conn, batch_id: UUID) -> List[Dict[str, Any]]:
     with conn.cursor() as cur:
@@ -329,6 +331,41 @@ def update_candidate_applied(
             """,
             (status, payload_json, applied_transaction_id, resolved_by_user_id, candidate_id)
         )
+
+
+def update_reconciliation_candidate_full(
+    conn,
+    candidate_id: UUID,
+    candidate_type: str,
+    status: str,
+    payload: Dict[str, Any],
+    target_transaction_id: Optional[UUID] = None,
+    applied_transaction_id: Optional[UUID] = None,
+    confidence: Optional[Decimal] = None,
+    reason_code: Optional[str] = None,
+    reason_detail: Optional[str] = None
+) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE reconciliation_candidates
+            SET candidate_type = %s,
+                status = %s,
+                payload = %s::jsonb,
+                target_transaction_id = %s,
+                applied_transaction_id = %s,
+                confidence = COALESCE(%s, confidence),
+                reason_code = %s,
+                reason_detail = %s,
+                updated_at = now()
+            WHERE id = %s;
+            """,
+            (
+                candidate_type, status, json.dumps(payload), target_transaction_id,
+                applied_transaction_id, confidence, reason_code, reason_detail, candidate_id
+            )
+        )
+
 
 # --- Row Mappers ---
 

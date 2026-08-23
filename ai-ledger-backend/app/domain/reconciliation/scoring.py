@@ -13,8 +13,10 @@ from app.domain.reconciliation.models import (
     SETTLEMENT_DEVIATION_SUSPICIOUS,
     AMOUNT_CONFLICT,
     ORIGINAL_AMOUNT_CONFLICT,
-    DATE_OUTSIDE_WINDOW
+    DATE_OUTSIDE_WINDOW,
+    AUTHORITATIVE_DATA_CONFLICT
 )
+
 from app.domain.reconciliation.normalizer import normalize_description
 from app.domain.money import parse_decimal, quantize_money
 

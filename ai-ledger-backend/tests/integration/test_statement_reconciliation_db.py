@@ -520,13 +520,14 @@ class TestStatementReconciliationDb(BaseDbTestCase):
                     household_id=self.household_id,
                     account_id=self.acc_usd_id,
                     lines=[line],
-                    authoritative_balance=Decimal("1931.10"),
+                    authoritative_balance=Decimal("1931.80"),
                     user_id=self.user_id,
                     fx_service=self.mock_fx
                 )
                 self.assertEqual(preview["status"], "ready")
                 self.assertEqual(preview["matched_count"], 1)
                 batch_id = UUID(preview["batch_id"])
+
 
             with transaction(conn):
                 res = commit_statement_batch(conn, batch_id, user_id=self.user_id, fx_service=self.mock_fx)
@@ -957,7 +958,7 @@ class TestStatementReconciliationDb(BaseDbTestCase):
                     default_expense_category_id=self.cat_expense_id, fx_service=self.mock_fx
                 )
                 prev_b = create_statement_reconciliation_batch(
-                    conn=conn, household_id=self.household_id, account_id=self.acc_credit_id,
+            conn=conn, household_id=self.household_id, account_id=self.acc_credit_id,
                     lines=[line_b], authoritative_balance=Decimal("-1000.00"), user_id=self.user_id,
                     default_expense_category_id=self.cat_expense_id, fx_service=self.mock_fx
                 )
@@ -970,11 +971,10 @@ class TestStatementReconciliationDb(BaseDbTestCase):
 
             # Commit batch B: period 1 is already billed, so batch B commit must NOT create a duplicate expense
             with transaction(conn):
-                # When batch B commits, the fresh revalidation sees period 1 already billed and no scheduled period matching
-                # Since fresh ledger requires review or period already billed, duplicate is prevented!
-                try:
-                    commit_statement_batch(conn, batch_b_id, user_id=self.user_id, fx_service=self.mock_fx)
-                except ValueError:
+                res_b = commit_statement_batch(conn, batch_b_id, user_id=self.user_id, fx_service=self.mock_fx)
+                # When batch B commits, the fresh revalidation sees period 1 already billed.
+                # Either it matches or turns needs_review; no duplicate tx is created.
+                if res_b.get("status") == "needs_review":
                     pass
 
             # Assert exactly one expense transaction was created in DB for period 1
@@ -988,11 +988,401 @@ class TestStatementReconciliationDb(BaseDbTestCase):
         finally:
             conn.close()
 
+    def test_17_concurrent_residual_shift_exceeding_threshold_persists_needs_review(self):
+        """
+        Regression for Item 3:
+        Preview ready with small residual <= 200 CNY.
+        Concurrent ledger change makes fresh residual > 200 CNY.
+        Commit must return status="needs_review", persist DB batch as needs_review,
+        and make ZERO financial writes (NO rollback via exception).
+        """
+        conn = get_connection(self.test_schema)
+        try:
+            with transaction(conn):
+                preview = create_statement_reconciliation_batch(
+                    conn=conn, household_id=self.household_id, account_id=self.acc_cny_id,
+                    lines=[], authoritative_balance=Decimal("10047.00"), user_id=self.user_id,
+                    fx_service=self.mock_fx
+                )
+                self.assertEqual(preview["status"], "ready")
+                self.assertEqual(preview["adjustment_amount"], "47.00")
+                batch_id = UUID(preview["batch_id"])
+
+            # Concurrent change creates +500 residual difference
+            with transaction(conn):
+                tx_repo.create_transaction(
+                    conn=conn,
+                    tx_id=uuid4(),
+                    household_id=self.household_id,
+                    transaction_type="cash_income",
+                    occurred_on=date(2026, 8, 10),
+                    original_amount=Decimal("500.00"),
+                    original_currency="CNY",
+                    to_amount=Decimal("500.00"),
+                    to_currency="CNY",
+                    to_account_id=self.acc_cny_id,
+                    source="shortcut",
+                    status="committed"
+                )
+                accounts_repo.update_account_state_projection(conn, self.acc_cny_id, Decimal("10500.00"), datetime.now(timezone.utc))
+
+            # Commit call under transaction
+            with transaction(conn):
+                res = commit_statement_batch(conn, batch_id, user_id=self.user_id, fx_service=self.mock_fx)
+                self.assertEqual(res["status"], "needs_review")
+                self.assertEqual(res["applied_transaction_ids"], [])
+
+            # Check DB state
+            batch = reconciliation_repo.get_reconciliation_batch(conn, batch_id)
+            self.assertEqual(batch["status"], "needs_review")
+            self.assertEqual(batch["residual_amount"], Decimal("-453.00"))
+            self.assertIsNone(batch["committed_at"])
+
+            # Zero reconciliation_adjustment transactions created
+            with conn.cursor() as cur:
+                cur.execute("SELECT count(*) FROM transactions WHERE transaction_type = 'reconciliation_adjustment';")
+                self.assertEqual(cur.fetchone()[0], 0)
+        finally:
+            conn.close()
+
+    def test_18_category_deactivated_between_preview_and_commit(self):
+        """
+        Regression for Item 7:
+        Category is active during preview, then archived before commit.
+        Fresh commit revalidates category and changes batch to needs_review.
+        """
+        conn = get_connection(self.test_schema)
+        try:
+            cat_id = uuid4()
+            with transaction(conn):
+                accounts_repo.create_category(
+                    conn=conn,
+                    category_id=cat_id,
+                    household_id=self.household_id,
+                    name="Temporary Dining",
+                    category_type="expense"
+                )
+
+            line = NormalizedStatementLine(
+                transaction_on=date(2026, 8, 10),
+                description_raw="Bistro Dinner",
+                direction="debit",
+                line_type="expense",
+                settlement_amount=Decimal("200.00"),
+                settlement_currency="CNY"
+            )
+            with transaction(conn):
+                preview = create_statement_reconciliation_batch(
+                    conn=conn, household_id=self.household_id, account_id=self.acc_cny_id,
+                    lines=[line], authoritative_balance=Decimal("9800.00"), user_id=self.user_id,
+                    default_expense_category_id=cat_id, fx_service=self.mock_fx
+                )
+                self.assertEqual(preview["status"], "ready")
+                batch_id = UUID(preview["batch_id"])
+
+            # Deactivate category before commit
+            with transaction(conn):
+                with conn.cursor() as cur:
+                    cur.execute("UPDATE categories SET status = 'inactive' WHERE id = %s;", (cat_id,))
+
+            with transaction(conn):
+                res = commit_statement_batch(conn, batch_id, user_id=self.user_id, fx_service=self.mock_fx)
+                self.assertEqual(res["status"], "needs_review")
+
+            batch = reconciliation_repo.get_reconciliation_batch(conn, batch_id)
+            self.assertEqual(batch["status"], "needs_review")
+        finally:
+            conn.close()
+
+    def test_19_additional_refund_committed_between_preview_and_commit(self):
+        """
+        Regression for Item 5:
+        Original expense 1000 CNY. Preview has 600 CNY refund (ready).
+        Concurrent shortcut commits 500 CNY refund.
+        Commit re-evaluates 500 + 600 > 1000 -> needs_review.
+        """
+        conn = get_connection(self.test_schema)
+        try:
+            exp_id = uuid4()
+            with transaction(conn):
+                tx_repo.create_transaction(
+                    conn=conn,
+                    tx_id=exp_id,
+                    household_id=self.household_id,
+                    transaction_type="expense",
+                    occurred_on=date(2026, 8, 1),
+                    original_amount=Decimal("1000.00"),
+                    original_currency="CNY",
+                    from_amount=Decimal("1000.00"),
+                    from_currency="CNY",
+                    from_account_id=self.acc_cny_id,
+                    category_id=self.cat_expense_id,
+                    merchant="Apple Store",
+                    source="shortcut",
+                    status="committed"
+                )
+                accounts_repo.update_account_state_projection(conn, self.acc_cny_id, Decimal("9000.00"), datetime.now(timezone.utc))
+
+            line = NormalizedStatementLine(
+                transaction_on=date(2026, 8, 10),
+                description_raw="Apple Store",
+                direction="credit",
+                line_type="refund",
+                settlement_amount=Decimal("600.00"),
+                settlement_currency="CNY"
+            )
+            with transaction(conn):
+                preview = create_statement_reconciliation_batch(
+                    conn=conn, household_id=self.household_id, account_id=self.acc_cny_id,
+                    lines=[line], authoritative_balance=Decimal("9600.00"), user_id=self.user_id,
+                    default_expense_category_id=self.cat_expense_id, fx_service=self.mock_fx
+                )
+                self.assertEqual(preview["status"], "ready")
+                batch_id = UUID(preview["batch_id"])
+
+            # Concurrent shortcut commits 500 CNY refund
+            concurrent_ref_id = uuid4()
+            with transaction(conn):
+                tx_repo.create_transaction(
+                    conn=conn,
+                    tx_id=concurrent_ref_id,
+                    household_id=self.household_id,
+                    transaction_type="refund",
+                    occurred_on=date(2026, 8, 5),
+                    original_amount=Decimal("500.00"),
+                    original_currency="CNY",
+                    to_amount=Decimal("500.00"),
+                    to_currency="CNY",
+                    to_account_id=self.acc_cny_id,
+                    source="shortcut",
+                    status="committed"
+                )
+                tx_repo.create_transaction_link(conn, uuid4(), concurrent_ref_id, exp_id, "refund_of")
+                accounts_repo.update_account_state_projection(conn, self.acc_cny_id, Decimal("9500.00"), datetime.now(timezone.utc))
+
+            with transaction(conn):
+                res = commit_statement_batch(conn, batch_id, user_id=self.user_id, fx_service=self.mock_fx)
+                self.assertEqual(res["status"], "needs_review")
+
+            batch = reconciliation_repo.get_reconciliation_batch(conn, batch_id)
+            self.assertEqual(batch["status"], "needs_review")
+        finally:
+            conn.close()
+
+    def test_20_installment_bootstrap_and_multi_month_progression(self):
+        """
+        Regression for Item 8:
+        Plan pending_first_bill with first_statement_month NULL.
+        Period 1 billed by Aug statement -> plan active, first_statement_month=2026-08-01, periods 2 & 3 populated.
+        Period 2 billed by Sep statement.
+        Period 3 billed by Oct statement -> plan completed.
+        """
+        conn = get_connection(self.test_schema)
+        try:
+            plan_id = uuid4()
+            p1_id, p2_id, p3_id = uuid4(), uuid4(), uuid4()
+            with transaction(conn):
+                installments_repo.create_installment_plan(
+                    conn=conn,
+                    plan_id=plan_id,
+                    household_id=self.household_id,
+                    credit_account_id=self.acc_credit_id,
+                    purchase_occurred_on=date(2026, 8, 1),
+                    merchant="Apple Store",
+                    original_amount=Decimal("3000.00"),
+                    original_currency="CNY",
+                    account_principal_amount=Decimal("3000.00"),
+                    account_currency="CNY",
+                    total_periods=3,
+                    first_statement_month=None,
+                    status="pending_first_bill"
+                )
+                installments_repo.create_installment_period(conn, p1_id, plan_id, 1, Decimal("1000.00"), "CNY", status="scheduled")
+                installments_repo.create_installment_period(conn, p2_id, plan_id, 2, Decimal("1000.00"), "CNY", status="scheduled")
+                installments_repo.create_installment_period(conn, p3_id, plan_id, 3, Decimal("1000.00"), "CNY", status="scheduled")
+
+            # Aug statement
+            line_aug = NormalizedStatementLine(
+                transaction_on=date(2026, 8, 10),
+                description_raw="Apple Store",
+                direction="debit",
+                line_type="expense",
+                settlement_amount=Decimal("1000.00"),
+                settlement_currency="CNY"
+            )
+            with transaction(conn):
+                p_aug = create_statement_reconciliation_batch(
+                    conn=conn, household_id=self.household_id, account_id=self.acc_credit_id,
+                    lines=[line_aug], authoritative_balance=Decimal("-1000.00"), user_id=self.user_id,
+                    default_expense_category_id=self.cat_expense_id, fx_service=self.mock_fx
+                )
+                res_aug = commit_statement_batch(conn, UUID(p_aug["batch_id"]), user_id=self.user_id, fx_service=self.mock_fx)
+                self.assertEqual(res_aug["status"], "committed")
+
+            plan = installments_repo.get_installment_plan(conn, plan_id)
+            self.assertEqual(plan["status"], "active")
+            self.assertEqual(plan["first_statement_month"], date(2026, 8, 1))
+
+            periods = installments_repo.list_periods_for_plan(conn, plan_id)
+            p_map = {p["period_no"]: p for p in periods}
+            self.assertEqual(p_map[1]["status"], "billed")
+            self.assertEqual(p_map[2]["recognition_month"], date(2026, 9, 1))
+            self.assertEqual(p_map[3]["recognition_month"], date(2026, 10, 1))
+
+            # Sep statement
+            line_sep = NormalizedStatementLine(
+                transaction_on=date(2026, 9, 10),
+                description_raw="Apple Store",
+                direction="debit",
+                line_type="expense",
+                settlement_amount=Decimal("1000.00"),
+                settlement_currency="CNY"
+            )
+            with transaction(conn):
+                p_sep = create_statement_reconciliation_batch(
+                    conn=conn, household_id=self.household_id, account_id=self.acc_credit_id,
+                    lines=[line_sep], authoritative_balance=Decimal("-2000.00"), user_id=self.user_id,
+                    default_expense_category_id=self.cat_expense_id, fx_service=self.mock_fx
+                )
+                res_sep = commit_statement_batch(conn, UUID(p_sep["batch_id"]), user_id=self.user_id, fx_service=self.mock_fx)
+                self.assertEqual(res_sep["status"], "committed")
+
+            # Oct statement
+            line_oct = NormalizedStatementLine(
+                transaction_on=date(2026, 10, 10),
+                description_raw="Apple Store",
+                direction="debit",
+                line_type="expense",
+                settlement_amount=Decimal("1000.00"),
+                settlement_currency="CNY"
+            )
+            with transaction(conn):
+                p_oct = create_statement_reconciliation_batch(
+                    conn=conn, household_id=self.household_id, account_id=self.acc_credit_id,
+                    lines=[line_oct], authoritative_balance=Decimal("-3000.00"), user_id=self.user_id,
+                    default_expense_category_id=self.cat_expense_id, fx_service=self.mock_fx
+                )
+                res_oct = commit_statement_batch(conn, UUID(p_oct["batch_id"]), user_id=self.user_id, fx_service=self.mock_fx)
+                self.assertEqual(res_oct["status"], "committed")
+
+            plan = installments_repo.get_installment_plan(conn, plan_id)
+            self.assertEqual(plan["status"], "completed")
+        finally:
+            conn.close()
+
+    def test_21_foreign_line_evidence_round_trip(self):
+        """
+        Regression for Item 4:
+        Foreign line evidence (original_amount=10000 JPY) is preserved in candidate payload across DB round-trip.
+        """
+        conn = get_connection(self.test_schema)
+        try:
+            line = NormalizedStatementLine(
+                transaction_on=date(2026, 8, 10),
+                description_raw="Tokyo Hotel JPY",
+                direction="debit",
+                line_type="expense",
+                settlement_amount=Decimal("68.20"),
+                settlement_currency="USD",
+                original_amount=Decimal("10000.00"),
+                original_currency="JPY"
+            )
+            with transaction(conn):
+                preview = create_statement_reconciliation_batch(
+                    conn=conn, household_id=self.household_id, account_id=self.acc_usd_id,
+                    lines=[line], authoritative_balance=Decimal("1931.80"), user_id=self.user_id,
+                    default_expense_category_id=self.cat_expense_id, fx_service=self.mock_fx
+                )
+                batch_id = UUID(preview["batch_id"])
+
+            cands = reconciliation_repo.list_candidates_for_batch(conn, batch_id)
+            cand = cands[0]
+            self.assertEqual(Decimal(cand["payload"]["evidence"]["line"]["original_amount"]), Decimal("10000.00"))
+            self.assertEqual(cand["payload"]["evidence"]["line"]["original_currency"], "JPY")
+
+            with transaction(conn):
+                res = commit_statement_batch(conn, batch_id, user_id=self.user_id, fx_service=self.mock_fx)
+                self.assertEqual(res["status"], "committed")
+        finally:
+            conn.close()
+
+    def test_22_concurrent_transfer_race_matches_fresh(self):
+        """
+        Regression for Item 10:
+        Preview creates candidate to create transfer A->B.
+        Concurrent shortcut commits the exact transfer A->B.
+        Commit statement re-runs fresh engine -> matches existing transfer -> no duplicate transfer created.
+        """
+        conn = get_connection(self.test_schema)
+        try:
+            line = NormalizedStatementLine(
+                transaction_on=date(2026, 8, 10),
+                description_raw="Counterpart Transfer Credit",
+                direction="debit",
+                line_type="transfer",
+                settlement_amount=Decimal("500.00"),
+                settlement_currency="CNY"
+            )
+            counter_legs = [{
+                "account_id": self.acc_credit_id,
+                "direction": "credit",
+                "amount": Decimal("500.00"),
+                "currency": "CNY",
+                "occurred_on": date(2026, 8, 10),
+                "is_counter_statement_leg": True
+            }]
+            with transaction(conn):
+                preview = create_statement_reconciliation_batch(
+                    conn=conn, household_id=self.household_id, account_id=self.acc_cny_id,
+                    lines=[line], authoritative_balance=Decimal("9500.00"), user_id=self.user_id,
+                    fx_service=self.mock_fx, household_movements=counter_legs
+                )
+                self.assertEqual(preview["created_count"], 1)
+                batch_id = UUID(preview["batch_id"])
+
+            # Concurrent shortcut commits the transfer
+            tx_id = uuid4()
+            with transaction(conn):
+                tx_repo.create_transaction(
+                    conn=conn,
+                    tx_id=tx_id,
+                    household_id=self.household_id,
+                    transaction_type="transfer",
+                    occurred_on=date(2026, 8, 10),
+                    original_amount=Decimal("500.00"),
+                    original_currency="CNY",
+                    from_amount=Decimal("500.00"),
+                    from_currency="CNY",
+                    to_amount=Decimal("500.00"),
+                    to_currency="CNY",
+                    from_account_id=self.acc_cny_id,
+                    to_account_id=self.acc_credit_id,
+                    merchant="Counterpart Transfer Credit",
+                    source="shortcut",
+                    status="committed"
+                )
+                accounts_repo.update_account_state_projection(conn, self.acc_cny_id, Decimal("9500.00"), datetime.now(timezone.utc))
+
+
+            with transaction(conn):
+                res = commit_statement_batch(conn, batch_id, user_id=self.user_id, fx_service=self.mock_fx)
+                self.assertEqual(res["status"], "committed")
+                self.assertIn(str(tx_id), res["applied_transaction_ids"])
+
+            # Exactly one transfer transaction exists in DB
+            with conn.cursor() as cur:
+                cur.execute("SELECT count(*) FROM transactions WHERE transaction_type = 'transfer';")
+                self.assertEqual(cur.fetchone()[0], 1)
+
+            # Persisted candidate in DB reflects match and applied
+            cands = reconciliation_repo.list_candidates_for_batch(conn, batch_id)
+            self.assertEqual(cands[0]["candidate_type"], "match")
+            self.assertEqual(cands[0]["status"], "applied")
+        finally:
+            conn.close()
+
 
 if __name__ == "__main__":
     unittest.main()
 
 
-
-if __name__ == "__main__":
-    unittest.main()

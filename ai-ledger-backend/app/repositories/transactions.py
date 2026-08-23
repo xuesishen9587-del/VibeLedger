@@ -93,7 +93,9 @@ def create_transaction(
     reporting_currency: Optional[str] = None,
     source: str = "shortcut",
     status: str = "committed",
-    verification_status: str = "unverified"
+    verification_status: str = "unverified",
+    statement_batch_id: Optional[UUID] = None,
+    posted_on: Optional[date] = None
 ) -> None:
 
     insert_transaction(conn, {
@@ -101,6 +103,7 @@ def create_transaction(
         "household_id": household_id,
         "transaction_type": transaction_type,
         "occurred_on": occurred_on,
+        "posted_on": posted_on,
         "original_amount": original_amount,
         "original_currency": original_currency,
         "from_amount": from_amount,
@@ -117,8 +120,10 @@ def create_transaction(
         "reporting_currency": reporting_currency,
         "source": source,
         "status": status,
-        "verification_status": verification_status
+        "verification_status": verification_status,
+        "statement_batch_id": statement_batch_id
     })
+
 
 def _map_transaction_row(row) -> Dict[str, Any]:
 

@@ -1173,7 +1173,7 @@ class TestSnapshotReconciliationApiDb(BaseDbTestCase):
                 household_id=self.household_id,
                 account_id=self.acc_cny_id,
                 batch_type="statement",
-                status="ready",
+                status="failed",
                 currency="CNY"
             )
             reconciliation_repo.create_reconciliation_batch(

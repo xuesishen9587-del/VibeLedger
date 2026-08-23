@@ -44,6 +44,11 @@ from app.domain.transactions import (
     BatchResourceNotFoundError,
     BatchNotFoundError,
     BatchVersionConflictError,
+    CandidateResourceNotFoundError,
+    StatementParseFailedError,
+    StatementPasswordRequiredError,
+    StatementPasswordInvalidError,
+    DependencyUnavailableError,
     InvalidSnapshotError,
     InvalidBatchStateError
 )
@@ -92,11 +97,13 @@ async def ledger_domain_exception_handler(request: Request, exc: LedgerDomainErr
     if isinstance(exc, HouseholdMismatchError):
         return build_error_response(403, exc.code, exc.message, retryable=False)
 
-    if isinstance(exc, (FxProviderUnavailableError, GeminiDependencyError)):
+    if isinstance(exc, (FxProviderUnavailableError, GeminiDependencyError, DependencyUnavailableError)):
         return build_error_response(503, exc.code, exc.message, retryable=True)
 
-    if isinstance(exc, (AccountNotFoundError, CategoryNotFoundError, TransactionNotFoundError)):
+    if isinstance(exc, (StatementPasswordRequiredError, StatementPasswordInvalidError, StatementParseFailedError)):
+        return build_error_response(400, exc.code, exc.message, retryable=False)
 
+    if isinstance(exc, (AccountNotFoundError, CategoryNotFoundError, TransactionNotFoundError)):
         return build_error_response(422, exc.code, exc.message, retryable=False)
 
     if isinstance(exc, (AccountNameConflictError, CategoryNameConflictError, AccountAliasConflictError)):

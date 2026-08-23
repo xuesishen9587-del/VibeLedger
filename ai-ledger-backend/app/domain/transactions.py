@@ -144,6 +144,38 @@ class BatchResourceNotFoundError(ResourceNotFoundError):
 class BatchNotFoundError(BatchResourceNotFoundError):
     pass
 
+class CandidateResourceNotFoundError(ResourceNotFoundError):
+    def __init__(self, candidate_id: UUID):
+        super().__init__(f"Reconciliation candidate {candidate_id} not found.", code="CANDIDATE_NOT_FOUND")
+
+class StatementParseFailedError(LedgerDomainError):
+    def __init__(self, message: str = "Failed to parse statement document."):
+        super().__init__(message, code="STATEMENT_PARSE_FAILED")
+
+class StatementPasswordRequiredError(LedgerDomainError):
+    def __init__(self, message: str = "Statement PDF is encrypted and requires a password."):
+        super().__init__(message, code="STATEMENT_PASSWORD_REQUIRED")
+
+class StatementPasswordInvalidError(LedgerDomainError):
+    def __init__(self, message: str = "Invalid password for encrypted statement PDF."):
+        super().__init__(message, code="STATEMENT_PASSWORD_INVALID")
+
+class DependencyUnavailableError(LedgerDomainError):
+    def __init__(self, message: str = "External dependency or AI service is temporarily unavailable."):
+        super().__init__(message, code="DEPENDENCY_UNAVAILABLE")
+
+class InvalidCandidateStateError(LedgerDomainError):
+    def __init__(self, message: str = "Reconciliation candidate is not in a valid state for this operation."):
+        super().__init__(message, code="INVALID_CANDIDATE_STATE")
+
+class InvalidCandidatePayloadError(LedgerDomainError):
+    def __init__(self, message: str = "Candidate edit payload validation failed."):
+        super().__init__(message, code="INVALID_CANDIDATE_PAYLOAD")
+
+class IncompatibleTargetTransactionError(LedgerDomainError):
+    def __init__(self, message: str = "Selected target transaction is incompatible with this statement candidate."):
+        super().__init__(message, code="INCOMPATIBLE_TARGET_TRANSACTION")
+
 class RowVersionConflictError(LedgerDomainError):
     def __init__(self, message: str = "The resource has been modified concurrently. Reload before updating.", code: str = "ROW_VERSION_CONFLICT"):
         super().__init__(message, code=code)
@@ -194,6 +226,10 @@ class InvalidSnapshotError(LedgerDomainError):
 
 class InvalidBatchStateError(LedgerDomainError):
     def __init__(self, message: str = "Reconciliation batch is in an invalid state for this operation."):
+        super().__init__(message, code="INVALID_REQUEST")
+
+class InvalidRequestError(LedgerDomainError):
+    def __init__(self, message: str = "Invalid request."):
         super().__init__(message, code="INVALID_REQUEST")
 
 

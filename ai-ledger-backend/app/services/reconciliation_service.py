@@ -14,6 +14,7 @@ from app.domain.reconciliation.models import (
 )
 from app.domain.reconciliation.normalizer import normalize_description
 from app.domain.reconciliation.engine import run_deterministic_reconciliation
+from app.domain.reconciliation.residuals import evaluate_residual_and_batch_readiness
 from app.services.reference_fx_service import ReferenceFxService
 from app.services.snapshot_service import ledger_balance_as_of
 
@@ -54,7 +55,7 @@ def create_statement_reconciliation_batch(
         raise ValueError("Account does not belong to household")
 
     account_curr = account["currency"]
-    auth_balance = quantize_money(authoritative_balance, account_curr)
+    auth_balance = quantize_money(authoritative_balance, account_curr) if authoritative_balance is not None else None
     is_credit = (account["account_type"] == "credit")
 
     # Validate default categories belong to household, are active, and have correct category_type
@@ -284,7 +285,7 @@ def create_statement_reconciliation_batch(
         "matched_count": result.matched_count,
         "created_count": result.created_count,
         "pending_count": result.pending_count,
-        "residual_amount": str(result.residual_amount),
+        "residual_amount": str(result.residual_amount) if result.residual_amount is not None else None,
         "adjustment_amount": str(result.adjustment_amount) if result.adjustment_amount else None,
         "candidates": persisted_candidates
     }
@@ -573,7 +574,7 @@ def commit_statement_batch(
     if curr != "CNY":
         fx_rate_cny = fx_srv.get_rate(curr, "CNY", as_of=as_of_date)
 
-    auth_balance = quantize_money(batch.get("authoritative_balance", Decimal("0.00")), curr)
+    auth_balance = quantize_money(batch["authoritative_balance"], curr) if batch.get("authoritative_balance") is not None else None
 
     # Re-run full deterministic reconciliation engine under lock
     fresh_result = run_deterministic_reconciliation(
@@ -597,6 +598,55 @@ def commit_statement_batch(
 
     old_cand_by_line = {c["statement_line_id"]: c for c in candidates if c.get("statement_line_id")}
     old_adj_cand = next((c for c in candidates if c["candidate_type"] == "adjustment"), None)
+
+    # Incorporate user-reviewed candidate statuses and patched payloads
+    for fc in fresh_result.candidates:
+        if fc.statement_line_id:
+            old_c = old_cand_by_line.get(fc.statement_line_id)
+            if old_c:
+                if old_c.get("status") == "rejected":
+                    fc.status = "rejected"
+                elif old_c.get("resolved_at") is not None:
+                    # Candidate was explicitly reviewed/resolved by user
+                    if old_c.get("status") == "accepted":
+                        if old_c.get("candidate_type") == "match" and old_c.get("target_transaction_id"):
+                            # Check if explicit target transaction is still committed and active
+                            t_tx = next((t for t in fresh_txs if t["id"] == old_c["target_transaction_id"]), None)
+                            if t_tx and t_tx.get("status") == "committed" and t_tx.get("deleted_at") is None:
+                                fc.candidate_type = "match"
+                                fc.target_transaction_id = old_c["target_transaction_id"]
+                                fc.status = "accepted"
+                            else:
+                                fc.status = "needs_review"
+                                fc.reason_code = "TARGET_TRANSACTION_INVALID"
+                        else:
+                            fc.status = "accepted"
+                if isinstance(old_c.get("payload"), dict):
+                    for k, v in old_c["payload"].items():
+                        if k not in fc.payload or fc.payload[k] is None:
+                            fc.payload[k] = v
+                        elif isinstance(v, dict) and isinstance(fc.payload.get(k), dict):
+                            fc.payload[k].update(v)
+
+    # Re-evaluate residual and batch status with reviewed candidate states
+    active_cands = [c for c in fresh_result.candidates if c.candidate_type != "adjustment"]
+    b_status, fresh_residual, fresh_adj = evaluate_residual_and_batch_readiness(
+        baseline_projected_balance=fresh_baseline,
+        authoritative_balance=auth_balance,
+        candidates=active_cands,
+        account_id=primary_account_id,
+        account_currency=curr,
+        fx_rate_to_cny=fx_rate_cny
+    )
+    fresh_result.batch_status = b_status
+    fresh_result.residual_amount = fresh_residual
+    fresh_result.matched_count = sum(1 for c in active_cands if c.candidate_type == "match" and c.status == "accepted")
+    fresh_result.created_count = sum(1 for c in active_cands if c.candidate_type in ("create_transaction", "create_transfer", "refund", "recognize_installment") and c.status == "accepted")
+    fresh_result.pending_count = sum(1 for c in active_cands if c.status == "needs_review")
+    if fresh_adj and fresh_adj.status == "accepted":
+        fresh_result.adjustment_amount = parse_decimal(fresh_adj.payload["adjustment_amount"])
+    else:
+        fresh_result.adjustment_amount = None
 
     # If fresh re-evaluation produces needs_review: persist workflow state and return needs_review result
     if fresh_result.batch_status == "needs_review":
@@ -749,13 +799,15 @@ def commit_statement_batch(
 
         # Case B: Create Transaction (Expense, Income, Fee)
         elif c_type == "create_transaction":
-            tx_data = fresh_cand.payload.get("transaction", {})
-            amt = parse_decimal(tx_data.get("amount", "0"))
-            c_curr = tx_data.get("currency", curr)
-            ttype = tx_data.get("transaction_type", "expense")
-            occ_on = date.fromisoformat(tx_data["occurred_on"]) if tx_data.get("occurred_on") else (stmt_line.get("transaction_on") if stmt_line else date.today())
+            tx_data = fresh_cand.payload.get("transaction") or fresh_cand.payload.get("line") or fresh_cand.payload or {}
+            amt_raw = tx_data.get("amount") or (stmt_line.get("amount") if stmt_line else "0")
+            amt = parse_decimal(amt_raw)
+            c_curr = tx_data.get("currency") or (stmt_line.get("currency") if stmt_line else curr)
+            ttype = tx_data.get("transaction_type") or ("income" if (stmt_line and stmt_line.get("direction") == "credit") else "expense")
+            occ_on_val = tx_data.get("occurred_on") or (stmt_line.get("transaction_on") if stmt_line else None)
+            occ_on = date.fromisoformat(str(occ_on_val)) if occ_on_val else (stmt_line.get("transaction_on") if stmt_line else date.today())
             merchant = tx_data.get("merchant") or (stmt_line.get("description_raw") if stmt_line else "Merchant")
-            cat_id = UUID(tx_data["category_id"]) if tx_data.get("category_id") else None
+            cat_id = UUID(str(tx_data["category_id"])) if tx_data.get("category_id") else None
 
             new_tx_id = uuid4()
             from_acc = primary_account_id if ttype in ("expense", "fee") else None

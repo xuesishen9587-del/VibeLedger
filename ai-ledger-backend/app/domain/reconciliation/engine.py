@@ -71,7 +71,7 @@ def run_deterministic_reconciliation(
     selected_account_id: UUID,
     account_currency: str,
     baseline_projected_balance: Decimal,
-    authoritative_balance: Decimal,
+    authoritative_balance: Optional[Decimal] = None,
     is_credit_account: bool = False,
     installment_plans: Optional[List[Dict[str, Any]]] = None,
     installment_periods: Optional[Dict[UUID, List[Dict[str, Any]]]] = None,

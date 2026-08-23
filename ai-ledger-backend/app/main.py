@@ -16,7 +16,8 @@ from app.api.routes.dashboard import router as dashboard_router
 from app.api.routes.credit_cards import router as credit_cards_router
 from app.api.routes.installments import router as installments_router
 from app.api.routes.snapshots import router as snapshots_router
-from app.api.routes.reconciliation import router as reconciliation_router
+from app.api.routes.reconciliation import router as reconciliation_router, candidates_router as reconciliation_candidates_router
+from app.api.routes.statements import router as statements_router
 
 def create_app() -> FastAPI:
     """
@@ -45,6 +46,8 @@ def create_app() -> FastAPI:
     app.include_router(installments_router)
     app.include_router(snapshots_router)
     app.include_router(reconciliation_router)
+    app.include_router(reconciliation_candidates_router)
+    app.include_router(statements_router)
 
 
     @app.get("/api/v1/health", tags=["Health"])

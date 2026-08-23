@@ -24,6 +24,9 @@ def create_reconciliation_batch(
     period_end: Optional[date] = None,
     source_request_id: Optional[UUID] = None,
     created_by_user_id: Optional[UUID] = None,
+    parser_version: Optional[str] = None,
+    failure_code: Optional[str] = None,
+    failure_detail: Optional[str] = None,
     row_version: int = 0,
     committed_at: Optional[datetime] = None
 ) -> Dict[str, Any]:
@@ -35,8 +38,9 @@ def create_reconciliation_batch(
                 authoritative_balance, statement_balance, current_outstanding, unbilled_balance,
                 residual_amount, adjustment_amount,
                 period_start, period_end, source_request_id, created_by_user_id,
+                parser_version, failure_code, failure_detail,
                 row_version, committed_at
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id, household_id, account_id, batch_type, status, currency,
                       authoritative_balance, statement_balance, current_outstanding,
                       unbilled_balance, residual_amount, adjustment_amount,
@@ -50,11 +54,32 @@ def create_reconciliation_batch(
                 authoritative_balance, statement_balance, current_outstanding, unbilled_balance,
                 residual_amount, adjustment_amount,
                 period_start, period_end, source_request_id, created_by_user_id,
+                parser_version, failure_code, failure_detail,
                 row_version, committed_at
             )
         )
         row = cur.fetchone()
         return _map_batch_row(row)
+
+def fail_reconciliation_batch(
+    conn,
+    batch_id: UUID,
+    failure_code: str,
+    failure_detail: Optional[str] = None
+) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE reconciliation_batches
+            SET status = 'failed',
+                failure_code = %s,
+                failure_detail = %s,
+                row_version = row_version + 1,
+                updated_at = now()
+            WHERE id = %s;
+            """,
+            (failure_code, failure_detail, batch_id)
+        )
 
 def get_reconciliation_batch(conn, batch_id: UUID) -> Optional[Dict[str, Any]]:
     with conn.cursor() as cur:

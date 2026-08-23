@@ -7,6 +7,7 @@ from datetime import date, datetime, timezone, timedelta
 from app.services.dashboard_service import (
     get_overview,
     get_cash_flow,
+    get_investments_summary,
     get_account_freshness
 )
 from app.services.reference_fx_service import ReferenceFxService
@@ -21,7 +22,51 @@ class TestDashboardServiceUnit(unittest.TestCase):
             ("EUR", "CNY"): Decimal("7.80")
         })
 
+    def test_investments_summary_multi_currency_fx_conversion(self):
+        mock_conn = MagicMock()
+        mock_cur = MagicMock()
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cur
+
+        # Mock get_household
+        mock_cur.fetchone.return_value = (
+            self.household_id, "Test Household", "CNY", "active", 0, datetime.now(), datetime.now()
+        )
+
+        # Mock investment_pnl_periods rows:
+        # Row 1: 100.00 CNY
+        # Row 2: 100.00 USD
+        mock_cur.fetchall.return_value = [
+            (
+                uuid4(), uuid4(), date(2026, 8, 1), date(2026, 8, 30),
+                Decimal("0.00"), Decimal("0.00"), Decimal("100.00"),
+                "CNY", "confirmed", 1, datetime.now()
+            ),
+            (
+                uuid4(), uuid4(), date(2026, 8, 1), date(2026, 8, 30),
+                Decimal("0.00"), Decimal("0.00"), Decimal("100.00"),
+                "USD", "confirmed", 1, datetime.now()
+            )
+        ]
+
+        summary = get_investments_summary(
+            conn=mock_conn,
+            household_id=self.household_id,
+            from_date=date(2026, 8, 1),
+            to_date=date(2026, 8, 31),
+            fx_service=self.mock_fx
+        )
+
+        # 100.00 CNY + 100.00 USD * 7.20 = 820.00 CNY
+        self.assertEqual(summary["reporting_currency"], "CNY")
+        self.assertEqual(summary["total_pnl"], "820.00")
+        self.assertEqual(len(summary["items"]), 2)
+
+        items_by_curr = {it["currency"]: it for it in summary["items"]}
+        self.assertEqual(items_by_curr["CNY"]["pnl_amount"], "100.00")
+        self.assertEqual(items_by_curr["USD"]["pnl_amount"], "100.00")
+
     def test_overview_balance_sheet_and_freshness(self):
+
         mock_conn = MagicMock()
         mock_cur = MagicMock()
         mock_conn.cursor.return_value.__enter__.return_value = mock_cur

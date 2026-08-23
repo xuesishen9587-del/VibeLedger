@@ -139,5 +139,88 @@ class TestCategoriesApiDb(BaseDbTestCase):
         res_deact = self.client.post(f"/api/v1/categories/{cat_a_id}/deactivate", headers=self.headers_b)
         self.assertEqual(res_deact.status_code, 404)
 
+    def test_deactivated_category_historical_transaction_and_expense_rejection(self):
+        # 1. Create account & category
+        conn = get_connection(self.test_schema)
+        try:
+            with transaction(conn):
+                acc_id = uuid4()
+                accounts_repo.create_account(conn, acc_id, self.household_id, "Checking", "cash", "CNY")
+                cat_id = uuid4()
+                categories_repo.create_category(conn, cat_id, self.household_id, "Old Category", "expense")
+
+                # Create historical transaction referencing this category
+                tx_id = uuid4()
+                from decimal import Decimal
+                from app.repositories import transactions as tx_repo
+                tx_repo.create_transaction(
+                    conn=conn,
+                    tx_id=tx_id,
+                    household_id=self.household_id,
+                    transaction_type="expense",
+                    occurred_on=date(2026, 8, 1),
+                    original_amount=Decimal("150.00"),
+                    original_currency="CNY",
+                    from_amount=Decimal("150.00"),
+                    from_currency="CNY",
+                    from_account_id=acc_id,
+                    category_id=cat_id,
+                    status="committed"
+                )
+        finally:
+            conn.close()
+
+        # 2. Deactivate category
+        res_deact = self.client.post(f"/api/v1/categories/{cat_id}/deactivate", headers=self.headers)
+        self.assertEqual(res_deact.status_code, 200)
+        self.assertEqual(res_deact.json()["status"], "inactive")
+
+        # 3. Historical transaction remains readable and preserves category
+        res_tx = self.client.get(f"/api/v1/transactions/{tx_id}", headers=self.headers)
+        self.assertEqual(res_tx.status_code, 200)
+        tx_data = res_tx.json()
+        self.assertEqual(tx_data["category"]["id"], str(cat_id))
+        self.assertEqual(tx_data["category"]["name"], "Old Category")
+
+        # 4. Inactive category cannot be used for new Expense workflow confirmation
+        # Create an ingestion request with draft referencing the deactivated category
+        req_id = uuid4()
+        conn = get_connection(self.test_schema)
+        try:
+            with transaction(conn):
+                from app.repositories import ingestion as ingestion_repo
+                ingestion_repo.create_ingestion_request(
+                    conn=conn,
+                    request_id=req_id,
+                    device_id=self.device_id,
+                    idempotency_key=f"test_inact_cat_{uuid4().hex}",
+                    request_kind="expense",
+                    request_hash=b"dummy_hash_01234567890123456789012345678901",
+                    status="needs_confirmation",
+                    draft_payload={
+                        "occurred_on": "2026-08-20",
+                        "merchant": "Test Merchant",
+                        "original_amount": "100.00",
+                        "original_currency": "CNY",
+                        "from_account": {"id": str(acc_id), "name": "Checking"},
+                        "category": {"id": str(cat_id), "name": "Old Category"},
+                        "payment_mode": "one_off"
+                    }
+
+                )
+        finally:
+            conn.close()
+
+
+        # Confirming with inactive category returns 422
+        res_confirm = self.client.post(
+            f"/api/v1/ingestion-requests/{req_id}/confirm",
+            headers=self.headers
+        )
+        self.assertEqual(res_confirm.status_code, 422)
+        self.assertEqual(res_confirm.json()["error"]["code"], "CATEGORY_NOT_FOUND")
+
 if __name__ == "__main__":
     unittest.main()
+
+

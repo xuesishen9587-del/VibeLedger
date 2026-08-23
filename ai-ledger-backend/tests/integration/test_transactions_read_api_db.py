@@ -214,5 +214,14 @@ class TestTransactionsReadApiDb(BaseDbTestCase):
         self.assertEqual(res.status_code, 404)
         self.assertEqual(res.json()["error"]["code"], "TRANSACTION_NOT_FOUND")
 
+    def test_invalid_cursor_returns_canonical_422(self):
+        # Malformed garbage cursor -> 422 INVALID_REQUEST canonical error envelope, not 500
+        res = self.client.get("/api/v1/transactions?cursor=garbage_cursor_not_base64", headers=self.headers)
+        self.assertEqual(res.status_code, 422)
+        err = res.json()["error"]
+        self.assertEqual(err["code"], "INVALID_REQUEST")
+        self.assertEqual(err["retryable"], False)
+
 if __name__ == "__main__":
     unittest.main()
+

@@ -226,7 +226,25 @@ class TestAccountsApiDb(BaseDbTestCase):
         acc_id = UUID(res.json()["id"])
         row_version = res.json()["row_version"]
 
-        # Record a transaction on this account
+        # 1. Before financial history, currency CAN be updated
+        res_curr_ok = self.client.patch(f"/api/v1/accounts/{acc_id}", json={
+            "currency": "EUR",
+            "row_version": row_version
+        }, headers=self.headers)
+        self.assertEqual(res_curr_ok.status_code, 200)
+        self.assertEqual(res_curr_ok.json()["currency"], "EUR")
+        self.assertEqual(res_curr_ok.json()["row_version"], row_version + 1)
+        row_version = res_curr_ok.json()["row_version"]
+
+        # Confirm DB has EUR
+        conn = get_connection(self.test_schema)
+        try:
+            acc_db = accounts_repo.get_account(conn, acc_id)
+            self.assertEqual(acc_db["currency"], "EUR")
+        finally:
+            conn.close()
+
+        # 2. Record a transaction on this account
         conn = get_connection(self.test_schema)
         try:
             with transaction(conn):
@@ -238,9 +256,9 @@ class TestAccountsApiDb(BaseDbTestCase):
                     transaction_type="cash_income",
                     occurred_on=date(2026, 8, 1),
                     original_amount=Decimal("100.00"),
-                    original_currency="USD",
+                    original_currency="EUR",
                     to_amount=Decimal("100.00"),
-                    to_currency="USD",
+                    to_currency="EUR",
                     to_account_id=acc_id,
                     source="shortcut",
                     status="committed"
@@ -248,21 +266,101 @@ class TestAccountsApiDb(BaseDbTestCase):
         finally:
             conn.close()
 
-        # Try to change currency after transaction exists -> 422 CURRENCY_IMMUTABLE
+        # 3. Try to change currency after transaction exists -> 422 CURRENCY_IMMUTABLE
         res_curr = self.client.patch(f"/api/v1/accounts/{acc_id}", json={
-            "currency": "EUR",
+            "currency": "GBP",
             "row_version": row_version
         }, headers=self.headers)
         self.assertEqual(res_curr.status_code, 422)
         self.assertEqual(res_curr.json()["error"]["code"], "CURRENCY_IMMUTABLE")
 
-        # Try to change account_type after transaction exists -> 422 ACCOUNT_TYPE_IMMUTABLE
+        # 4. Try to change account_type after transaction exists -> 422 ACCOUNT_TYPE_IMMUTABLE
         res_type = self.client.patch(f"/api/v1/accounts/{acc_id}", json={
             "account_type": "credit",
             "row_version": row_version
         }, headers=self.headers)
         self.assertEqual(res_type.status_code, 422)
         self.assertEqual(res_type.json()["error"]["code"], "ACCOUNT_TYPE_IMMUTABLE")
+
+    def test_patch_account_nullable_fields_clearing_and_credit_validation(self):
+        # 1. Create linked cash account
+        res_cash = self.client.post("/api/v1/accounts", json={
+            "name": "Auto Debit Cash",
+            "account_type": "cash",
+            "currency": "CNY"
+        }, headers=self.headers)
+        cash_id = res_cash.json()["id"]
+
+        # 2. Create credit account with all nullable fields populated
+        res_credit = self.client.post("/api/v1/accounts", json={
+            "name": "Full Credit Acc",
+            "institution": "Chase Bank",
+            "account_type": "credit",
+            "currency": "USD",
+            "owner_user_id": str(self.user_id),
+            "linked_cash_account_id": cash_id,
+            "billing_day": 5,
+            "due_day": 25
+        }, headers=self.headers)
+        self.assertEqual(res_credit.status_code, 201)
+        cr_data = res_credit.json()
+        cr_id = cr_data["id"]
+        row_v = cr_data["row_version"]
+        self.assertEqual(cr_data["institution"], "Chase Bank")
+        self.assertEqual(cr_data["billing_day"], 5)
+        self.assertEqual(cr_data["due_day"], 25)
+        self.assertEqual(cr_data["linked_cash_account_id"], cash_id)
+
+        # 3. Explicitly clear nullable fields with null
+        res_clear = self.client.patch(f"/api/v1/accounts/{cr_id}", json={
+            "institution": None,
+            "owner_user_id": None,
+            "linked_cash_account_id": None,
+            "billing_day": None,
+            "due_day": None,
+            "row_version": row_v
+        }, headers=self.headers)
+        self.assertEqual(res_clear.status_code, 200)
+        c_data = res_clear.json()
+        self.assertIsNone(c_data["institution"])
+        self.assertIsNone(c_data["owner_user_id"])
+        self.assertIsNone(c_data["linked_cash_account_id"])
+        self.assertIsNone(c_data["billing_day"])
+        self.assertIsNone(c_data["due_day"])
+        row_v = c_data["row_version"]
+
+        # 4. Inconsistent credit/non-credit billing state produces canonical 422
+        # Create credit account with billing_day=5, due_day=25
+        res_cr2 = self.client.post("/api/v1/accounts", json={
+            "name": "Credit To Cash Test",
+            "account_type": "credit",
+            "currency": "USD",
+            "billing_day": 5,
+            "due_day": 25
+        }, headers=self.headers)
+        cr2_id = res_cr2.json()["id"]
+        cr2_row_v = res_cr2.json()["row_version"]
+
+        # PATCH account_type="cash" without clearing billing_day/due_day -> 422
+        res_bad_type = self.client.patch(f"/api/v1/accounts/{cr2_id}", json={
+            "account_type": "cash",
+            "row_version": cr2_row_v
+        }, headers=self.headers)
+        self.assertEqual(res_bad_type.status_code, 422)
+        self.assertEqual(res_bad_type.json()["error"]["code"], "LINKED_ACCOUNT_INVALID")
+
+        # PATCH account_type="cash" WITH clearing billing_day/due_day -> 200 OK
+        res_ok_type = self.client.patch(f"/api/v1/accounts/{cr2_id}", json={
+            "account_type": "cash",
+            "billing_day": None,
+            "due_day": None,
+            "row_version": cr2_row_v
+        }, headers=self.headers)
+        self.assertEqual(res_ok_type.status_code, 200)
+        self.assertEqual(res_ok_type.json()["account_type"], "cash")
+        self.assertIsNone(res_ok_type.json()["billing_day"])
+        self.assertIsNone(res_ok_type.json()["due_day"])
+
 
     def test_deactivate_account_soft_delete(self):
         res = self.client.post("/api/v1/accounts", json={

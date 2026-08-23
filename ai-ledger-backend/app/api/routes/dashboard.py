@@ -53,12 +53,15 @@ def get_investments(
     """
     Aggregates confirmed investment PnL periods for the household.
     """
+    fx_svc = getattr(router, "_reference_fx_service", None) or ReferenceFxService()
     return dashboard_service.get_investments_summary(
         conn=conn,
         household_id=device["household_id"],
         from_date=from_date,
-        to_date=to_date
+        to_date=to_date,
+        fx_service=fx_svc
     )
+
 
 @router.get("/account-freshness", summary="Dashboard Account Freshness")
 def get_account_freshness(

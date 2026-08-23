@@ -111,7 +111,7 @@ def create_account(
 
     if payload.linked_cash_account_id is not None:
         linked_acc = accounts_repo.get_account(conn, payload.linked_cash_account_id)
-        if not linked_acc or linked_acc["household_id"] != household_id or linked_acc["account_type"] != "cash":
+        if not linked_acc or linked_acc["household_id"] != household_id or linked_acc["account_type"] != "cash" or linked_acc["status"] != "active":
             raise LinkedAccountInvalidError("Linked cash account must be an active cash account in the same household.")
 
     if accounts_repo.check_account_name_exists(conn, household_id, payload.name):
@@ -145,9 +145,14 @@ def create_account(
             actor_device_id=device.get("device_id"),
             after_data={
                 "name": payload.name.strip(),
+                "institution": payload.institution.strip() if payload.institution else None,
                 "account_type": payload.account_type,
                 "currency": currency,
-                "institution": payload.institution
+                "owner_user_id": str(payload.owner_user_id) if payload.owner_user_id else None,
+                "linked_cash_account_id": str(payload.linked_cash_account_id) if payload.linked_cash_account_id else None,
+                "billing_day": payload.billing_day,
+                "due_day": payload.due_day,
+                "status": "active"
             }
         )
 
@@ -172,43 +177,80 @@ def patch_account(
     if existing["row_version"] != payload.row_version:
         raise RowVersionConflictError()
 
-    if payload.currency is not None and payload.currency.strip().upper() != existing["currency"]:
+    fields_set = payload.model_fields_set
+
+    # 1. Determine complete resulting state
+    if "name" in fields_set:
+        if payload.name is None or not payload.name.strip():
+            raise LinkedAccountInvalidError("Account name cannot be empty.")
+        new_name = payload.name.strip()
+    else:
+        new_name = existing["name"]
+
+    if "institution" in fields_set:
+        new_inst = payload.institution.strip() if (payload.institution is not None and isinstance(payload.institution, str)) else None
+    else:
+        new_inst = existing.get("institution")
+
+    if "owner_user_id" in fields_set:
+        new_owner = payload.owner_user_id
+    else:
+        new_owner = existing.get("owner_user_id")
+
+    if "linked_cash_account_id" in fields_set:
+        new_linked = payload.linked_cash_account_id
+    else:
+        new_linked = existing.get("linked_cash_account_id")
+
+    if "billing_day" in fields_set:
+        new_billing = payload.billing_day
+    else:
+        new_billing = existing.get("billing_day")
+
+    if "due_day" in fields_set:
+        new_due = payload.due_day
+    else:
+        new_due = existing.get("due_day")
+
+    if "account_type" in fields_set and payload.account_type is not None:
+        new_type = payload.account_type
+    else:
+        new_type = existing["account_type"]
+
+    if "currency" in fields_set and payload.currency is not None:
+        new_currency = validate_currency_code(payload.currency)
+    else:
+        new_currency = existing["currency"]
+
+    # 2. Validate complete resulting state
+    if new_currency != existing["currency"]:
         if accounts_repo.has_financial_history(conn, account_id):
             raise CurrencyImmutableError()
 
-    if payload.account_type is not None and payload.account_type != existing["account_type"]:
+    if new_type != existing["account_type"]:
         if accounts_repo.has_financial_history(conn, account_id):
             raise AccountTypeImmutableError()
 
-    target_type = payload.account_type or existing["account_type"]
-    if target_type != "credit":
-        if payload.billing_day is not None or payload.due_day is not None:
+    if new_type != "credit":
+        if new_billing is not None or new_due is not None:
             raise LinkedAccountInvalidError("Billing day and due day are only allowed on credit accounts.")
 
-    if payload.name is not None and payload.name.strip().lower() != existing["name"].lower():
-        if accounts_repo.check_account_name_exists(conn, household_id, payload.name, exclude_account_id=account_id):
-            raise AccountNameConflictError(payload.name)
+    if new_name.lower() != existing["name"].lower():
+        if accounts_repo.check_account_name_exists(conn, household_id, new_name, exclude_account_id=account_id):
+            raise AccountNameConflictError(new_name)
 
-    if payload.owner_user_id is not None and payload.owner_user_id != existing["owner_user_id"]:
-        if not accounts_repo.check_user_in_household(conn, payload.owner_user_id, household_id):
-            raise UserNotInHouseholdError(payload.owner_user_id)
+    if new_owner is not None and new_owner != existing.get("owner_user_id"):
+        if not accounts_repo.check_user_in_household(conn, new_owner, household_id):
+            raise UserNotInHouseholdError(new_owner)
 
-    if payload.linked_cash_account_id is not None:
-        if payload.linked_cash_account_id == account_id:
+    if new_linked is not None:
+        if new_linked == account_id:
             raise LinkedAccountInvalidError("An account cannot link to itself.")
-        linked_acc = accounts_repo.get_account(conn, payload.linked_cash_account_id)
-        if not linked_acc or linked_acc["household_id"] != household_id or linked_acc["account_type"] != "cash":
+        linked_acc = accounts_repo.get_account(conn, new_linked)
+        if not linked_acc or linked_acc["household_id"] != household_id or linked_acc["account_type"] != "cash" or linked_acc["status"] != "active":
             raise LinkedAccountInvalidError("Linked cash account must be an active cash account in the same household.")
 
     with transaction(conn):
-        new_name = payload.name.strip() if payload.name is not None else existing["name"]
-        new_inst = payload.institution.strip() if payload.institution is not None else existing["institution"]
-        new_owner = payload.owner_user_id if payload.owner_user_id is not None else existing["owner_user_id"]
-        new_linked = payload.linked_cash_account_id if "linked_cash_account_id" in payload.model_fields_set else existing["linked_cash_account_id"]
-        new_billing = payload.billing_day if "billing_day" in payload.model_fields_set else existing["billing_day"]
-        new_due = payload.due_day if "due_day" in payload.model_fields_set else existing["due_day"]
-        new_type = payload.account_type if payload.account_type is not None else existing["account_type"]
-
         updated = accounts_repo.update_account(
             conn=conn,
             account_id=account_id,
@@ -219,10 +261,34 @@ def patch_account(
             billing_day=new_billing,
             due_day=new_due,
             account_type=new_type,
+            currency=new_currency,
             expected_row_version=payload.row_version
         )
         if not updated:
             raise RowVersionConflictError()
+
+        before_data = {
+            "name": existing["name"],
+            "institution": existing.get("institution"),
+            "account_type": existing["account_type"],
+            "currency": existing["currency"],
+            "owner_user_id": str(existing["owner_user_id"]) if existing.get("owner_user_id") else None,
+            "linked_cash_account_id": str(existing["linked_cash_account_id"]) if existing.get("linked_cash_account_id") else None,
+            "billing_day": existing.get("billing_day"),
+            "due_day": existing.get("due_day"),
+            "status": existing["status"]
+        }
+        after_data = {
+            "name": updated["name"],
+            "institution": updated.get("institution"),
+            "account_type": updated["account_type"],
+            "currency": updated["currency"],
+            "owner_user_id": str(updated["owner_user_id"]) if updated.get("owner_user_id") else None,
+            "linked_cash_account_id": str(updated["linked_cash_account_id"]) if updated.get("linked_cash_account_id") else None,
+            "billing_day": updated.get("billing_day"),
+            "due_day": updated.get("due_day"),
+            "status": updated["status"]
+        }
 
         audit_repo.insert_audit_event(
             conn=conn,
@@ -233,12 +299,13 @@ def patch_account(
             action="update",
             actor_user_id=device.get("user_id"),
             actor_device_id=device.get("device_id"),
-            before_data={"name": existing["name"], "institution": existing["institution"], "status": existing["status"]},
-            after_data={"name": updated["name"], "institution": updated["institution"], "status": updated["status"]}
+            before_data=before_data,
+            after_data=after_data
         )
 
     acc = accounts_repo.get_account_with_state(conn, account_id, household_id)
     return _format_account(acc)
+
 
 @router.post("/{account_id}/deactivate", summary="Deactivate Account")
 def deactivate_account(

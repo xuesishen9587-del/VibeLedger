@@ -204,17 +204,20 @@ def get_investments_summary(
     conn,
     household_id: UUID,
     from_date: Optional[date] = None,
-    to_date: Optional[date] = None
+    to_date: Optional[date] = None,
+    fx_service: Optional[ReferenceFxService] = None
 ) -> Dict[str, Any]:
     """
     Reads and aggregates confirmed investment P&L for the household.
     Investment P&L remains strictly separate from cash income.
+    Converts multi-currency P&L items to the household reporting currency using Decimal FX.
     """
     household = get_household(conn, household_id)
     if not household:
         raise HouseholdMismatchError(f"Household {household_id} not found.")
 
     reporting_currency = household["reporting_currency"]
+    fx = fx_service or ReferenceFxService()
 
     query = """
         SELECT id, account_id, period_start, period_end,
@@ -243,7 +246,19 @@ def get_investments_summary(
     items = []
     for r in rows:
         pnl = parse_decimal(r[6])
-        total_pnl += pnl
+        curr = r[7]
+        period_end_date = r[3]
+
+        if curr == reporting_currency:
+            converted_pnl = pnl
+        else:
+            rate = fx.get_rate(curr, reporting_currency, as_of=period_end_date)
+            if rate is None or rate <= 0:
+                raise FxRateUnavailableError(f"Reference FX rate unavailable for {curr} -> {reporting_currency}")
+            converted_pnl = quantize_money(pnl * rate, reporting_currency)
+
+        total_pnl += converted_pnl
+
         items.append({
             "id": str(r[0]),
             "account_id": str(r[1]),
@@ -261,6 +276,7 @@ def get_investments_summary(
         "total_pnl": f"{quantize_money(total_pnl, reporting_currency):.2f}",
         "items": items
     }
+
 
 def get_account_freshness(
     conn,

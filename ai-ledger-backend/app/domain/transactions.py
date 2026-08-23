@@ -173,6 +173,10 @@ class LinkedAccountInvalidError(LedgerDomainError):
     def __init__(self, message: str = "Linked cash account must be an active cash account in the same household."):
         super().__init__(message, code="LINKED_ACCOUNT_INVALID")
 
+class InvalidCursorError(LedgerDomainError):
+    def __init__(self, message: str = "Invalid pagination cursor provided."):
+        super().__init__(message, code="INVALID_REQUEST")
+
 
 
 # --- Projection Calculation ---

@@ -482,6 +482,7 @@ def update_account(
     billing_day: Optional[int],
     due_day: Optional[int],
     account_type: Optional[str] = None,
+    currency: Optional[str] = None,
     expected_row_version: Optional[int] = None
 ) -> Optional[Dict[str, Any]]:
     """
@@ -497,13 +498,14 @@ def update_account(
                 billing_day = %s,
                 due_day = %s,
                 account_type = COALESCE(%s, account_type),
+                currency = COALESCE(%s, currency),
                 row_version = row_version + 1,
                 updated_at = now()
             WHERE id = %s
         """
         params = [
             name, institution, owner_user_id, linked_cash_account_id,
-            billing_day, due_day, account_type, account_id
+            billing_day, due_day, account_type, currency, account_id
         ]
         if expected_row_version is not None:
             query += " AND row_version = %s"
@@ -530,6 +532,7 @@ def update_account(
             "created_at": row[12],
             "updated_at": row[13]
         }
+
 
 def deactivate_account(
     conn,

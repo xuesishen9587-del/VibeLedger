@@ -1,7 +1,8 @@
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 from uuid import UUID
 from datetime import date, datetime
 from decimal import Decimal
+from app.domain.transactions import InvalidCursorError, LedgerDomainError
 
 def insert_transaction(conn, tx: Dict[str, Any]) -> None:
     """
@@ -287,10 +288,13 @@ def _decode_cursor(cursor_str: str) -> Tuple[date, datetime, UUID]:
         raw = base64.urlsafe_b64decode(cursor_str.encode("utf-8")).decode("utf-8")
         parts = raw.split("|")
         if len(parts) != 3:
-            raise ValueError("Invalid cursor format")
+            raise InvalidCursorError()
         return date.fromisoformat(parts[0]), datetime.fromisoformat(parts[1]), UUID(parts[2])
-    except Exception as e:
-        raise ValueError(f"Failed to decode cursor: {e}")
+    except LedgerDomainError:
+        raise
+    except Exception:
+        raise InvalidCursorError()
+
 
 def list_transactions_with_filters(
     conn,

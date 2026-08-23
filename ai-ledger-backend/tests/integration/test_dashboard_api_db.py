@@ -52,6 +52,15 @@ class TestDashboardApiDb(BaseDbTestCase):
         dashboard_router._reference_fx_service = self.mock_fx
 
         conn = get_connection(self.test_schema)
+        # Household B for cross-household isolation tests
+        self.household_b_id = uuid4()
+        self.user_b_id = uuid4()
+        self.device_b_id = uuid4()
+        self.raw_token_b = f"vbl_test_{uuid4().hex}"
+        self.token_b_hash = hashlib.sha256(self.raw_token_b.encode("utf-8")).digest()
+        self.headers_b = {"Authorization": f"Bearer {self.raw_token_b}"}
+
+        conn = get_connection(self.test_schema)
         try:
             with transaction(conn):
                 accounts_repo.create_household(conn, self.household_id, "Dashboard Household", date(2026, 1, 1), "CNY")
@@ -59,7 +68,11 @@ class TestDashboardApiDb(BaseDbTestCase):
                 accounts_repo.add_user_to_household(conn, self.household_id, self.user_id, role="owner")
                 devices_repo.create_device(conn, self.device_id, self.user_id, "Device D", self.token_hash)
 
-
+                # Setup Household B
+                accounts_repo.create_household(conn, self.household_b_id, "Household B", date(2026, 1, 1), "CNY")
+                accounts_repo.create_user(conn, self.user_b_id, "auth_dash_b", "User B", "user_b@dash.local", "CNY")
+                accounts_repo.add_user_to_household(conn, self.household_b_id, self.user_b_id, role="owner")
+                devices_repo.create_device(conn, self.device_b_id, self.user_b_id, "Device B", self.token_b_hash)
 
                 # Seed accounts
                 self.acc_cash_id = uuid4()
@@ -69,6 +82,10 @@ class TestDashboardApiDb(BaseDbTestCase):
                 self.acc_credit_id = uuid4()
                 accounts_repo.create_account(
                     conn, self.acc_credit_id, self.household_id, "CMB Credit", "credit", "CNY", billing_day=5, due_day=25
+                )
+                self.acc_credit_no_snap_id = uuid4()
+                accounts_repo.create_account(
+                    conn, self.acc_credit_no_snap_id, self.household_id, "BOC Credit No Snap", "credit", "CNY", billing_day=10, due_day=30
                 )
                 self.acc_usd_id = uuid4()
                 accounts_repo.create_account(
@@ -129,14 +146,17 @@ class TestDashboardApiDb(BaseDbTestCase):
                         )
                     )
 
-                    # Seed investment pnl period
+                    # Seed multi-currency investment pnl periods:
+                    # Row 1: 100.00 CNY
+                    # Row 2: 100.00 USD (at rate 7.20 -> 720.00 CNY)
+                    # Expected total_pnl: 100 + 720 = 820.00 CNY
                     snap_open_id = uuid4()
                     snap_close_id = uuid4()
                     cur.execute(
                         """
                         INSERT INTO account_snapshots (id, household_id, account_id, as_of, balance, currency, snapshot_type, source)
                         VALUES (%s, %s, %s, %s, 100000.00, 'CNY', 'investment_valuation', 'statement'),
-                               (%s, %s, %s, %s, 105000.00, 'CNY', 'investment_valuation', 'statement');
+                               (%s, %s, %s, %s, 100100.00, 'CNY', 'investment_valuation', 'statement');
                         """,
                         (
                             snap_open_id, self.household_id, self.acc_cash_id, now_utc - timedelta(days=30),
@@ -152,12 +172,18 @@ class TestDashboardApiDb(BaseDbTestCase):
                         ) VALUES (
                             gen_random_uuid(), %s, %s, %s, %s,
                             %s, %s, 0.00, 0.00,
-                            5000.00, 'CNY', 'confirmed'
+                            100.00, 'CNY', 'confirmed'
+                        ), (
+                            gen_random_uuid(), %s, %s, %s, %s,
+                            %s, %s, 0.00, 0.00,
+                            100.00, 'USD', 'confirmed'
                         );
                         """,
                         (
                             self.household_id, self.acc_cash_id, snap_open_id, snap_close_id,
-                            now_utc - timedelta(days=30), now_utc
+                            date(2026, 8, 1), date(2026, 8, 30),
+                            self.household_id, self.acc_usd_id, snap_open_id, snap_close_id,
+                            date(2026, 8, 1), date(2026, 8, 30)
                         )
                     )
 
@@ -260,11 +286,11 @@ class TestDashboardApiDb(BaseDbTestCase):
         self.assertEqual(data["net_worth"], "56400.00")
 
         # Freshness:
-        # Accounts: 3 total
-        # <= 30d: ICBC Checking (5d) -> 1/3 = 0.3333
-        # <= 90d: ICBC Checking (5d), CMB Credit (45d) -> 2/3 = 0.6667
-        self.assertEqual(data["data_freshness"]["confirmed_within_30d_ratio"], "0.3333")
-        self.assertEqual(data["data_freshness"]["confirmed_within_90d_ratio"], "0.6667")
+        # Accounts: 4 total (ICBC Checking, CMB Credit, BOC Credit No Snap, Chase USD)
+        # <= 30d: ICBC Checking (5d) -> 1/4 = 0.2500
+        # <= 90d: ICBC Checking (5d), CMB Credit (45d) -> 2/4 = 0.5000
+        self.assertEqual(data["data_freshness"]["confirmed_within_30d_ratio"], "0.2500")
+        self.assertEqual(data["data_freshness"]["confirmed_within_90d_ratio"], "0.5000")
 
     def test_dashboard_cash_flow_endpoint(self):
         res = self.client.get("/api/v1/dashboard/cash-flow?from=2026-08-01&to=2026-08-31", headers=self.headers)
@@ -283,13 +309,17 @@ class TestDashboardApiDb(BaseDbTestCase):
         self.assertEqual(data["reporting_currency"], "CNY")
 
     def test_dashboard_investments_endpoint(self):
-        res = self.client.get("/api/v1/dashboard/investments?from=2026-01-01&to=2026-12-31", headers=self.headers)
+        res = self.client.get("/api/v1/dashboard/investments?from=2026-08-01&to=2026-08-31", headers=self.headers)
         self.assertEqual(res.status_code, 200)
         data = res.json()
         self.assertEqual(data["reporting_currency"], "CNY")
-        self.assertEqual(data["total_pnl"], "5000.00")
-        self.assertEqual(len(data["items"]), 1)
-        self.assertEqual(data["items"][0]["pnl_amount"], "5000.00")
+        # 100.00 CNY + 100.00 USD * 7.20 = 820.00 CNY
+        self.assertEqual(data["total_pnl"], "820.00")
+        self.assertEqual(len(data["items"]), 2)
+
+        items_by_curr = {it["currency"]: it for it in data["items"]}
+        self.assertEqual(items_by_curr["CNY"]["pnl_amount"], "100.00")
+        self.assertEqual(items_by_curr["USD"]["pnl_amount"], "100.00")
 
     def test_dashboard_account_freshness_endpoint(self):
         res = self.client.get("/api/v1/dashboard/account-freshness", headers=self.headers)
@@ -307,7 +337,7 @@ class TestDashboardApiDb(BaseDbTestCase):
         self.assertGreaterEqual(items["Chase USD"]["age_days"], 115)
 
     def test_credit_card_state_endpoint(self):
-        # 1. Successful state retrieval for credit card account
+        # 1. Successful state retrieval for credit card account with snapshot
         res = self.client.get(f"/api/v1/credit-cards/{self.acc_credit_id}/state", headers=self.headers)
         self.assertEqual(res.status_code, 200)
         data = res.json()
@@ -319,12 +349,33 @@ class TestDashboardApiDb(BaseDbTestCase):
         self.assertEqual(data["latest_snapshot"]["unbilled_balance"], "2500.00")
         self.assertEqual(data["latest_snapshot"]["current_outstanding"], "10500.00")
 
-        # 2. Reject non-credit accounts -> 422
+        # 2. Credit card with NO snapshot returns latest_snapshot=null
+        res_no_snap = self.client.get(f"/api/v1/credit-cards/{self.acc_credit_no_snap_id}/state", headers=self.headers)
+        self.assertEqual(res_no_snap.status_code, 200)
+        data_no_snap = res_no_snap.json()
+        self.assertEqual(data_no_snap["account_id"], str(self.acc_credit_no_snap_id))
+        self.assertIsNone(data_no_snap["latest_snapshot"])
+
+        # 3. Cross-household isolation: Household B device cannot read Household A card state -> 404
+        res_iso = self.client.get(f"/api/v1/credit-cards/{self.acc_credit_id}/state", headers=self.headers_b)
+        self.assertEqual(res_iso.status_code, 404)
+        self.assertEqual(res_iso.json()["error"]["code"], "ACCOUNT_NOT_FOUND")
+
+        # 4. Reject non-credit accounts -> 422
         res_bad = self.client.get(f"/api/v1/credit-cards/{self.acc_cash_id}/state", headers=self.headers)
         self.assertEqual(res_bad.status_code, 422)
         self.assertEqual(res_bad.json()["error"]["code"], "ACCOUNT_TYPE_MISMATCH")
 
     def test_installments_read_endpoints(self):
+        # Count transactions before
+        conn = get_connection(self.test_schema)
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT count(*) FROM transactions WHERE household_id = %s;", (self.household_id,))
+                tx_count_before = cur.fetchone()[0]
+        finally:
+            conn.close()
+
         # 1. List installment plans
         res_list = self.client.get("/api/v1/installments", headers=self.headers)
         self.assertEqual(res_list.status_code, 200)
@@ -345,5 +396,21 @@ class TestDashboardApiDb(BaseDbTestCase):
         self.assertEqual(plan_data["periods"][0]["scheduled_amount"], "1000.00")
         self.assertEqual(plan_data["periods"][0]["status"], "scheduled")
 
+        # 3. Cross-household isolation: Household B device cannot read Household A installment plan -> 404
+        res_iso_plan = self.client.get(f"/api/v1/installments/{self.plan_id}", headers=self.headers_b)
+        self.assertEqual(res_iso_plan.status_code, 404)
+        self.assertEqual(res_iso_plan.json()["error"]["code"], "INSTALLMENT_PLAN_NOT_FOUND")
+
+        # 4. Verify no new transactions were created by the read API
+        conn = get_connection(self.test_schema)
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT count(*) FROM transactions WHERE household_id = %s;", (self.household_id,))
+                tx_count_after = cur.fetchone()[0]
+                self.assertEqual(tx_count_before, tx_count_after)
+        finally:
+            conn.close()
+
 if __name__ == "__main__":
     unittest.main()
+

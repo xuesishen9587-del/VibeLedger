@@ -1199,5 +1199,284 @@ class TestSnapshotReconciliationApiDb(BaseDbTestCase):
         self.assertEqual(res_proc.status_code, 422)
         self.assertEqual(res_proc.json()["error"]["code"], "INVALID_REQUEST")
 
+    def test_24_unchanged_reviewed_large_residual_commit_succeeds(self):
+        """
+        Case A: Unchanged reviewed large residual (>200 CNY):
+        reviewed = 500
+        fresh = 500
+        Explicit commit succeeds, creates adjustment = 500.
+        """
+        # Baseline
+        self.client.post(f"/api/v1/accounts/{self.acc_cny_id}/snapshots", json={
+            "idempotency_key": "snap_key_base_024",
+            "as_of": "2026-09-01T10:00:00+08:00",
+            "balance": "1000.00",
+            "currency": "CNY"
+        }, headers=self.headers)
+
+        # Submit snapshot with balance = 1500 (residual = 500 > 200 -> needs_review)
+        res_sub = self.client.post(f"/api/v1/accounts/{self.acc_cny_id}/snapshots", json={
+            "idempotency_key": "snap_key_rev_024",
+            "as_of": "2026-09-10T10:00:00+08:00",
+            "balance": "1500.00",
+            "currency": "CNY"
+        }, headers=self.headers)
+        self.assertEqual(res_sub.status_code, 200)
+        batch_id = res_sub.json()["batch_id"]
+
+        # Commit without any intervening transactions (fresh = 500 == reviewed = 500)
+        res_commit = self.client.post(f"/api/v1/reconciliation-batches/{batch_id}/commit", headers=self.headers)
+        self.assertEqual(res_commit.status_code, 200)
+        data_commit = res_commit.json()
+        self.assertEqual(data_commit["status"], "committed")
+        self.assertEqual(data_commit["residual_amount"], "500.00")
+        self.assertIsNotNone(data_commit["adjustment_transaction_id"])
+        self.assertIsNotNone(data_commit["snapshot_id"])
+
+        conn = get_connection(self.test_schema)
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT ledger_balance FROM account_state WHERE account_id = %s;", (self.acc_cny_id,))
+                self.assertEqual(cur.fetchone()[0], Decimal("1500.00"))
+                cur.execute("SELECT status FROM reconciliation_candidates WHERE batch_id = %s;", (batch_id,))
+                self.assertEqual(cur.fetchone()[0], "applied")
+        finally:
+            conn.close()
+
+    def test_25_stale_reviewed_amount_becomes_another_large_amount_returns_needs_review(self):
+        """
+        Case C: Stale reviewed amount becomes another large amount (>200 CNY):
+        reviewed = 500
+        concurrent ledger change (expense of 400 on 2026-09-05) makes fresh residual = 900
+        Expected:
+        - Response status = 'needs_review'
+        - Batch remains 'needs_review'
+        - Candidate payload = 900.00
+        - Candidate status = 'needs_review'
+        - Zero new authoritative Snapshot
+        - Zero reconciliation adjustment
+        - account_state remains pre-reconciliation value (600.00)
+        
+        Then user calls commit again (reviewed = 900 == fresh = 900):
+        - Commit succeeds
+        - Adjustment = 900.00
+        - One snapshot created
+        - Candidate applied
+        """
+        # Baseline = 1000.00
+        self.client.post(f"/api/v1/accounts/{self.acc_cny_id}/snapshots", json={
+            "idempotency_key": "snap_key_base_025",
+            "as_of": "2026-09-01T10:00:00+08:00",
+            "balance": "1000.00",
+            "currency": "CNY"
+        }, headers=self.headers)
+
+        # Submit snapshot = 1500.00 (residual = 500)
+        res_sub = self.client.post(f"/api/v1/accounts/{self.acc_cny_id}/snapshots", json={
+            "idempotency_key": "snap_key_rev_025",
+            "as_of": "2026-09-10T10:00:00+08:00",
+            "balance": "1500.00",
+            "currency": "CNY"
+        }, headers=self.headers)
+        batch_id = res_sub.json()["batch_id"]
+
+        # Concurrent expense of 400 arrives on 2026-09-05: projected becomes 600, fresh residual becomes 1500 - 600 = 900
+        conn = get_connection(self.test_schema)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO transactions (
+                        id, household_id, transaction_type, occurred_on, original_amount, original_currency,
+                        from_amount, from_currency, from_account_id, status, source
+                    ) VALUES (
+                        gen_random_uuid(), %s, 'expense', '2026-09-05', 400.00, 'CNY',
+                        400.00, 'CNY', %s, 'committed', 'shortcut'
+                    );
+                    UPDATE account_state SET ledger_balance = 600.00 WHERE account_id = %s;
+                    """,
+                    (self.household_id, self.acc_cny_id, self.acc_cny_id)
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+        # Commit call: fresh residual (900) != reviewed residual (500) and 900 > 200
+        res_commit_1 = self.client.post(f"/api/v1/reconciliation-batches/{batch_id}/commit", headers=self.headers)
+        self.assertEqual(res_commit_1.status_code, 200)
+        data_1 = res_commit_1.json()
+        self.assertEqual(data_1["status"], "needs_review")
+        self.assertEqual(data_1["residual_amount"], "900.00")
+
+        # Verify DB state: zero snapshots, zero adjustment transactions, candidate updated to 900 and needs_review
+        conn = get_connection(self.test_schema)
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT count(*) FROM account_snapshots WHERE reconciliation_batch_id = %s;", (batch_id,))
+                self.assertEqual(cur.fetchone()[0], 0)
+
+                cur.execute(
+                    "SELECT count(*) FROM transactions WHERE (from_account_id = %s OR to_account_id = %s) AND transaction_type = 'reconciliation_adjustment';",
+                    (self.acc_cny_id, self.acc_cny_id)
+                )
+                self.assertEqual(cur.fetchone()[0], 0)
+
+                cur.execute("SELECT ledger_balance FROM account_state WHERE account_id = %s;", (self.acc_cny_id,))
+                self.assertEqual(cur.fetchone()[0], Decimal("600.00"))
+
+                cur.execute("SELECT status, payload FROM reconciliation_candidates WHERE batch_id = %s;", (batch_id,))
+                c_row = cur.fetchone()
+                self.assertEqual(c_row[0], "needs_review")
+                c_payload = c_row[1]
+                if isinstance(c_payload, str):
+                    import json
+                    c_payload = json.loads(c_payload)
+                self.assertEqual(c_payload["adjustment_amount"], "900.00")
+
+                cur.execute("SELECT status, residual_amount FROM reconciliation_batches WHERE id = %s;", (batch_id,))
+                b_row = cur.fetchone()
+                self.assertEqual(b_row[0], "needs_review")
+                self.assertEqual(b_row[1], Decimal("900.00"))
+        finally:
+            conn.close()
+
+        # Second commit call (user has effectively reloaded/reviewed the candidate at 900.00):
+        # Now reviewed = 900 == fresh = 900 -> Case A -> commit succeeds!
+        res_commit_2 = self.client.post(f"/api/v1/reconciliation-batches/{batch_id}/commit", headers=self.headers)
+        self.assertEqual(res_commit_2.status_code, 200)
+        data_2 = res_commit_2.json()
+        self.assertEqual(data_2["status"], "committed")
+        self.assertEqual(data_2["residual_amount"], "900.00")
+        self.assertIsNotNone(data_2["adjustment_transaction_id"])
+        self.assertIsNotNone(data_2["snapshot_id"])
+
+        conn = get_connection(self.test_schema)
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT ledger_balance FROM account_state WHERE account_id = %s;", (self.acc_cny_id,))
+                self.assertEqual(cur.fetchone()[0], Decimal("1500.00"))
+                cur.execute("SELECT status FROM reconciliation_candidates WHERE batch_id = %s;", (batch_id,))
+                self.assertEqual(cur.fetchone()[0], "applied")
+        finally:
+            conn.close()
+
+    def test_26_stale_reviewed_residual_becomes_zero_commits_snapshot_without_adjustment(self):
+        """
+        Case D: Stale reviewed residual becomes zero:
+        reviewed = 500
+        concurrent transaction adds 500 -> fresh residual = 0
+        Commit succeeds -> snapshot created, no adjustment transaction.
+        """
+        # Baseline = 1000.00
+        self.client.post(f"/api/v1/accounts/{self.acc_cny_id}/snapshots", json={
+            "idempotency_key": "snap_key_base_026",
+            "as_of": "2026-09-01T10:00:00+08:00",
+            "balance": "1000.00",
+            "currency": "CNY"
+        }, headers=self.headers)
+
+        # Submit snapshot = 1500.00 (residual = 500)
+        res_sub = self.client.post(f"/api/v1/accounts/{self.acc_cny_id}/snapshots", json={
+            "idempotency_key": "snap_key_rev_026",
+            "as_of": "2026-09-10T10:00:00+08:00",
+            "balance": "1500.00",
+            "currency": "CNY"
+        }, headers=self.headers)
+        batch_id = res_sub.json()["batch_id"]
+
+        # Concurrent income of +500 arrives on 2026-09-05: projected becomes 1500, fresh residual becomes 0
+        conn = get_connection(self.test_schema)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO transactions (
+                        id, household_id, transaction_type, occurred_on, original_amount, original_currency,
+                        to_amount, to_currency, to_account_id, status, source
+                    ) VALUES (
+                        gen_random_uuid(), %s, 'cash_income', '2026-09-05', 500.00, 'CNY',
+                        500.00, 'CNY', %s, 'committed', 'shortcut'
+                    );
+                    UPDATE account_state SET ledger_balance = 1500.00 WHERE account_id = %s;
+                    """,
+                    (self.household_id, self.acc_cny_id, self.acc_cny_id)
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+        # Commit
+        res_commit = self.client.post(f"/api/v1/reconciliation-batches/{batch_id}/commit", headers=self.headers)
+        self.assertEqual(res_commit.status_code, 200)
+        data_commit = res_commit.json()
+        self.assertEqual(data_commit["status"], "committed")
+        self.assertEqual(data_commit["residual_amount"], "0.00")
+        self.assertIsNone(data_commit["adjustment_transaction_id"])
+        self.assertIsNotNone(data_commit["snapshot_id"])
+
+        conn = get_connection(self.test_schema)
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT ledger_balance FROM account_state WHERE account_id = %s;", (self.acc_cny_id,))
+                self.assertEqual(cur.fetchone()[0], Decimal("1500.00"))
+                cur.execute("SELECT count(*) FROM account_snapshots WHERE reconciliation_batch_id = %s;", (batch_id,))
+                self.assertEqual(cur.fetchone()[0], 1)
+        finally:
+            conn.close()
+
+    def test_27_non_cny_stale_residual_threshold_uses_cny(self):
+        """
+        Non-CNY stale residual: threshold uses CNY conversion:
+        USD account, USD/CNY = 7.20.
+        Baseline = 100 USD.
+        Submit snapshot = 150 USD (residual = 50 USD = 360 CNY -> needs_review).
+        Concurrent income of 20 USD arrives -> fresh residual = 30 USD = 216 CNY (> 200 CNY).
+        Commit call -> fresh 30 USD != reviewed 50 USD and 216 CNY > 200 CNY -> returns needs_review!
+        """
+        # Baseline = 100 USD
+        self.client.post(f"/api/v1/accounts/{self.acc_usd_id}/snapshots", json={
+            "idempotency_key": "snap_usd_base_027",
+            "as_of": "2026-09-01T10:00:00+08:00",
+            "balance": "100.00",
+            "currency": "USD"
+        }, headers=self.headers)
+
+        # Snapshot = 150 USD (residual = 50 USD)
+        res_sub = self.client.post(f"/api/v1/accounts/{self.acc_usd_id}/snapshots", json={
+            "idempotency_key": "snap_usd_rev_027",
+            "as_of": "2026-09-10T10:00:00+08:00",
+            "balance": "150.00",
+            "currency": "USD"
+        }, headers=self.headers)
+        batch_id = res_sub.json()["batch_id"]
+
+        # Concurrent income of 20 USD arrives -> fresh projected = 120 USD, fresh residual = 30 USD (216 CNY > 200 CNY)
+        conn = get_connection(self.test_schema)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO transactions (
+                        id, household_id, transaction_type, occurred_on, original_amount, original_currency,
+                        to_amount, to_currency, to_account_id, status, source
+                    ) VALUES (
+                        gen_random_uuid(), %s, 'cash_income', '2026-09-05', 20.00, 'USD',
+                        20.00, 'USD', %s, 'committed', 'shortcut'
+                    );
+                    UPDATE account_state SET ledger_balance = 120.00 WHERE account_id = %s;
+                    """,
+                    (self.household_id, self.acc_usd_id, self.acc_usd_id)
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+        # Commit: 30 USD != 50 USD and 30*7.2 = 216 CNY > 200 CNY -> needs_review
+        res_commit = self.client.post(f"/api/v1/reconciliation-batches/{batch_id}/commit", headers=self.headers)
+        self.assertEqual(res_commit.status_code, 200)
+        data = res_commit.json()
+        self.assertEqual(data["status"], "needs_review")
+        self.assertEqual(data["residual_amount"], "30.00")
+
 if __name__ == "__main__":
     unittest.main()

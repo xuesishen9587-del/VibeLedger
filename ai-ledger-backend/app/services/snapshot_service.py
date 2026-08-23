@@ -1057,8 +1057,87 @@ def commit_reconciliation_batch(
     else:
         # Recompute fresh projected balance and residual under lock
         projected_balance = ledger_balance_as_of(conn, batch["account_id"], as_of_dt)
-        residual = quantize_money(auth_balance - projected_balance, curr)
+        fresh_residual = quantize_money(auth_balance - projected_balance, curr)
 
+        if fx_service is None:
+            fx_service = ReferenceFxService()
+
+        # Threshold decision ALWAYS uses CNY
+        if curr == "CNY":
+            fresh_residual_cny = fresh_residual
+        else:
+            fx_rate_cny = fx_service.get_rate(curr, "CNY", as_of=as_of_date)
+            fresh_residual_cny = quantize_money(fresh_residual * fx_rate_cny, "CNY")
+
+        # Find reviewed candidate residual amount
+        reviewed_residual = None
+        for c in candidates:
+            if isinstance(c.get("payload"), dict) and "adjustment_amount" in c["payload"]:
+                try:
+                    reviewed_residual = quantize_money(parse_decimal(c["payload"]["adjustment_amount"]), curr)
+                    break
+                except Exception:
+                    pass
+
+        if reviewed_residual is None and batch["residual_amount"] is not None:
+            reviewed_residual = quantize_money(batch["residual_amount"], curr)
+
+        # Check stale review condition:
+        # Case A: fresh_residual == reviewed_residual (user explicitly reviewed this exact amount -> commit allowed)
+        # Case B: fresh_residual != reviewed_residual but abs(fresh_residual_cny) <= 200 (within safe auto-adjustment -> commit allowed)
+        # Case D: fresh_residual == 0 (no adjustment -> commit allowed)
+        # Case C: fresh_residual != reviewed_residual AND abs(fresh_residual_cny) > 200 (stale review with large residual -> reject commit & return needs_review)
+        is_exact_reviewed = (reviewed_residual is not None and fresh_residual == reviewed_residual)
+        is_auto_safe = (abs(fresh_residual_cny) <= Decimal("200.00"))
+
+        if not is_exact_reviewed and not is_auto_safe:
+            # Case C: Stale reviewed amount changed and exceeds 200 CNY. Refuse commit, refresh state to needs_review.
+            for c in candidates:
+                refreshed_payload = {
+                    "adjustment_amount": str(fresh_residual),
+                    "currency": curr,
+                    "occurred_on": as_of_date.isoformat(),
+                    "as_of": as_of_dt.isoformat(),
+                    "source": source
+                }
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        UPDATE reconciliation_candidates
+                        SET payload = %s::jsonb,
+                            status = 'needs_review',
+                            updated_at = now()
+                        WHERE id = %s;
+                        """,
+                        (json.dumps(refreshed_payload), c["id"])
+                    )
+
+            reconciliation_repo.update_reconciliation_batch(
+                conn=conn,
+                batch_id=batch_id,
+                status="needs_review",
+                residual_amount=fresh_residual,
+                adjustment_amount=None
+            )
+
+            curr_sym = "¥" if curr == "CNY" else f"{curr} "
+            display_summary = f"账户实际余额与账本相差 {curr_sym}{abs(fresh_residual):,.2f}"
+            needs_review_resp = {
+                "status": "needs_review",
+                "batch_id": str(batch_id),
+                "residual_amount": str(fresh_residual),
+                "display_summary": display_summary
+            }
+            if batch["source_request_id"]:
+                ingestion_repo.update_ingestion_request_status(
+                    conn=conn,
+                    request_id=batch["source_request_id"],
+                    status="needs_confirmation",
+                    draft_payload=needs_review_resp
+                )
+            return needs_review_resp
+
+        residual = fresh_residual
         if residual != Decimal("0.00"):
             adj_tx_id = uuid4()
             if residual > 0:
@@ -1067,9 +1146,6 @@ def commit_reconciliation_batch(
             else:
                 from_amt, from_curr, from_acc = abs(residual), curr, batch["account_id"]
                 to_amt, to_curr, to_acc = None, None, None
-
-            if fx_service is None:
-                fx_service = ReferenceFxService()
 
             if curr == reporting_currency:
                 rep_amt = abs(residual)

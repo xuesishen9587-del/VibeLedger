@@ -93,7 +93,9 @@ def create_transaction(
     reporting_currency: Optional[str] = None,
     source: str = "shortcut",
     status: str = "committed",
-    verification_status: str = "unverified"
+    verification_status: str = "unverified",
+    statement_batch_id: Optional[UUID] = None,
+    posted_on: Optional[date] = None
 ) -> None:
 
     insert_transaction(conn, {
@@ -101,6 +103,7 @@ def create_transaction(
         "household_id": household_id,
         "transaction_type": transaction_type,
         "occurred_on": occurred_on,
+        "posted_on": posted_on,
         "original_amount": original_amount,
         "original_currency": original_currency,
         "from_amount": from_amount,
@@ -117,8 +120,10 @@ def create_transaction(
         "reporting_currency": reporting_currency,
         "source": source,
         "status": status,
-        "verification_status": verification_status
+        "verification_status": verification_status,
+        "statement_batch_id": statement_batch_id
     })
+
 
 def _map_transaction_row(row) -> Dict[str, Any]:
 
@@ -276,6 +281,33 @@ def mark_transaction_voided(
             """,
             (delete_reason, deleted_by_user_id, transaction_id)
         )
+
+def update_transaction_statement_confirmed(
+    conn,
+    transaction_id: UUID,
+    posted_on: Optional[date] = None,
+    account_leg_status: Optional[str] = None,
+    from_amount: Optional[Decimal] = None,
+    to_amount: Optional[Decimal] = None,
+    statement_batch_id: Optional[UUID] = None
+) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE transactions
+            SET verification_status = 'statement_confirmed',
+                posted_on = COALESCE(%s, posted_on),
+                account_leg_status = COALESCE(%s, account_leg_status),
+                from_amount = COALESCE(%s, from_amount),
+                to_amount = COALESCE(%s, to_amount),
+                statement_batch_id = COALESCE(%s, statement_batch_id),
+                row_version = row_version + 1,
+                updated_at = now()
+            WHERE id = %s;
+            """,
+            (posted_on, account_leg_status, from_amount, to_amount, statement_batch_id, transaction_id)
+        )
+
 
 import base64
 

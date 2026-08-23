@@ -212,3 +212,110 @@ def list_installment_plans(conn, household_id: UUID) -> List[Dict[str, Any]]:
             "updated_at": r[14]
         } for r in rows]
 
+def update_installment_period_billed(
+    conn,
+    period_id: UUID,
+    expense_transaction_id: UUID,
+    statement_line_id: Optional[UUID] = None
+) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE installment_periods
+            SET status = 'billed',
+                expense_transaction_id = %s,
+                statement_line_id = %s,
+                updated_at = now()
+            WHERE id = %s;
+            """,
+            (expense_transaction_id, statement_line_id, period_id)
+        )
+
+def update_installment_period_billed_atomic(
+    conn,
+    period_id: UUID,
+    expense_transaction_id: UUID,
+    statement_line_id: Optional[UUID] = None
+) -> bool:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE installment_periods
+            SET status = 'billed',
+                expense_transaction_id = %s,
+                statement_line_id = %s,
+                updated_at = now()
+            WHERE id = %s AND status = 'scheduled'
+            RETURNING id;
+            """,
+            (expense_transaction_id, statement_line_id, period_id)
+        )
+        row = cur.fetchone()
+        return row is not None
+
+
+def update_installment_plan_status(
+    conn,
+    plan_id: UUID,
+    status: str
+) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE installment_plans
+            SET status = %s,
+                updated_at = now()
+            WHERE id = %s;
+            """,
+            (status, plan_id)
+        )
+
+
+def update_installment_plan_first_statement_month_and_status(
+    conn,
+    plan_id: UUID,
+    status: str,
+    first_statement_month: date
+) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE installment_plans
+            SET status = %s,
+                first_statement_month = COALESCE(first_statement_month, %s),
+                updated_at = now()
+            WHERE id = %s;
+            """,
+            (status, first_statement_month, plan_id)
+        )
+
+
+def populate_scheduled_period_recognition_months(
+    conn,
+    plan_id: UUID,
+    first_statement_month: date
+) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT id, period_no FROM installment_periods
+            WHERE plan_id = %s AND recognition_month IS NULL;
+            """,
+            (plan_id,)
+        )
+        periods = cur.fetchall()
+        for pid, pno in periods:
+            tot_m = first_statement_month.year * 12 + (first_statement_month.month - 1) + (pno - 1)
+            rec_y = tot_m // 12
+            rec_m = (tot_m % 12) + 1
+            rec_date = date(rec_y, rec_m, 1)
+            cur.execute(
+                """
+                UPDATE installment_periods
+                SET recognition_month = %s, updated_at = now()
+                WHERE id = %s;
+                """,
+                (rec_date, pid)
+            )
+
+

@@ -26,7 +26,21 @@ from app.domain.transactions import (
     GeminiDependencyError,
     InvalidRequestStateError,
     InvalidPaymentModeError,
-    InvalidInstallmentPeriodsError
+    ResourceNotFoundError,
+    AccountResourceNotFoundError,
+    CategoryResourceNotFoundError,
+    TransactionResourceNotFoundError,
+    InstallmentPlanResourceNotFoundError,
+    AliasResourceNotFoundError,
+    RowVersionConflictError,
+    AccountNameConflictError,
+    CategoryNameConflictError,
+    AccountAliasConflictError,
+    AccountTypeMismatchError,
+    CurrencyImmutableError,
+    AccountTypeImmutableError,
+    UserNotInHouseholdError,
+    LinkedAccountInvalidError
 )
 
 def build_error_response(
@@ -58,11 +72,11 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
     )
 
 async def ledger_domain_exception_handler(request: Request, exc: LedgerDomainError) -> JSONResponse:
-    if isinstance(exc, IdempotencyKeyReuseError):
+    if isinstance(exc, (IdempotencyKeyReuseError, RowVersionConflictError)):
         return build_error_response(409, exc.code, exc.message, retryable=False)
 
-    if isinstance(exc, RequestNotFoundError):
-        return build_error_response(404, exc.code, exc.message, retryable=True)
+    if isinstance(exc, (RequestNotFoundError, ResourceNotFoundError)):
+        return build_error_response(404, exc.code, exc.message, retryable=(isinstance(exc, RequestNotFoundError)))
 
     if isinstance(exc, (DeviceAuthenticationError, DeviceRevokedError)):
         return build_error_response(401, exc.code, exc.message, retryable=False)
@@ -74,10 +88,15 @@ async def ledger_domain_exception_handler(request: Request, exc: LedgerDomainErr
         return build_error_response(503, exc.code, exc.message, retryable=True)
 
     if isinstance(exc, (AccountNotFoundError, CategoryNotFoundError, TransactionNotFoundError)):
+
+        return build_error_response(422, exc.code, exc.message, retryable=False)
+
+    if isinstance(exc, (AccountNameConflictError, CategoryNameConflictError, AccountAliasConflictError)):
         return build_error_response(422, exc.code, exc.message, retryable=False)
 
     # All other domain validation errors are 422 Unprocessable Entity
     return build_error_response(422, exc.code, exc.message, retryable=False)
+
 
 async def http_exception_handler(request: Request, exc: HTTPException) -> JSONResponse:
     if isinstance(exc.detail, dict) and "error" in exc.detail:

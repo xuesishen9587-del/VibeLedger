@@ -736,6 +736,48 @@ def update_account_state_projection(
             (new_balance, last_transaction_at, initialized_at, account_id)
         )
 
+def update_account_state_after_reconciliation(
+    conn,
+    account_id: UUID,
+    new_balance: Decimal,
+    snapshot_as_of: datetime,
+    last_transaction_at: Optional[datetime] = None
+) -> None:
+    """
+    Updates the derived ledger balance projection and last_authoritative_snapshot_at after reconciliation commit.
+    Guarantees last_authoritative_snapshot_at is never moved backwards, sets initialized_at on first authoritative baseline,
+    and updates last_transaction_at coherently.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE account_state
+            SET ledger_balance = %s,
+                last_authoritative_snapshot_at = CASE
+                    WHEN last_authoritative_snapshot_at IS NULL THEN %s
+                    WHEN %s > last_authoritative_snapshot_at THEN %s
+                    ELSE last_authoritative_snapshot_at
+                END,
+                initialized_at = COALESCE(initialized_at, %s),
+                last_transaction_at = CASE
+                    WHEN %s IS NULL THEN last_transaction_at
+                    WHEN last_transaction_at IS NULL THEN %s
+                    WHEN %s > last_transaction_at THEN %s
+                    ELSE last_transaction_at
+                END,
+                row_version = row_version + 1,
+                updated_at = now()
+            WHERE account_id = %s;
+            """,
+            (
+                new_balance,
+                snapshot_as_of, snapshot_as_of, snapshot_as_of,
+                snapshot_as_of,
+                last_transaction_at, last_transaction_at, last_transaction_at, last_transaction_at,
+                account_id
+            )
+        )
+
 # --- Aliases & Categories ---
 
 def create_account_alias(

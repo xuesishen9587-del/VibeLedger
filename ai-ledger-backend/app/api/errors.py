@@ -40,7 +40,12 @@ from app.domain.transactions import (
     CurrencyImmutableError,
     AccountTypeImmutableError,
     UserNotInHouseholdError,
-    LinkedAccountInvalidError
+    LinkedAccountInvalidError,
+    BatchResourceNotFoundError,
+    BatchNotFoundError,
+    BatchVersionConflictError,
+    InvalidSnapshotError,
+    InvalidBatchStateError
 )
 
 def build_error_response(
@@ -72,6 +77,9 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
     )
 
 async def ledger_domain_exception_handler(request: Request, exc: LedgerDomainError) -> JSONResponse:
+    if isinstance(exc, BatchVersionConflictError):
+        return build_error_response(409, exc.code, exc.message, retryable=True)
+
     if isinstance(exc, (IdempotencyKeyReuseError, RowVersionConflictError)):
         return build_error_response(409, exc.code, exc.message, retryable=False)
 

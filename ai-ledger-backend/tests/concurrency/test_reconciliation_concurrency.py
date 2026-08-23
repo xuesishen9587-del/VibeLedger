@@ -88,6 +88,7 @@ class TestReconciliationConcurrency(BaseDbTestCase):
         """
         # 1. Establish opening baseline: 1000.00
         self.client.post(f"/api/v1/accounts/{self.acc_id}/snapshots", json={
+            "idempotency_key": "snap_conc_base_key_1",
             "as_of": "2026-09-01T10:00:00+08:00",
             "balance": "1000.00",
             "currency": "CNY"
@@ -95,6 +96,7 @@ class TestReconciliationConcurrency(BaseDbTestCase):
 
         # 2. Create a needs_review batch (balance = 1500.00)
         res_sub = self.client.post(f"/api/v1/accounts/{self.acc_id}/snapshots", json={
+            "idempotency_key": "snap_conc_sub_key_2",
             "as_of": "2026-09-10T10:00:00+08:00",
             "balance": "1500.00",
             "currency": "CNY"

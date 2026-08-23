@@ -34,7 +34,9 @@ class TestSnapshotReconciliationApiDb(BaseDbTestCase):
 
         cls.mock_fx = ReferenceFxService(fixed_rates={
             ("USD", "CNY"): Decimal("7.20"),
-            ("EUR", "CNY"): Decimal("7.80")
+            ("EUR", "CNY"): Decimal("7.80"),
+            ("USD", "SGD"): Decimal("1.35"),
+            ("SGD", "CNY"): Decimal("5.333333")
         })
         snapshots_router._reference_fx_service = cls.mock_fx
         reconciliation_router._reference_fx_service = cls.mock_fx
@@ -130,6 +132,7 @@ class TestSnapshotReconciliationApiDb(BaseDbTestCase):
         - opening_balance transaction exists dated 2026-09-01 for 100000.00
         - account_snapshots row committed
         - account_state.ledger_balance = 100000.00
+        - account_state.initialized_at is set
         - excluded from income/expense/investment P&L
         """
         payload = {
@@ -169,17 +172,19 @@ class TestSnapshotReconciliationApiDb(BaseDbTestCase):
                 self.assertEqual(tx[5], "committed")
 
                 # Check account_state
-                cur.execute("SELECT ledger_balance, last_authoritative_snapshot_at FROM account_state WHERE account_id = %s;", (self.acc_cny_id,))
+                cur.execute("SELECT ledger_balance, last_authoritative_snapshot_at, initialized_at FROM account_state WHERE account_id = %s;", (self.acc_cny_id,))
                 st = cur.fetchone()
                 self.assertEqual(st[0], Decimal("100000.00"))
                 self.assertIsNotNone(st[1])
+                self.assertIsNotNone(st[2]) # initialized_at must be populated
 
                 # Check snapshot
-                cur.execute("SELECT balance, currency, is_authoritative FROM account_snapshots WHERE id = %s;", (data["snapshot_id"],))
+                cur.execute("SELECT balance, currency, is_authoritative, source FROM account_snapshots WHERE id = %s;", (data["snapshot_id"],))
                 snap = cur.fetchone()
                 self.assertEqual(snap[0], Decimal("100000.00"))
                 self.assertEqual(snap[1], "CNY")
                 self.assertTrue(snap[2])
+                self.assertEqual(snap[3], "dashboard_manual")
         finally:
             conn.close()
 
@@ -248,6 +253,7 @@ class TestSnapshotReconciliationApiDb(BaseDbTestCase):
         """
         # Initial snapshot
         self.client.post(f"/api/v1/accounts/{self.acc_cny_id}/snapshots", json={
+            "idempotency_key": "snap_key_base_003",
             "as_of": "2026-09-01T10:00:00+08:00",
             "balance": "1000.00",
             "currency": "CNY"
@@ -275,6 +281,7 @@ class TestSnapshotReconciliationApiDb(BaseDbTestCase):
         """
         # Initial snapshot 1000.00
         self.client.post(f"/api/v1/accounts/{self.acc_cny_id}/snapshots", json={
+            "idempotency_key": "snap_key_base_004",
             "as_of": "2026-09-01T10:00:00+08:00",
             "balance": "1000.00",
             "currency": "CNY"
@@ -323,6 +330,7 @@ class TestSnapshotReconciliationApiDb(BaseDbTestCase):
         """
         # Baseline snapshot = 1000.00
         self.client.post(f"/api/v1/accounts/{self.acc_cny_id}/snapshots", json={
+            "idempotency_key": "snap_key_base_005",
             "as_of": "2026-09-01T10:00:00+08:00",
             "balance": "1000.00",
             "currency": "CNY"
@@ -330,6 +338,7 @@ class TestSnapshotReconciliationApiDb(BaseDbTestCase):
 
         # 1. +200 CNY residual -> auto-committed
         res_plus200 = self.client.post(f"/api/v1/accounts/{self.acc_cny_id}/snapshots", json={
+            "idempotency_key": "snap_key_plus200_005",
             "as_of": "2026-09-02T10:00:00+08:00",
             "balance": "1200.00",
             "currency": "CNY"
@@ -340,6 +349,7 @@ class TestSnapshotReconciliationApiDb(BaseDbTestCase):
 
         # 2. -200 CNY residual -> auto-committed
         res_minus200 = self.client.post(f"/api/v1/accounts/{self.acc_cny_id}/snapshots", json={
+            "idempotency_key": "snap_key_minus200_005",
             "as_of": "2026-09-03T10:00:00+08:00",
             "balance": "1000.00",
             "currency": "CNY"
@@ -350,6 +360,7 @@ class TestSnapshotReconciliationApiDb(BaseDbTestCase):
 
         # 3. 200.01 CNY residual -> needs_review
         res_over = self.client.post(f"/api/v1/accounts/{self.acc_cny_id}/snapshots", json={
+            "idempotency_key": "snap_key_over200_005",
             "as_of": "2026-09-04T10:00:00+08:00",
             "balance": "1200.01",
             "currency": "CNY"
@@ -382,6 +393,7 @@ class TestSnapshotReconciliationApiDb(BaseDbTestCase):
         """
         # Baseline snapshot 100 USD
         self.client.post(f"/api/v1/accounts/{self.acc_usd_id}/snapshots", json={
+            "idempotency_key": "snap_key_base_006",
             "as_of": "2026-09-01T10:00:00+08:00",
             "balance": "100.00",
             "currency": "USD"
@@ -389,6 +401,7 @@ class TestSnapshotReconciliationApiDb(BaseDbTestCase):
 
         # 20 USD residual -> 144 CNY -> auto committed
         res_20usd = self.client.post(f"/api/v1/accounts/{self.acc_usd_id}/snapshots", json={
+            "idempotency_key": "snap_key_20usd_006",
             "as_of": "2026-09-02T10:00:00+08:00",
             "balance": "120.00",
             "currency": "USD"
@@ -399,6 +412,7 @@ class TestSnapshotReconciliationApiDb(BaseDbTestCase):
 
         # 30 USD residual -> 216 CNY -> needs_review
         res_30usd = self.client.post(f"/api/v1/accounts/{self.acc_usd_id}/snapshots", json={
+            "idempotency_key": "snap_key_30usd_006",
             "as_of": "2026-09-03T10:00:00+08:00",
             "balance": "150.00",
             "currency": "USD"
@@ -418,9 +432,11 @@ class TestSnapshotReconciliationApiDb(BaseDbTestCase):
         Then snapshot Jan 31 = 1150 (+50 adjustment).
         Current account_state balance should become 1100 (1150 - 50 = 1100), preserving Feb 1 transaction.
         """
+        # Change household ledger_start_date to 2026-01-01 for this test
         conn = get_connection(self.test_schema)
         try:
             with conn.cursor() as cur:
+                cur.execute("UPDATE households SET ledger_start_date = '2026-01-01' WHERE id = %s;", (self.household_id,))
                 # Opening balance Jan 1
                 cur.execute(
                     """
@@ -479,6 +495,7 @@ class TestSnapshotReconciliationApiDb(BaseDbTestCase):
 
         # Reconcile historical snapshot for Jan 31 with balance = 1150.00 (+50 adjustment)
         res_snap = self.client.post(f"/api/v1/accounts/{self.acc_cny_id}/snapshots", json={
+            "idempotency_key": "snap_key_hist_007",
             "as_of": "2026-01-31T23:59:59+08:00",
             "balance": "1150.00",
             "currency": "CNY"
@@ -504,6 +521,7 @@ class TestSnapshotReconciliationApiDb(BaseDbTestCase):
         """
         # Initial snapshot
         self.client.post(f"/api/v1/accounts/{self.acc_cny_id}/snapshots", json={
+            "idempotency_key": "snap_key_base_008",
             "as_of": "2026-09-01T10:00:00+08:00",
             "balance": "1000.00",
             "currency": "CNY"
@@ -511,6 +529,7 @@ class TestSnapshotReconciliationApiDb(BaseDbTestCase):
 
         # Snapshot requiring review (> 200)
         res_sub = self.client.post(f"/api/v1/accounts/{self.acc_cny_id}/snapshots", json={
+            "idempotency_key": "snap_key_rev_008",
             "as_of": "2026-09-10T10:00:00+08:00",
             "balance": "1500.00",
             "currency": "CNY"
@@ -546,6 +565,7 @@ class TestSnapshotReconciliationApiDb(BaseDbTestCase):
         """
         # Initial snapshot = 1000
         self.client.post(f"/api/v1/accounts/{self.acc_cny_id}/snapshots", json={
+            "idempotency_key": "snap_key_base_009",
             "as_of": "2026-09-01T10:00:00+08:00",
             "balance": "1000.00",
             "currency": "CNY"
@@ -553,6 +573,7 @@ class TestSnapshotReconciliationApiDb(BaseDbTestCase):
 
         # Create needs_review batch for as_of=2026-09-10 with balance=1500 (residual was +500)
         res_sub = self.client.post(f"/api/v1/accounts/{self.acc_cny_id}/snapshots", json={
+            "idempotency_key": "snap_key_rev_009",
             "as_of": "2026-09-10T10:00:00+08:00",
             "balance": "1500.00",
             "currency": "CNY"
@@ -603,16 +624,18 @@ class TestSnapshotReconciliationApiDb(BaseDbTestCase):
     def test_10_row_version_conflict_rejection(self):
         """
         J. row_version conflict:
-        Stale batch row_version => 409 BATCH_VERSION_CONFLICT, zero financial writes.
+        Stale batch row_version => 409 BATCH_VERSION_CONFLICT, zero financial writes, retryable=True.
         """
         # Initial snapshot
         self.client.post(f"/api/v1/accounts/{self.acc_cny_id}/snapshots", json={
+            "idempotency_key": "snap_key_base_010",
             "as_of": "2026-09-01T10:00:00+08:00",
             "balance": "1000.00",
             "currency": "CNY"
         }, headers=self.headers)
 
         res_sub = self.client.post(f"/api/v1/accounts/{self.acc_cny_id}/snapshots", json={
+            "idempotency_key": "snap_key_rev_010",
             "as_of": "2026-09-10T10:00:00+08:00",
             "balance": "1500.00",
             "currency": "CNY"
@@ -627,6 +650,7 @@ class TestSnapshotReconciliationApiDb(BaseDbTestCase):
         )
         self.assertEqual(res_bad_ver.status_code, 409)
         self.assertEqual(res_bad_ver.json()["error"]["code"], "BATCH_VERSION_CONFLICT")
+        self.assertTrue(res_bad_ver.json()["error"]["retryable"])
 
     def test_11_repeated_commit_is_replay_safe(self):
         """
@@ -634,12 +658,14 @@ class TestSnapshotReconciliationApiDb(BaseDbTestCase):
         Commit twice => returns same outcome, creates exactly ONE snapshot and ONE adjustment.
         """
         self.client.post(f"/api/v1/accounts/{self.acc_cny_id}/snapshots", json={
+            "idempotency_key": "snap_key_base_011",
             "as_of": "2026-09-01T10:00:00+08:00",
             "balance": "1000.00",
             "currency": "CNY"
         }, headers=self.headers)
 
         res_sub = self.client.post(f"/api/v1/accounts/{self.acc_cny_id}/snapshots", json={
+            "idempotency_key": "snap_key_rev_011",
             "as_of": "2026-09-10T10:00:00+08:00",
             "balance": "1500.00",
             "currency": "CNY"
@@ -671,12 +697,14 @@ class TestSnapshotReconciliationApiDb(BaseDbTestCase):
         Household B cannot view or commit Household A's snapshot batch or account.
         """
         self.client.post(f"/api/v1/accounts/{self.acc_cny_id}/snapshots", json={
+            "idempotency_key": "snap_key_base_012",
             "as_of": "2026-09-01T10:00:00+08:00",
             "balance": "1000.00",
             "currency": "CNY"
         }, headers=self.headers)
 
         res_sub = self.client.post(f"/api/v1/accounts/{self.acc_cny_id}/snapshots", json={
+            "idempotency_key": "snap_key_rev_012",
             "as_of": "2026-09-10T10:00:00+08:00",
             "balance": "1500.00",
             "currency": "CNY"
@@ -685,6 +713,7 @@ class TestSnapshotReconciliationApiDb(BaseDbTestCase):
 
         # Household B tries to create snapshot on Household A's account -> 404
         res_bad_acc = self.client.post(f"/api/v1/accounts/{self.acc_cny_id}/snapshots", json={
+            "idempotency_key": "snap_key_badacc_012",
             "as_of": "2026-09-10T10:00:00+08:00",
             "balance": "1000.00",
             "currency": "CNY"
@@ -712,6 +741,7 @@ class TestSnapshotReconciliationApiDb(BaseDbTestCase):
         Generic balance snapshot on investment account must return 422 ACCOUNT_TYPE_MISMATCH.
         """
         res = self.client.post(f"/api/v1/accounts/{self.acc_invest_id}/snapshots", json={
+            "idempotency_key": "snap_key_invest_013",
             "as_of": "2026-09-01T10:00:00+08:00",
             "balance": "1000.00",
             "currency": "USD"
@@ -750,6 +780,424 @@ class TestSnapshotReconciliationApiDb(BaseDbTestCase):
         res_conflict = self.client.post(f"/api/v1/accounts/{self.acc_cny_id}/snapshots", json=payload2, headers=self.headers)
         self.assertEqual(res_conflict.status_code, 409)
         self.assertEqual(res_conflict.json()["error"]["code"], "IDEMPOTENCY_KEY_REUSE")
+
+    def test_15_preserve_exact_authoritative_snapshot_metadata(self):
+        """
+        Finding 1 Regression:
+        Submit as_of = 2026-09-10T10:23:45+08:00, source = shortcut, residual > 200 -> needs_review.
+        Commit batch.
+        Assert persisted snapshot has exact normalized instant and source == 'shortcut'.
+        account_state.last_authoritative_snapshot_at has exact timestamp.
+        """
+        # Baseline
+        self.client.post(f"/api/v1/accounts/{self.acc_cny_id}/snapshots", json={
+            "idempotency_key": "snap_meta_base_015",
+            "as_of": "2026-09-01T08:00:00+08:00",
+            "balance": "1000.00",
+            "currency": "CNY",
+            "source": "dashboard_manual"
+        }, headers=self.headers)
+
+        target_dt_str = "2026-09-10T10:23:45+08:00"
+        res_sub = self.client.post(f"/api/v1/accounts/{self.acc_cny_id}/snapshots", json={
+            "idempotency_key": "snap_meta_rev_015",
+            "as_of": target_dt_str,
+            "balance": "1500.00",
+            "currency": "CNY",
+            "source": "shortcut"
+        }, headers=self.headers)
+        self.assertEqual(res_sub.status_code, 200)
+        batch_id = res_sub.json()["batch_id"]
+
+        # Commit batch
+        res_commit = self.client.post(f"/api/v1/reconciliation-batches/{batch_id}/commit", headers=self.headers)
+        self.assertEqual(res_commit.status_code, 200)
+        snap_id = res_commit.json()["snapshot_id"]
+
+        expected_dt = datetime.fromisoformat(target_dt_str)
+
+        conn = get_connection(self.test_schema)
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT as_of, source FROM account_snapshots WHERE id = %s;", (snap_id,))
+                row = cur.fetchone()
+                self.assertEqual(row[0], expected_dt)
+                self.assertEqual(row[1], "shortcut")
+
+                cur.execute("SELECT last_authoritative_snapshot_at FROM account_state WHERE account_id = %s;", (self.acc_cny_id,))
+                st_row = cur.fetchone()
+                self.assertEqual(st_row[0], expected_dt)
+        finally:
+            conn.close()
+
+    def test_16_device_idempotency_key_validation(self):
+        """
+        Finding 2 Regression:
+        Missing or invalid length idempotency_key is rejected with 422 INVALID_REQUEST.
+        """
+        # Missing key
+        res_missing = self.client.post(f"/api/v1/accounts/{self.acc_cny_id}/snapshots", json={
+            "as_of": "2026-09-01T10:00:00+08:00",
+            "balance": "1000.00",
+            "currency": "CNY"
+        }, headers=self.headers)
+        self.assertEqual(res_missing.status_code, 422)
+        self.assertEqual(res_missing.json()["error"]["code"], "INVALID_REQUEST")
+
+        # Too short (< 8 chars)
+        res_short = self.client.post(f"/api/v1/accounts/{self.acc_cny_id}/snapshots", json={
+            "idempotency_key": "short",
+            "as_of": "2026-09-01T10:00:00+08:00",
+            "balance": "1000.00",
+            "currency": "CNY"
+        }, headers=self.headers)
+        self.assertEqual(res_short.status_code, 422)
+        self.assertEqual(res_short.json()["error"]["code"], "INVALID_REQUEST")
+
+    def test_17_request_hash_includes_account_id_cross_account_conflict(self):
+        """
+        Finding 3 Regression:
+        Same device + same key on Account A, then on Account B with same body
+        must return 409 IDEMPOTENCY_KEY_REUSE.
+        """
+        shared_key = f"snap_shared_key_{uuid4().hex[:12]}"
+        payload = {
+            "idempotency_key": shared_key,
+            "as_of": "2026-09-01T10:00:00+08:00",
+            "balance": "1000.00",
+            "currency": "CNY"
+        }
+        res_acc1 = self.client.post(f"/api/v1/accounts/{self.acc_cny_id}/snapshots", json=payload, headers=self.headers)
+        self.assertEqual(res_acc1.status_code, 200)
+
+        # Create a second CNY account in Household A
+        import app.repositories.accounts as accounts_repo
+        acc2_id = uuid4()
+        conn = get_connection(self.test_schema)
+        try:
+            with conn.cursor() as cur:
+                accounts_repo.create_account(
+                    conn=conn,
+                    account_id=acc2_id,
+                    household_id=self.household_id,
+                    name="Second CNY Account",
+                    account_type="cash",
+                    currency="CNY",
+                    owner_user_id=self.user_id
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+        # Submit identical payload to Account 2
+        res_acc2 = self.client.post(f"/api/v1/accounts/{acc2_id}/snapshots", json=payload, headers=self.headers)
+        self.assertEqual(res_acc2.status_code, 409)
+        self.assertEqual(res_acc2.json()["error"]["code"], "IDEMPOTENCY_KEY_REUSE")
+
+    def test_18_account_state_initialized_at_lifecycle(self):
+        """
+        Finding 4 Regression:
+        New account: initialized_at IS NULL.
+        First snapshot commit: initialized_at IS NOT NULL.
+        Subsequent historical snapshot: initialized_at unchanged / not cleared.
+        """
+        import app.repositories.accounts as accounts_repo
+        new_acc_id = uuid4()
+        conn = get_connection(self.test_schema)
+        try:
+            accounts_repo.create_account(
+                conn=conn,
+                account_id=new_acc_id,
+                household_id=self.household_id,
+                name="Fresh Account",
+                account_type="cash",
+                currency="CNY",
+                owner_user_id=self.user_id
+            )
+            with conn.cursor() as cur:
+                cur.execute("SELECT initialized_at FROM account_state WHERE account_id = %s;", (new_acc_id,))
+                self.assertIsNone(cur.fetchone()[0])
+            conn.commit()
+        finally:
+            conn.close()
+
+        # First snapshot
+        res_init = self.client.post(f"/api/v1/accounts/{new_acc_id}/snapshots", json={
+            "idempotency_key": "snap_init_018_key",
+            "as_of": "2026-09-01T10:00:00+08:00",
+            "balance": "5000.00",
+            "currency": "CNY"
+        }, headers=self.headers)
+        self.assertEqual(res_init.status_code, 200)
+
+        conn = get_connection(self.test_schema)
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT initialized_at FROM account_state WHERE account_id = %s;", (new_acc_id,))
+                init_at = cur.fetchone()[0]
+                self.assertIsNotNone(init_at)
+        finally:
+            conn.close()
+
+        # Subsequent snapshot
+        res_sub = self.client.post(f"/api/v1/accounts/{new_acc_id}/snapshots", json={
+            "idempotency_key": "snap_sub_018_key",
+            "as_of": "2026-09-10T10:00:00+08:00",
+            "balance": "5050.00",
+            "currency": "CNY"
+        }, headers=self.headers)
+        self.assertEqual(res_sub.status_code, 200)
+
+        conn = get_connection(self.test_schema)
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT initialized_at FROM account_state WHERE account_id = %s;", (new_acc_id,))
+                init_at_after = cur.fetchone()[0]
+                self.assertEqual(init_at, init_at_after)
+        finally:
+            conn.close()
+
+    def test_19_threshold_evaluated_in_cny_independent_of_reporting_currency(self):
+        """
+        Finding 5 Regression:
+        Household reporting_currency = SGD, account currency = USD.
+        Mock FX: USD -> CNY = 7.20, USD -> SGD = 1.35.
+        Residual 30 USD: in SGD = 40.50 (< 200), but in CNY = 216 (> 200) -> needs_review.
+        Residual 20 USD: in CNY = 144 (<= 200) -> auto committed.
+        """
+        import app.repositories.accounts as accounts_repo
+        import app.repositories.devices as devices_repo
+
+        sgd_hh_id = uuid4()
+        sgd_user_id = uuid4()
+        sgd_dev_id = uuid4()
+        sgd_token = f"vbl_sgd_{uuid4().hex}"
+        import hashlib
+        sgd_tok_hash = hashlib.sha256(sgd_token.encode("utf-8")).digest()
+        sgd_headers = {"Authorization": f"Bearer {sgd_token}"}
+        sgd_usd_acc = uuid4()
+
+        conn = get_connection(self.test_schema)
+        try:
+            with conn.cursor() as cur:
+                accounts_repo.create_household(conn, sgd_hh_id, "SGD Household", date(2026, 9, 1), "SGD")
+                accounts_repo.create_user(conn, sgd_user_id, "sgd_user", "SGD User", "sgd@test.local", "SGD")
+                accounts_repo.add_user_to_household(conn, sgd_hh_id, sgd_user_id, role="owner")
+                devices_repo.create_device(conn, sgd_dev_id, sgd_user_id, "SGD iPhone", sgd_tok_hash)
+                accounts_repo.create_account(
+                    conn=conn,
+                    account_id=sgd_usd_acc,
+                    household_id=sgd_hh_id,
+                    name="SGD USD Checking",
+                    account_type="cash",
+                    currency="USD",
+                    owner_user_id=sgd_user_id
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+        # Baseline: 100 USD
+        self.client.post(f"/api/v1/accounts/{sgd_usd_acc}/snapshots", json={
+            "idempotency_key": "snap_sgd_base_019",
+            "as_of": "2026-09-01T10:00:00+08:00",
+            "balance": "100.00",
+            "currency": "USD"
+        }, headers=sgd_headers)
+
+        # 30 USD residual -> 216 CNY (> 200 CNY) -> needs_review even though 40.50 SGD < 200
+        res_30 = self.client.post(f"/api/v1/accounts/{sgd_usd_acc}/snapshots", json={
+            "idempotency_key": "snap_sgd_30usd_019",
+            "as_of": "2026-09-02T10:00:00+08:00",
+            "balance": "130.00",
+            "currency": "USD"
+        }, headers=sgd_headers)
+        self.assertEqual(res_30.status_code, 200)
+        self.assertEqual(res_30.json()["status"], "needs_review")
+
+        # 20 USD residual -> 144 CNY (<= 200 CNY) -> auto committed
+        res_20 = self.client.post(f"/api/v1/accounts/{sgd_usd_acc}/snapshots", json={
+            "idempotency_key": "snap_sgd_20usd_019",
+            "as_of": "2026-09-03T10:00:00+08:00",
+            "balance": "120.00",
+            "currency": "USD"
+        }, headers=sgd_headers)
+        self.assertEqual(res_20.status_code, 200)
+        self.assertEqual(res_20.json()["status"], "committed")
+
+    def test_20_exact_committed_replay_preserves_identifiers(self):
+        """
+        Finding 6 Regression:
+        A. Two snapshot reconciliations on same account and same date (each with different adjustment).
+           Replay first batch -> must return first batch's adjustment ID.
+        B. First-observation opening-balance batch -> call commit again -> returns same snapshot_id AND opening_balance_transaction_id.
+        """
+        # Baseline
+        self.client.post(f"/api/v1/accounts/{self.acc_cny_id}/snapshots", json={
+            "idempotency_key": "snap_rep_base_020",
+            "as_of": "2026-09-01T10:00:00+08:00",
+            "balance": "1000.00",
+            "currency": "CNY"
+        }, headers=self.headers)
+
+        # Batch 1 on 2026-09-10 (balance = 1500)
+        res_b1 = self.client.post(f"/api/v1/accounts/{self.acc_cny_id}/snapshots", json={
+            "idempotency_key": "snap_rep_b1_020",
+            "as_of": "2026-09-10T10:00:00+08:00",
+            "balance": "1500.00",
+            "currency": "CNY"
+        }, headers=self.headers)
+        batch1_id = res_b1.json()["batch_id"]
+        res_commit1 = self.client.post(f"/api/v1/reconciliation-batches/{batch1_id}/commit", headers=self.headers)
+        adj1_id = res_commit1.json()["adjustment_transaction_id"]
+
+        # Batch 2 on 2026-09-10 (balance = 2000)
+        res_b2 = self.client.post(f"/api/v1/accounts/{self.acc_cny_id}/snapshots", json={
+            "idempotency_key": "snap_rep_b2_020",
+            "as_of": "2026-09-10T11:00:00+08:00",
+            "balance": "2000.00",
+            "currency": "CNY"
+        }, headers=self.headers)
+        batch2_id = res_b2.json()["batch_id"]
+        res_commit2 = self.client.post(f"/api/v1/reconciliation-batches/{batch2_id}/commit", headers=self.headers)
+        adj2_id = res_commit2.json()["adjustment_transaction_id"]
+        self.assertNotEqual(adj1_id, adj2_id)
+
+        # Replay Batch 1 commit
+        res_replay_b1 = self.client.post(f"/api/v1/reconciliation-batches/{batch1_id}/commit", headers=self.headers)
+        self.assertEqual(res_replay_b1.status_code, 200)
+        self.assertEqual(res_replay_b1.json()["adjustment_transaction_id"], adj1_id)
+
+    def test_21_stale_candidate_refreshed_to_applied_transaction_amount(self):
+        """
+        Finding 7 Regression:
+        Candidate payload was 500.
+        Concurrent transaction arrives before commit -> fresh residual is 200.
+        Commit batch.
+        Assert candidate.payload['adjustment_amount'] is updated to '200.00' matching applied transaction.
+        """
+        self.client.post(f"/api/v1/accounts/{self.acc_cny_id}/snapshots", json={
+            "idempotency_key": "snap_stale_base_021",
+            "as_of": "2026-09-01T10:00:00+08:00",
+            "balance": "1000.00",
+            "currency": "CNY"
+        }, headers=self.headers)
+
+        res_sub = self.client.post(f"/api/v1/accounts/{self.acc_cny_id}/snapshots", json={
+            "idempotency_key": "snap_stale_rev_021",
+            "as_of": "2026-09-10T10:00:00+08:00",
+            "balance": "1500.00",
+            "currency": "CNY"
+        }, headers=self.headers)
+        batch_id = res_sub.json()["batch_id"]
+
+        # Concurrent income of +300
+        conn = get_connection(self.test_schema)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO transactions (
+                        id, household_id, transaction_type, occurred_on, original_amount, original_currency,
+                        to_amount, to_currency, to_account_id, status, source
+                    ) VALUES (
+                        gen_random_uuid(), %s, 'cash_income', '2026-09-05', 300.00, 'CNY',
+                        300.00, 'CNY', %s, 'committed', 'shortcut'
+                    );
+                    UPDATE account_state SET ledger_balance = 1300.00 WHERE account_id = %s;
+                    """,
+                    (self.household_id, self.acc_cny_id, self.acc_cny_id)
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+        # Commit
+        res_commit = self.client.post(f"/api/v1/reconciliation-batches/{batch_id}/commit", headers=self.headers)
+        self.assertEqual(res_commit.status_code, 200)
+
+        conn = get_connection(self.test_schema)
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT payload, status FROM reconciliation_candidates WHERE batch_id = %s;", (batch_id,))
+                row = cur.fetchone()
+                payload = row[0]
+                if isinstance(payload, str):
+                    import json
+                    payload = json.loads(payload)
+                self.assertEqual(row[1], "applied")
+                self.assertEqual(payload["adjustment_amount"], "200.00")
+        finally:
+            conn.close()
+
+    def test_22_reject_snapshot_before_ledger_start_date(self):
+        """
+        Finding 8 Regression:
+        household.ledger_start_date = 2026-09-01.
+        Snapshot as_of = 2026-08-31T23:00:00+08:00.
+        Must return 422 INVALID_REQUEST with zero writes.
+        """
+        res = self.client.post(f"/api/v1/accounts/{self.acc_cny_id}/snapshots", json={
+            "idempotency_key": "snap_before_start_022",
+            "as_of": "2026-08-31T23:00:00+08:00",
+            "balance": "1000.00",
+            "currency": "CNY"
+        }, headers=self.headers)
+        self.assertEqual(res.status_code, 422)
+        self.assertEqual(res.json()["error"]["code"], "INVALID_REQUEST")
+
+        conn = get_connection(self.test_schema)
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT count(*) FROM account_snapshots WHERE account_id = %s;", (self.acc_cny_id,))
+                self.assertEqual(cur.fetchone()[0], 0)
+                cur.execute("SELECT count(*) FROM reconciliation_batches WHERE account_id = %s;", (self.acc_cny_id,))
+                self.assertEqual(cur.fetchone()[0], 0)
+        finally:
+            conn.close()
+
+    def test_23_batch_state_and_type_safety(self):
+        """
+        Finding 9 Regression:
+        Reconciliation commit rejects unsupported batch_type and non-committable statuses.
+        """
+        import app.repositories.reconciliation as reconciliation_repo
+        # Create a dummy batch of type 'statement'
+        stmt_batch_id = uuid4()
+        proc_batch_id = uuid4()
+        conn = get_connection(self.test_schema)
+        try:
+            reconciliation_repo.create_reconciliation_batch(
+                conn=conn,
+                batch_id=stmt_batch_id,
+                household_id=self.household_id,
+                account_id=self.acc_cny_id,
+                batch_type="statement",
+                status="ready",
+                currency="CNY"
+            )
+            reconciliation_repo.create_reconciliation_batch(
+                conn=conn,
+                batch_id=proc_batch_id,
+                household_id=self.household_id,
+                account_id=self.acc_cny_id,
+                batch_type="snapshot",
+                status="processing",
+                currency="CNY"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        # Try committing statement batch
+        res_stmt = self.client.post(f"/api/v1/reconciliation-batches/{stmt_batch_id}/commit", headers=self.headers)
+        self.assertEqual(res_stmt.status_code, 422)
+        self.assertEqual(res_stmt.json()["error"]["code"], "INVALID_REQUEST")
+
+        # Try committing processing batch
+        res_proc = self.client.post(f"/api/v1/reconciliation-batches/{proc_batch_id}/commit", headers=self.headers)
+        self.assertEqual(res_proc.status_code, 422)
+        self.assertEqual(res_proc.json()["error"]["code"], "INVALID_REQUEST")
 
 if __name__ == "__main__":
     unittest.main()

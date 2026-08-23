@@ -228,7 +228,12 @@ def create_snapshot_workflow(
     if account["account_type"] == "investment":
         raise AccountTypeMismatchError("Generic balance snapshot cannot be applied to investment accounts.")
 
-    # 2. Validate payload fields
+    # 2. Validate Idempotency Key (Required for device auth, length 8..200)
+    idempotency_key = payload.get("idempotency_key")
+    if not idempotency_key or not isinstance(idempotency_key, str) or not (8 <= len(idempotency_key) <= 200):
+        raise InvalidSnapshotError("Idempotency key is required and must be between 8 and 200 characters.")
+
+    # 3. Validate payload fields
     as_of_str = payload.get("as_of")
     if not as_of_str:
         raise InvalidSnapshotError("Missing required 'as_of' timestamp.")
@@ -239,6 +244,14 @@ def create_snapshot_workflow(
 
     if as_of.tzinfo is None:
         raise InvalidSnapshotError("'as_of' timestamp must be timezone-aware.")
+
+    household = accounts_repo.get_household(conn, household_id)
+    reporting_currency = household["reporting_currency"]
+    ledger_start_date = household["ledger_start_date"]
+
+    # Reject snapshots before household ledger_start_date
+    if as_of.date() < ledger_start_date:
+        raise InvalidSnapshotError(f"Snapshot as_of date ({as_of.date()}) cannot precede household ledger start date ({ledger_start_date}).")
 
     # Handle balance or image
     balance_val = payload.get("balance")
@@ -264,42 +277,41 @@ def create_snapshot_workflow(
     if source not in ("shortcut", "statement", "dashboard_manual"):
         raise InvalidSnapshotError(f"Invalid snapshot source: '{source}'.")
 
-    idempotency_key = payload.get("idempotency_key")
-    request_id: Optional[UUID] = None
+    # 4. Canonical Snapshot Request Hash (MUST include account_id and normalized content)
+    canonical_dict = {
+        "account_id": str(account_id),
+        "as_of": as_of.isoformat(),
+        "balance": str(dec_balance),
+        "currency": curr,
+        "source": source
+    }
+    canonical_raw = json.dumps(canonical_dict, sort_keys=True)
+    request_hash = hashlib.sha256(canonical_raw.encode("utf-8")).digest()
 
-    # 3. Idempotency handling
-    if idempotency_key:
-        canonical_raw = json.dumps(payload, sort_keys=True)
-        request_hash = hashlib.sha256(canonical_raw.encode("utf-8")).digest()
+    existing_req = ingestion_repo.get_by_device_and_key(conn, device_id, idempotency_key)
+    if existing_req:
+        if existing_req["request_hash"] != request_hash:
+            raise IdempotencyKeyReuseError("This idempotency key was already used for different snapshot content or account.")
+        if existing_req["response_payload"]:
+            return existing_req["response_payload"]
+        if existing_req["draft_payload"] and existing_req["status"] == "needs_confirmation":
+            return existing_req["draft_payload"]
 
-        existing_req = ingestion_repo.get_by_device_and_key(conn, device_id, idempotency_key)
-        if existing_req:
-            if existing_req["request_hash"] != request_hash:
-                raise IdempotencyKeyReuseError("This idempotency key was already used for different snapshot content.")
-            if existing_req["response_payload"]:
-                return existing_req["response_payload"]
-            if existing_req["draft_payload"] and existing_req["status"] == "needs_confirmation":
-                return existing_req["draft_payload"]
+    request_id = uuid4()
+    ingestion_repo.create_ingestion_request(
+        conn=conn,
+        request_id=request_id,
+        device_id=device_id,
+        idempotency_key=idempotency_key,
+        request_kind="snapshot",
+        request_hash=request_hash,
+        status="processing",
+        captured_at=as_of,
+        draft_payload=canonical_dict
+    )
 
-        request_id = uuid4()
-        ingestion_repo.create_ingestion_request(
-            conn=conn,
-            request_id=request_id,
-            device_id=device_id,
-            idempotency_key=idempotency_key,
-            request_kind="snapshot",
-            request_hash=request_hash,
-            status="processing",
-            captured_at=as_of,
-            draft_payload=payload
-        )
-
-    # 4. Evaluate Reconciliation under lock
+    # 5. Evaluate Reconciliation under lock
     accounts_repo.lock_account_state(conn, account_id)
-    household = accounts_repo.get_household(conn, household_id)
-    reporting_currency = household["reporting_currency"]
-    ledger_start_date = household["ledger_start_date"]
-
     is_first = is_first_account_observation(conn, account_id)
 
     if is_first:
@@ -309,6 +321,7 @@ def create_snapshot_workflow(
         batch_id = uuid4()
         snapshot_id = uuid4()
         opening_tx_id = None
+        last_tx_at = None
 
         # Insert reconciliation_batches FIRST so audit_events FK is satisfied
         reconciliation_repo.create_reconciliation_batch(
@@ -338,6 +351,7 @@ def create_snapshot_workflow(
                 from_amt, from_curr, from_acc = abs(opening_anchor), curr, account_id
                 to_amt, to_curr, to_acc = None, None, None
 
+            last_tx_at = datetime.combine(ledger_start_date, datetime.min.time(), tzinfo=timezone.utc)
             tx_repo.create_transaction(
                 conn=conn,
                 tx_id=opening_tx_id,
@@ -407,7 +421,8 @@ def create_snapshot_workflow(
                 "account_id": str(account_id),
                 "as_of": as_of.isoformat(),
                 "balance": str(dec_balance),
-                "currency": curr
+                "currency": curr,
+                "source": source
             }
         )
 
@@ -416,7 +431,8 @@ def create_snapshot_workflow(
             conn=conn,
             account_id=account_id,
             new_balance=current_balance,
-            snapshot_as_of=as_of
+            snapshot_as_of=as_of,
+            last_transaction_at=last_tx_at
         )
 
         audit_repo.insert_audit_event(
@@ -448,14 +464,13 @@ def create_snapshot_workflow(
         if opening_tx_id:
             response["opening_balance_transaction_id"] = str(opening_tx_id)
 
-        if idempotency_key and request_id:
-            ingestion_repo.update_ingestion_request_status(
-                conn=conn,
-                request_id=request_id,
-                status="committed",
-                response_payload=response,
-                committed_at=datetime.now(timezone.utc)
-            )
+        ingestion_repo.update_ingestion_request_status(
+            conn=conn,
+            request_id=request_id,
+            status="committed",
+            response_payload=response,
+            committed_at=datetime.now(timezone.utc)
+        )
         return response
 
     else:
@@ -466,19 +481,28 @@ def create_snapshot_workflow(
         if fx_service is None:
             fx_service = ReferenceFxService()
 
+        # Threshold eligibility is ALWAYS evaluated in CNY (<= 200 CNY)
+        if curr == "CNY":
+            residual_cny = residual
+        else:
+            fx_rate_cny = fx_service.get_rate(curr, "CNY", as_of=as_of.date())
+            residual_cny = quantize_money(residual * fx_rate_cny, "CNY")
+
+        is_auto_eligible = (abs(residual_cny) <= Decimal("200.00"))
+
+        # Reporting currency calculation for presentation/audit
         if curr == reporting_currency:
             residual_reporting = residual
         else:
-            fx_rate = fx_service.get_rate(curr, reporting_currency, as_of=as_of.date())
-            residual_reporting = quantize_money(residual * fx_rate, reporting_currency)
-
-        is_auto_eligible = (abs(residual_reporting) <= Decimal("200.00"))
+            fx_rate_rep = fx_service.get_rate(curr, reporting_currency, as_of=as_of.date())
+            residual_reporting = quantize_money(residual * fx_rate_rep, reporting_currency)
 
         if is_auto_eligible:
             # Auto-commit path
             batch_id = uuid4()
             snapshot_id = uuid4()
             adj_tx_id = None
+            last_tx_at = None
 
             # Insert reconciliation_batches FIRST so audit_events FK is satisfied
             reconciliation_repo.create_reconciliation_batch(
@@ -508,6 +532,7 @@ def create_snapshot_workflow(
                     from_amt, from_curr, from_acc = abs(residual), curr, account_id
                     to_amt, to_curr, to_acc = None, None, None
 
+                last_tx_at = as_of
                 tx_repo.create_transaction(
                     conn=conn,
                     tx_id=adj_tx_id,
@@ -577,7 +602,8 @@ def create_snapshot_workflow(
                     "account_id": str(account_id),
                     "as_of": as_of.isoformat(),
                     "balance": str(dec_balance),
-                    "currency": curr
+                    "currency": curr,
+                    "source": source
                 }
             )
 
@@ -586,7 +612,8 @@ def create_snapshot_workflow(
                 conn=conn,
                 account_id=account_id,
                 new_balance=current_balance,
-                snapshot_as_of=as_of
+                snapshot_as_of=as_of,
+                last_transaction_at=last_tx_at
             )
 
             audit_repo.insert_audit_event(
@@ -616,14 +643,13 @@ def create_snapshot_workflow(
                 "adjustment_transaction_id": str(adj_tx_id) if adj_tx_id else None
             }
 
-            if idempotency_key and request_id:
-                ingestion_repo.update_ingestion_request_status(
-                    conn=conn,
-                    request_id=request_id,
-                    status="committed",
-                    response_payload=response,
-                    committed_at=datetime.now(timezone.utc)
-                )
+            ingestion_repo.update_ingestion_request_status(
+                conn=conn,
+                request_id=request_id,
+                status="committed",
+                response_payload=response,
+                committed_at=datetime.now(timezone.utc)
+            )
             return response
 
         else:
@@ -648,17 +674,22 @@ def create_snapshot_workflow(
                 row_version=0
             )
 
+            # Preserve exact metadata (as_of timestamp, source, amount, currency) in candidate payload
+            candidate_payload = {
+                "adjustment_amount": str(residual),
+                "currency": curr,
+                "occurred_on": as_of.date().isoformat(),
+                "as_of": as_of.isoformat(),
+                "source": source
+            }
+
             reconciliation_repo.create_reconciliation_candidate(
                 conn=conn,
                 candidate_id=candidate_id,
                 batch_id=batch_id,
                 candidate_type="adjustment",
                 status="needs_review",
-                payload={
-                    "adjustment_amount": str(residual),
-                    "currency": curr,
-                    "occurred_on": as_of.date().isoformat()
-                },
+                payload=candidate_payload,
                 confidence=Decimal("1.0000"),
                 reason_code="THRESHOLD_EXCEEDED",
                 reason_detail="Residual exceeds 200 CNY auto-adjustment threshold"
@@ -674,13 +705,12 @@ def create_snapshot_workflow(
                 "display_summary": display_summary
             }
 
-            if idempotency_key and request_id:
-                ingestion_repo.update_ingestion_request_status(
-                    conn=conn,
-                    request_id=request_id,
-                    status="needs_confirmation",
-                    draft_payload=response
-                )
+            ingestion_repo.update_ingestion_request_status(
+                conn=conn,
+                request_id=request_id,
+                status="needs_confirmation",
+                draft_payload=response
+            )
             return response
 
 def get_reconciliation_batch_summary(conn, batch_id: UUID, household_id: UUID) -> Dict[str, Any]:
@@ -738,8 +768,26 @@ def get_reconciliation_preview(
     reporting_currency = household["reporting_currency"]
     candidates = reconciliation_repo.list_candidates_for_batch(conn, batch_id)
 
-    as_of_date = batch["period_end"] or (batch["created_at"].date() if batch["created_at"] else date.today())
-    as_of_dt = datetime.combine(as_of_date, datetime.max.time(), tzinfo=timezone.utc)
+    # Recover exact original as_of if preserved in candidate payload or draft request
+    as_of_dt = None
+    for c in candidates:
+        if isinstance(c.get("payload"), dict) and "as_of" in c["payload"]:
+            try:
+                as_of_dt = datetime.fromisoformat(c["payload"]["as_of"])
+                break
+            except Exception:
+                pass
+
+    if as_of_dt is None and batch["source_request_id"]:
+        req = ingestion_repo.get_ingestion_request(conn, batch["source_request_id"])
+        if req and req["captured_at"]:
+            as_of_dt = req["captured_at"]
+
+    if as_of_dt is None:
+        as_of_date = batch["period_end"] or (batch["created_at"].date() if batch["created_at"] else date.today())
+        as_of_dt = datetime.combine(as_of_date, datetime.max.time(), tzinfo=timezone.utc)
+    else:
+        as_of_date = as_of_dt.date()
 
     is_first = is_first_account_observation(conn, batch["account_id"])
     if is_first:
@@ -755,13 +803,20 @@ def get_reconciliation_preview(
         if fx_service is None:
             fx_service = ReferenceFxService()
 
+        # Threshold check in CNY
+        if curr == "CNY":
+            residual_cny = residual
+        else:
+            fx_rate_cny = fx_service.get_rate(curr, "CNY", as_of=as_of_date)
+            residual_cny = quantize_money(residual * fx_rate_cny, "CNY")
+
+        auto_eligible = (abs(residual_cny) <= Decimal("200.00"))
+
         if curr == reporting_currency:
             residual_reporting = residual
         else:
             fx_rate = fx_service.get_rate(curr, reporting_currency, as_of=as_of_date)
             residual_reporting = quantize_money(residual * fx_rate, reporting_currency)
-
-        auto_eligible = (abs(residual_reporting) <= Decimal("200.00"))
 
     proposed_adj = None
     if residual != Decimal("0.00"):
@@ -832,39 +887,66 @@ def commit_reconciliation_batch(
     if not batch or batch["household_id"] != household_id:
         raise BatchNotFoundError(batch_id)
 
+    # Validate batch_type
+    if batch["batch_type"] != "snapshot":
+        raise InvalidBatchStateError(f"Batch type '{batch['batch_type']}' is not supported for snapshot reconciliation commit.")
+
     curr = batch["currency"]
 
     # 2. Check idempotent replay if already committed
     if batch["status"] == "committed":
+        # Check if ingestion request already has canonical response payload
+        if batch["source_request_id"]:
+            req = ingestion_repo.get_ingestion_request(conn, batch["source_request_id"])
+            if req and req.get("response_payload"):
+                return req["response_payload"]
+
+        # Deterministic reconstruction from snapshot, candidate, and audit events
         snap = snapshots_repo.get_snapshot_by_batch_id(conn, batch_id)
-        # Check if an adjustment transaction exists
-        as_of_date = batch["period_end"] or (batch["created_at"].date() if batch["created_at"] else date.today())
+        candidates = reconciliation_repo.list_candidates_for_batch(conn, batch_id)
         adj_tx_id = None
+        for c in candidates:
+            if c.get("applied_transaction_id"):
+                adj_tx_id = c["applied_transaction_id"]
+                break
+
+        opening_tx_id = None
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT id FROM transactions
-                WHERE household_id = %s
-                  AND (from_account_id = %s OR to_account_id = %s)
-                  AND transaction_type = 'reconciliation_adjustment'
-                  AND occurred_on = %s
-                  AND status = 'committed'
-                ORDER BY created_at DESC LIMIT 1;
+                SELECT entity_id, after_data FROM audit_events
+                WHERE reconciliation_batch_id = %s AND entity_type = 'transaction';
                 """,
-                (household_id, batch["account_id"], batch["account_id"], as_of_date)
+                (batch_id,)
             )
-            r = cur.fetchone()
-            if r:
-                adj_tx_id = r[0]
+            for r in cur.fetchall():
+                tx_eid, aft = r[0], r[1]
+                if isinstance(aft, str):
+                    try:
+                        aft = json.loads(aft)
+                    except Exception:
+                        aft = {}
+                if isinstance(aft, dict):
+                    if aft.get("transaction_type") == "reconciliation_adjustment":
+                        adj_tx_id = tx_eid
+                    elif aft.get("transaction_type") == "opening_balance":
+                        opening_tx_id = tx_eid
 
-        res_str = str(quantize_money(batch["residual_amount"], curr)) if batch["residual_amount"] is not None else str(quantize_money(Decimal("0.00"), curr))
-        return {
+        res_str = str(quantize_money(batch["residual_amount"] or Decimal("0.00"), curr))
+        replay_resp = {
             "status": "committed",
             "batch_id": str(batch_id),
             "snapshot_id": str(snap["id"]) if snap else None,
             "residual_amount": res_str,
             "adjustment_transaction_id": str(adj_tx_id) if adj_tx_id else None
         }
+        if opening_tx_id:
+            replay_resp["opening_balance_transaction_id"] = str(opening_tx_id)
+        return replay_resp
+
+    # Validate commit-eligible states: only 'ready' or 'needs_review'
+    if batch["status"] not in ("ready", "needs_review"):
+        raise InvalidBatchStateError(f"Reconciliation batch in '{batch['status']}' state cannot be committed.")
 
     # 3. Optimistic Concurrency check
     if row_version is not None and row_version != batch["row_version"]:
@@ -876,14 +958,48 @@ def commit_reconciliation_batch(
     reporting_currency = household["reporting_currency"]
     ledger_start_date = household["ledger_start_date"]
 
-    as_of_date = batch["period_end"] or (batch["created_at"].date() if batch["created_at"] else date.today())
-    as_of_dt = datetime.combine(as_of_date, datetime.max.time(), tzinfo=timezone.utc)
-    auth_balance = quantize_money(batch["authoritative_balance"], curr)
+    # 5. Recover exact original metadata (as_of timestamp and source)
+    candidates = reconciliation_repo.list_candidates_for_batch(conn, batch_id)
+    as_of_dt = None
+    source = "dashboard_manual"
 
+    for c in candidates:
+        if isinstance(c.get("payload"), dict):
+            if "as_of" in c["payload"]:
+                try:
+                    as_of_dt = datetime.fromisoformat(c["payload"]["as_of"])
+                except Exception:
+                    pass
+            if "source" in c["payload"]:
+                source = c["payload"]["source"]
+            if as_of_dt:
+                break
+
+    if as_of_dt is None and batch["source_request_id"]:
+        req = ingestion_repo.get_ingestion_request(conn, batch["source_request_id"])
+        if req:
+            if req.get("captured_at"):
+                as_of_dt = req["captured_at"]
+            elif req.get("draft_payload") and isinstance(req["draft_payload"], dict) and "as_of" in req["draft_payload"]:
+                try:
+                    as_of_dt = datetime.fromisoformat(req["draft_payload"]["as_of"])
+                except Exception:
+                    pass
+            if req.get("draft_payload") and isinstance(req["draft_payload"], dict) and "source" in req["draft_payload"]:
+                source = req["draft_payload"]["source"]
+
+    if as_of_dt is None:
+        as_of_date = batch["period_end"] or (batch["created_at"].date() if batch["created_at"] else date.today())
+        as_of_dt = datetime.combine(as_of_date, datetime.min.time(), tzinfo=timezone.utc)
+    else:
+        as_of_date = as_of_dt.date()
+
+    auth_balance = quantize_money(batch["authoritative_balance"], curr)
     is_first = is_first_account_observation(conn, batch["account_id"])
     snapshot_id = uuid4()
     opening_tx_id = None
     adj_tx_id = None
+    last_tx_at = None
 
     if is_first:
         effects = sum_committed_transaction_deltas(conn, batch["account_id"], ledger_start_date, as_of_date)
@@ -899,6 +1015,7 @@ def commit_reconciliation_batch(
                 from_amt, from_curr, from_acc = abs(opening_anchor), curr, batch["account_id"]
                 to_amt, to_curr, to_acc = None, None, None
 
+            last_tx_at = datetime.combine(ledger_start_date, datetime.min.time(), tzinfo=timezone.utc)
             tx_repo.create_transaction(
                 conn=conn,
                 tx_id=opening_tx_id,
@@ -938,7 +1055,7 @@ def commit_reconciliation_batch(
                 }
             )
     else:
-        # Recompute projected balance and residual under lock
+        # Recompute fresh projected balance and residual under lock
         projected_balance = ledger_balance_as_of(conn, batch["account_id"], as_of_dt)
         residual = quantize_money(auth_balance - projected_balance, curr)
 
@@ -960,6 +1077,7 @@ def commit_reconciliation_batch(
                 rate = fx_service.get_rate(curr, reporting_currency, as_of=as_of_date)
                 rep_amt = quantize_money(abs(residual) * rate, reporting_currency)
 
+            last_tx_at = as_of_dt
             tx_repo.create_transaction(
                 conn=conn,
                 tx_id=adj_tx_id,
@@ -999,7 +1117,7 @@ def commit_reconciliation_batch(
                 }
             )
 
-    # 5. Create authoritative snapshot
+    # 6. Create authoritative snapshot with exact instant and source
     snapshots_repo.create_account_snapshot(
         conn=conn,
         snapshot_id=snapshot_id,
@@ -1009,7 +1127,7 @@ def commit_reconciliation_batch(
         balance=auth_balance,
         currency=curr,
         snapshot_type="balance",
-        source="dashboard_manual",
+        source=source,
         reconciliation_batch_id=batch_id,
         source_request_id=batch["source_request_id"],
         is_authoritative=True,
@@ -1030,22 +1148,30 @@ def commit_reconciliation_batch(
             "account_id": str(batch["account_id"]),
             "as_of": as_of_dt.isoformat(),
             "balance": str(auth_balance),
-            "currency": curr
+            "currency": curr,
+            "source": source
         }
     )
 
-    # 6. Apply candidates
-    candidates = reconciliation_repo.list_candidates_for_batch(conn, batch_id)
+    # 7. Apply candidates (refresh candidate payload to match the exact applied adjustment amount)
     for c in candidates:
-        reconciliation_repo.update_candidate_status(
+        applied_payload = {
+            "adjustment_amount": str(residual),
+            "currency": curr,
+            "occurred_on": as_of_date.isoformat(),
+            "as_of": as_of_dt.isoformat(),
+            "source": source
+        }
+        reconciliation_repo.update_candidate_applied(
             conn=conn,
             candidate_id=c["id"],
             status="applied",
+            payload=applied_payload,
             applied_transaction_id=adj_tx_id,
             resolved_by_user_id=user_id
         )
 
-    # 7. Update Batch Status
+    # 8. Update Batch Status
     reconciliation_repo.update_reconciliation_batch(
         conn=conn,
         batch_id=batch_id,
@@ -1055,16 +1181,17 @@ def commit_reconciliation_batch(
         committed_at=datetime.now(timezone.utc)
     )
 
-    # 8. Update Account State
+    # 9. Update Account State (with initialized_at set and last_transaction_at updated)
     current_balance = recompute_account_current_balance(conn, batch["account_id"])
     accounts_repo.update_account_state_after_reconciliation(
         conn=conn,
         account_id=batch["account_id"],
         new_balance=current_balance,
-        snapshot_as_of=as_of_dt
+        snapshot_as_of=as_of_dt,
+        last_transaction_at=last_tx_at
     )
 
-    # 9. Audit Batch Commit
+    # 10. Audit Batch Commit
     audit_repo.insert_audit_event(
         conn=conn,
         household_id=household_id,

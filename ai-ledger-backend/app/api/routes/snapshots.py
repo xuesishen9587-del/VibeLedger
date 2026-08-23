@@ -15,7 +15,7 @@ class ImagePayload(BaseModel):
     base64: str = Field(..., min_length=1, description="Base64-encoded image data")
 
 class SnapshotCreateRequest(BaseModel):
-    idempotency_key: Optional[str] = Field(None, description="Optional browser / required device idempotency key")
+    idempotency_key: str = Field(..., min_length=8, max_length=200, description="Required device idempotency key (8-200 chars)")
     as_of: str = Field(..., description="Authoritative observation timestamp with timezone")
     balance: Optional[str] = Field(None, description="Observed account balance as decimal string")
     currency: Optional[str] = Field(None, description="3-letter uppercase currency code")

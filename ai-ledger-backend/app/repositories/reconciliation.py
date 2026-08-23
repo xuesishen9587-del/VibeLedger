@@ -186,6 +186,30 @@ def update_candidate_status(
             (status, applied_transaction_id, resolved_by_user_id, candidate_id)
         )
 
+def update_candidate_applied(
+    conn,
+    candidate_id: UUID,
+    status: str,
+    payload: Optional[Dict[str, Any]] = None,
+    applied_transaction_id: Optional[UUID] = None,
+    resolved_by_user_id: Optional[UUID] = None
+) -> None:
+    payload_json = json.dumps(payload) if payload is not None else None
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE reconciliation_candidates
+            SET status = %s,
+                payload = COALESCE(%s::jsonb, payload),
+                applied_transaction_id = %s,
+                resolved_by_user_id = COALESCE(%s, resolved_by_user_id),
+                resolved_at = now(),
+                updated_at = now()
+            WHERE id = %s;
+            """,
+            (status, payload_json, applied_transaction_id, resolved_by_user_id, candidate_id)
+        )
+
 def _map_batch_row(row) -> Dict[str, Any]:
     return {
         "id": row[0],

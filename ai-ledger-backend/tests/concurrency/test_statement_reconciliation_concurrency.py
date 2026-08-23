@@ -18,6 +18,7 @@ from app.services.reconciliation_service import (
     commit_statement_batch
 )
 from app.services.reference_fx_service import ReferenceFxService
+import app.services.ledger_service as ledger_service
 import app.repositories.accounts as accounts_repo
 import app.repositories.reconciliation as reconciliation_repo
 import app.repositories.transactions as tx_repo
@@ -74,12 +75,12 @@ class TestStatementReconciliationConcurrency(BaseDbTestCase):
     def test_01_concurrent_shortcut_and_statement_commit(self):
         """
         Thread 1 creates a statement reconciliation batch proposing missing expense X.
-        Thread 2 (Shortcut) commits expense X concurrently.
-        Thread 1 commits statement batch.
-        Asserts:
-        - Ledger balance is deducted exactly once for X.
-        - Transaction is marked statement_confirmed.
-        - No duplicate transaction exists.
+        Thread 2 (Shortcut worker) begins a transaction, calls real ledger_service.record_expense,
+        holding the account_state FOR UPDATE lock.
+        Thread 1 (Statement worker) attempts commit_statement_batch and naturally blocks on the lock.
+        Thread 2 commits and releases the lock.
+        Thread 1 completes commit_statement_batch, performs fresh reconciliation, sees the committed
+        Shortcut transaction, and matches it without creating a second expense.
         """
         conn = get_connection(self.test_schema)
         try:
@@ -105,31 +106,31 @@ class TestStatementReconciliationConcurrency(BaseDbTestCase):
                 batch_id = UUID(preview["batch_id"])
 
             shortcut_tx_id = uuid4()
-            barrier = threading.Barrier(2)
+            shortcut_written_and_lock_held = threading.Event()
+            statement_commit_started = threading.Event()
             results = {}
 
             def worker_shortcut():
                 c = get_connection(self.test_schema)
                 try:
-                    barrier.wait()
                     with transaction(c):
-                        tx_repo.create_transaction(
+                        ledger_service.record_expense(
                             conn=c,
-                            tx_id=shortcut_tx_id,
                             household_id=self.household_id,
-                            transaction_type="expense",
-                            occurred_on=date(2026, 8, 10),
-                            original_amount=Decimal("35.00"),
-                            original_currency="CNY",
-                            from_amount=Decimal("35.00"),
-                            from_currency="CNY",
                             from_account_id=self.acc_a_id,
+                            amount=Decimal("35.00"),
+                            currency="CNY",
                             category_id=self.cat_expense_id,
+                            occurred_on=date(2026, 8, 10),
                             merchant="Starbucks Coffee",
                             source="shortcut",
-                            status="committed"
+                            transaction_id=shortcut_tx_id,
+                            created_by_user_id=self.user_id
                         )
-                        accounts_repo.update_account_state_projection(c, self.acc_a_id, Decimal("9965.00"), datetime.now(timezone.utc))
+                        # Signal that record_expense finished and account_state lock is held
+                        shortcut_written_and_lock_held.set()
+                        # Wait until statement worker has initiated commit attempt (blocking on lock)
+                        statement_commit_started.wait(timeout=10)
                     results["shortcut"] = "ok"
                 except Exception as e:
                     results["shortcut"] = str(e)
@@ -139,7 +140,9 @@ class TestStatementReconciliationConcurrency(BaseDbTestCase):
             def worker_statement_commit():
                 c = get_connection(self.test_schema)
                 try:
-                    barrier.wait()
+                    # Wait for shortcut to write transaction and acquire lock
+                    shortcut_written_and_lock_held.wait(timeout=10)
+                    statement_commit_started.set()
                     with transaction(c):
                         res = commit_statement_batch(c, batch_id, user_id=self.user_id, fx_service=self.mock_fx)
                     results["statement"] = res
@@ -152,18 +155,21 @@ class TestStatementReconciliationConcurrency(BaseDbTestCase):
             t2 = threading.Thread(target=worker_statement_commit)
             t1.start()
             t2.start()
-            t1.join()
-            t2.join()
+            t1.join(timeout=10)
+            t2.join(timeout=10)
 
-            self.assertEqual(results["shortcut"], "ok")
-            self.assertIsInstance(results["statement"], dict)
+            self.assertFalse(t1.is_alive(), "Shortcut thread did not terminate (deadlock)")
+            self.assertFalse(t2.is_alive(), "Statement commit thread did not terminate (deadlock)")
+
+            self.assertEqual(results.get("shortcut"), "ok")
+            self.assertIsInstance(results.get("statement"), dict)
             self.assertEqual(results["statement"]["status"], "committed")
 
             # Verify balance is exactly 9965.00 (not double deducted)
             acc_state = accounts_repo.get_account_state(conn, self.acc_a_id)
             self.assertEqual(acc_state["ledger_balance"], Decimal("9965.00"))
 
-            # Verify only 1 expense transaction exists
+            # Verify exactly ONE expense transaction exists and it is the Shortcut transaction
             txs, _ = tx_repo.list_transactions_with_filters(
                 conn=conn,
                 household_id=self.household_id,
@@ -171,7 +177,23 @@ class TestStatementReconciliationConcurrency(BaseDbTestCase):
                 transaction_type="expense"
             )
             self.assertEqual(len(txs), 1)
+            self.assertEqual(txs[0]["id"], shortcut_tx_id)
             self.assertEqual(txs[0]["verification_status"], "statement_confirmed")
+
+            tx = tx_repo.get_transaction(conn, shortcut_tx_id)
+            self.assertIsNotNone(tx)
+            self.assertEqual(tx["statement_batch_id"], batch_id)
+
+            # Verify statement line matched
+            lines = reconciliation_repo.list_statement_lines_for_batch(conn, batch_id)
+            self.assertEqual(lines[0]["match_status"], "matched")
+            self.assertEqual(lines[0]["matched_transaction_id"], shortcut_tx_id)
+
+            # Verify candidate applied
+            cands = reconciliation_repo.list_candidates_for_batch(conn, batch_id)
+            self.assertEqual(cands[0]["status"], "applied")
+            self.assertEqual(cands[0]["candidate_type"], "match")
+            self.assertEqual(cands[0]["applied_transaction_id"], shortcut_tx_id)
         finally:
             conn.close()
 

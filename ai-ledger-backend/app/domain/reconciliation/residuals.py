@@ -77,20 +77,30 @@ def simulate_candidate_effects(
 
 def evaluate_residual_and_batch_readiness(
     baseline_projected_balance: Decimal,
-    authoritative_balance: Decimal,
+    authoritative_balance: Optional[Decimal],
     candidates: List[CandidateProposal],
     account_id: UUID,
     account_currency: str,
     fx_rate_to_cny: Optional[Decimal] = None
-) -> Tuple[str, Decimal, Optional[CandidateProposal]]:
+) -> Tuple[str, Optional[Decimal], Optional[CandidateProposal]]:
     """
     Computes final residual after all simulated candidate effects:
     residual = authoritative_balance - (baseline_projected_balance + simulated_delta)
+    When authoritative_balance is None:
+    - residual is None
+    - no adjustment candidate is proposed
+    - batch_status is determined solely by candidate review state ('needs_review' vs 'ready')
     Returns:
     - batch_status: 'ready' or 'needs_review'
-    - residual_amount: Decimal
+    - residual_amount: Optional[Decimal]
     - adjustment_candidate: Optional[CandidateProposal]
     """
+    has_needs_review_candidate = any(c.status == "needs_review" for c in candidates)
+
+    if authoritative_balance is None:
+        batch_status = "needs_review" if has_needs_review_candidate else "ready"
+        return batch_status, None, None
+
     simulated_delta = simulate_candidate_effects(candidates, account_id, account_currency)
     final_projected_balance = baseline_projected_balance + simulated_delta
     residual = quantize_money(authoritative_balance - final_projected_balance, account_currency)

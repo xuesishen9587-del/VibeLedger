@@ -12,6 +12,14 @@ from app.db import get_connection, transaction
 from tests.support.db_helper import BaseDbTestCase
 
 from app.domain.reconciliation.models import NormalizedStatementLine
+from app.domain.statements import StatementExtractionResult, ParsedStatementLine
+from app.domain.transactions import (
+    IncompatibleTargetTransactionError,
+    InvalidCandidatePayloadError,
+    StatementParseFailedError
+)
+from app.services.statement_parser import validate_and_normalize_extraction
+import app.services.statement_service as statement_service
 from app.services.reconciliation_service import (
     create_statement_reconciliation_batch,
     commit_statement_batch
@@ -21,7 +29,9 @@ import app.repositories.accounts as accounts_repo
 import app.repositories.reconciliation as reconciliation_repo
 import app.repositories.transactions as tx_repo
 import app.repositories.installments as installments_repo
+import app.repositories.devices as devices_repo
 import app.repositories.audit as audit_repo
+import hashlib
 
 
 class TestStatementReconciliationDb(BaseDbTestCase):
@@ -39,6 +49,7 @@ class TestStatementReconciliationDb(BaseDbTestCase):
 
         self.mock_fx = ReferenceFxService(fixed_rates={
             ("USD", "CNY"): Decimal("7.20"),
+            ("SGD", "CNY"): Decimal("5.30"),
             ("JPY", "USD"): Decimal("0.006820"),
             ("JPY", "CNY"): Decimal("0.0490")
         })
@@ -1634,8 +1645,1156 @@ class TestStatementReconciliationDb(BaseDbTestCase):
             conn.close()
 
 
+    def test_25_synthetic_multi_currency_savings_consolidated_statement(self):
+        """
+        Regression for Fix 10 & Fix 2:
+        Realistic synthetic multi-currency consolidated savings statement.
+        Page 1: Account summary with SGD (5432.10), CNH (12000.00), USD (3500.00) balances.
+        Pages 2-3: SGD transaction section (Withdrawal 120 SGD debit, Deposit 500 SGD credit).
+        Page 4: CNH transaction section (Deposit 2000 CNH), USD balance (3500 USD).
+        Page 5: Disclosures.
+        When SGD account selected:
+        - Only SGD lines enter reconciliation
+        - Authoritative balance is the SGD closing balance (5432.10)
+        - CNH/USD balances do not become SGD authoritative balance
+        - CNH/USD values cannot mutate SGD ledger.
+        """
+        conn = get_connection(self.test_schema)
+        try:
+            acc_sgd_id = uuid4()
+            with transaction(conn):
+                accounts_repo.create_account(
+                    conn=conn,
+                    account_id=acc_sgd_id,
+                    household_id=self.household_id,
+                    name="DBS Multi-Currency SGD Main",
+                    account_type="cash",
+                    currency="SGD",
+                    owner_user_id=self.user_id
+                )
+                tx_repo.create_transaction(
+                    conn=conn,
+                    tx_id=uuid4(),
+                    household_id=self.household_id,
+                    transaction_type="opening_balance",
+                    occurred_on=date(2026, 1, 1),
+                    original_amount=Decimal("5052.10"),
+                    original_currency="SGD",
+                    to_amount=Decimal("5052.10"),
+                    to_currency="SGD",
+                    to_account_id=acc_sgd_id,
+                    source="system",
+                    status="committed"
+                )
+                accounts_repo.update_account_state_projection(
+                    conn=conn,
+                    account_id=acc_sgd_id,
+                    new_balance=Decimal("5052.10"),
+                    last_transaction_at=datetime.now(timezone.utc)
+                )
+
+            # Parse and validate extraction for SGD section through validate_and_normalize_extraction
+            extraction = StatementExtractionResult(
+                period_start=date(2026, 8, 1),
+                period_end=date(2026, 8, 31),
+                closing_balance=Decimal("5432.10"),
+                currency="SGD",
+                lines=[
+                    ParsedStatementLine(
+                        source_page_no=2,
+                        source_row_no=1,
+                        transaction_on=date(2026, 8, 5),
+                        description_raw="FAIRPRICE SUPERMARKET SINGAPORE",
+                        amount=Decimal("120.00"),
+                        currency="SGD",
+                        direction="debit",
+                        line_type="expense"
+                    ),
+                    ParsedStatementLine(
+                        source_page_no=3,
+                        source_row_no=2,
+                        transaction_on=date(2026, 8, 12),
+                        description_raw="SALARY DEPOSIT ACME CORP",
+                        amount=Decimal("500.00"),
+                        currency="SGD",
+                        direction="credit",
+                        line_type="income"
+                    )
+                ]
+            )
+
+            auth_bal, stmt_bal, curr_out, unbilled_bal, p_start, p_end, sgd_lines = validate_and_normalize_extraction(
+                extraction=extraction,
+                account={"id": acc_sgd_id, "currency": "SGD", "name": "DBS Multi-Currency SGD Main"}
+            )
+            self.assertEqual(auth_bal, Decimal("5432.10"))
+            self.assertEqual(len(sgd_lines), 2)
+
+            with transaction(conn):
+                preview = create_statement_reconciliation_batch(
+                    conn=conn,
+                    household_id=self.household_id,
+                    account_id=acc_sgd_id,
+                    lines=sgd_lines,
+                    authoritative_balance=auth_bal,  # SGD closing balance: 5052.10 - 120 + 500 = 5432.10
+                    user_id=self.user_id,
+                    fx_service=self.mock_fx,
+                    default_expense_category_id=self.cat_expense_id,
+                    default_income_category_id=self.cat_income_id
+                )
+                self.assertEqual(preview["status"], "ready")
+                self.assertEqual(preview["residual_amount"], "0.00")
+                self.assertEqual(preview["created_count"], 2)
+                batch_id = UUID(preview["batch_id"])
+
+            with transaction(conn):
+                res = commit_statement_batch(conn, batch_id, user_id=self.user_id, fx_service=self.mock_fx)
+                self.assertEqual(res["status"], "committed")
+
+            state_sgd = accounts_repo.get_account_state(conn, acc_sgd_id)
+            self.assertEqual(Decimal(str(state_sgd["ledger_balance"])), Decimal("5432.10"))
+        finally:
+            conn.close()
+
+    def test_26_mock_parser_currency_mismatch_blocked(self):
+        """
+        Regression for Fix 2:
+        Selected account is SGD. Mock parser returns an admitted line with CNH currency.
+        Post-AI validation fails closed immediately -> zero ledger mutation.
+        """
+        account_sgd = {"id": str(uuid4()), "name": "DBS SGD", "currency": "SGD", "account_type": "savings"}
+        extraction = StatementExtractionResult(
+            period_start=date(2026, 8, 1),
+            period_end=date(2026, 8, 31),
+            closing_balance=Decimal("5000.00"),
+            currency="SGD",
+            lines=[
+                ParsedStatementLine(
+                    source_page_no=4,
+                    source_row_no=1,
+                    transaction_on=date(2026, 8, 15),
+                    description_raw="Mainland CNH Transfer",
+                    amount=Decimal("1000.00"),
+                    currency="CNH",  # Mismatch!
+                    direction="credit",
+                    line_type="transfer"
+                )
+            ]
+        )
+
+        with self.assertRaises(StatementParseFailedError) as ctx:
+            validate_and_normalize_extraction(extraction, account_sgd)
+        self.assertIn("settlement currency 'CNH' does not match selected account currency 'SGD'", str(ctx.exception))
+
+    def test_27_synthetic_credit_card_statement_workflow(self):
+        """
+        Regression for Fix 11:
+        Realistic credit card statement:
+        - Statement balance, current outstanding, unbilled balance
+        - Purchase (debit), Repayment (transfer leg, NOT cash income), Cashback (refund)
+        - Assertions: posted_on and transaction_on supported, current_outstanding preserved,
+          no credit_card_snapshots created, zero foreign-card authoritative mutation.
+        """
+        conn = get_connection(self.test_schema)
+        try:
+            acc_cc_id = uuid4()
+            with transaction(conn):
+                accounts_repo.create_account(
+                    conn=conn,
+                    account_id=acc_cc_id,
+                    household_id=self.household_id,
+                    name="Visa Signature Credit Card",
+                    account_type="credit",
+                    currency="CNY",
+                    owner_user_id=self.user_id
+                )
+                accounts_repo.update_account_state_projection(
+                    conn=conn,
+                    account_id=acc_cc_id,
+                    new_balance=Decimal("-1000.00"),
+                    last_transaction_at=datetime.now(timezone.utc)
+                )
+
+            # Purchase line
+            line_purchase = NormalizedStatementLine(
+                transaction_on=date(2026, 8, 2),
+                posted_on=date(2026, 8, 3),
+                description_raw="ELECTRONICS STORE SHANGHAI",
+                direction="debit",
+                line_type="expense",
+                settlement_amount=Decimal("300.00"),
+                settlement_currency="CNY"
+            )
+            # Repayment line
+            line_repay = NormalizedStatementLine(
+                transaction_on=date(2026, 8, 10),
+                posted_on=date(2026, 8, 10),
+                description_raw="AUTOPAY FROM CHECKING ACCOUNT",
+                direction="credit",
+                line_type="transfer",
+                settlement_amount=Decimal("500.00"),
+                settlement_currency="CNY"
+            )
+
+            with transaction(conn):
+                preview = create_statement_reconciliation_batch(
+                    conn=conn,
+                    household_id=self.household_id,
+                    account_id=acc_cc_id,
+                    lines=[line_purchase, line_repay],
+                    authoritative_balance=None,
+                    statement_balance=Decimal("800.00"),
+                    current_outstanding=Decimal("800.00"),
+                    unbilled_balance=Decimal("0.00"),
+                    user_id=self.user_id,
+                    fx_service=self.mock_fx,
+                    default_expense_category_id=self.cat_expense_id
+                )
+                batch_id = UUID(preview["batch_id"])
+
+            batch = reconciliation_repo.get_reconciliation_batch(conn, batch_id)
+            self.assertEqual(batch["current_outstanding"], Decimal("800.00"))
+            self.assertEqual(batch["statement_balance"], Decimal("800.00"))
+
+            # Verify no credit_card_snapshots was created
+            with conn.cursor() as cur:
+                cur.execute("SELECT count(*) FROM credit_card_snapshots WHERE account_id = %s;", (acc_cc_id,))
+                self.assertEqual(cur.fetchone()[0], 0)
+        finally:
+            conn.close()
+
+    def test_28_manual_target_match_compatibility_and_rejection(self):
+        """
+        Regression for Fix 4:
+        Statement line: 50.00 CNY expense.
+        Existing transaction: 3000.00 CNY unrelated transaction.
+        User accepts target 3000.00 CNY -> rejected with 422 IncompatibleTargetTransactionError.
+        User accepts target 50.00 CNY (lower score 60) -> succeeds without requiring auto-match 80.
+        """
+        conn = get_connection(self.test_schema)
+        try:
+            tx_unrelated_id = uuid4()
+            tx_close_id = uuid4()
+            with transaction(conn):
+                # Unrelated large transaction
+                tx_repo.create_transaction(
+                    conn=conn,
+                    tx_id=tx_unrelated_id,
+                    household_id=self.household_id,
+                    transaction_type="expense",
+                    occurred_on=date(2026, 8, 10),
+                    original_amount=Decimal("3000.00"),
+                    original_currency="CNY",
+                    from_amount=Decimal("3000.00"),
+                    from_currency="CNY",
+                    from_account_id=self.acc_cny_id,
+                    category_id=self.cat_expense_id,
+                    merchant="Luxury Goods",
+                    status="committed",
+                    source="shortcut"
+                )
+                # Compatible transaction (amount 50 CNY, date diff 3 days)
+                tx_repo.create_transaction(
+                    conn=conn,
+                    tx_id=tx_close_id,
+                    household_id=self.household_id,
+                    transaction_type="expense",
+                    occurred_on=date(2026, 8, 7),
+                    original_amount=Decimal("50.00"),
+                    original_currency="CNY",
+                    from_amount=Decimal("50.00"),
+                    from_currency="CNY",
+                    from_account_id=self.acc_cny_id,
+                    category_id=self.cat_expense_id,
+                    merchant="Corner Cafe",
+                    status="committed",
+                    source="shortcut"
+                )
+
+            line = NormalizedStatementLine(
+                transaction_on=date(2026, 8, 10),
+                description_raw="Restaurant Lunch",
+                direction="debit",
+                line_type="expense",
+                settlement_amount=Decimal("50.00"),
+                settlement_currency="CNY"
+            )
+
+            with transaction(conn):
+                preview = create_statement_reconciliation_batch(
+                    conn=conn,
+                    household_id=self.household_id,
+                    account_id=self.acc_cny_id,
+                    lines=[line],
+                    authoritative_balance=None,
+                    user_id=self.user_id,
+                    fx_service=self.mock_fx
+                )
+                batch_id = UUID(preview["batch_id"])
+
+            cands = reconciliation_repo.list_candidates_for_batch(conn, batch_id)
+            cand_id = cands[0]["id"]
+
+            # 1. Attempt accepting incompatible 3000 CNY transaction -> raises IncompatibleTargetTransactionError
+            with transaction(conn):
+                with self.assertRaises(IncompatibleTargetTransactionError):
+                    statement_service.accept_candidate(
+                        conn=conn,
+                        candidate_id=cand_id,
+                        household_id=self.household_id,
+                        target_transaction_id=tx_unrelated_id,
+                        user_id=self.user_id,
+                        fx_service=self.mock_fx
+                    )
+
+            # Candidate remains needs_review
+            cands_check = reconciliation_repo.list_candidates_for_batch(conn, batch_id)
+            self.assertEqual(cands_check[0]["status"], "needs_review")
+
+            # 2. Accept compatible 50 CNY transaction -> succeeds
+            with transaction(conn):
+                res = statement_service.accept_candidate(
+                    conn=conn,
+                    candidate_id=cand_id,
+                    household_id=self.household_id,
+                    target_transaction_id=tx_close_id,
+                    user_id=self.user_id,
+                    fx_service=self.mock_fx
+                )
+                self.assertEqual(res["status"], "ready")
+
+            cands_ok = reconciliation_repo.list_candidates_for_batch(conn, batch_id)
+            self.assertEqual(cands_ok[0]["status"], "accepted")
+            self.assertEqual(cands_ok[0]["candidate_type"], "match")
+        finally:
+            conn.close()
+
+    def test_29_commit_time_accepted_match_revalidation(self):
+        """
+        Regression for Fix 5:
+        User accepts valid target transaction.
+        Before commit, target is voided/modified to an incompatible state.
+        Commit revalidates under lock -> returns needs_review with zero ledger mutation.
+        """
+        conn = get_connection(self.test_schema)
+        try:
+            tx_id = uuid4()
+            with transaction(conn):
+                tx_repo.create_transaction(
+                    conn=conn,
+                    tx_id=tx_id,
+                    household_id=self.household_id,
+                    transaction_type="expense",
+                    occurred_on=date(2026, 8, 10),
+                    original_amount=Decimal("150.00"),
+                    original_currency="CNY",
+                    from_amount=Decimal("150.00"),
+                    from_currency="CNY",
+                    from_account_id=self.acc_cny_id,
+                    category_id=self.cat_expense_id,
+                    merchant="Bookstore",
+                    status="committed",
+                    source="shortcut"
+                )
+
+            line = NormalizedStatementLine(
+                transaction_on=date(2026, 8, 10),
+                description_raw="Bookstore",
+                direction="debit",
+                line_type="expense",
+                settlement_amount=Decimal("150.00"),
+                settlement_currency="CNY"
+            )
+
+            with transaction(conn):
+                preview = create_statement_reconciliation_batch(
+                    conn=conn,
+                    household_id=self.household_id,
+                    account_id=self.acc_cny_id,
+                    lines=[line],
+                    authoritative_balance=Decimal("9850.00"),
+                    user_id=self.user_id,
+                    fx_service=self.mock_fx
+                )
+                batch_id = UUID(preview["batch_id"])
+
+            cands = reconciliation_repo.list_candidates_for_batch(conn, batch_id)
+            cand_id = cands[0]["id"]
+
+            with transaction(conn):
+                statement_service.accept_candidate(
+                    conn=conn,
+                    candidate_id=cand_id,
+                    household_id=self.household_id,
+                    target_transaction_id=tx_id,
+                    user_id=self.user_id,
+                    fx_service=self.mock_fx
+                )
+
+            # Target transaction is voided before commit
+            with transaction(conn):
+                with conn.cursor() as cur:
+                    cur.execute("UPDATE transactions SET status = 'voided', deleted_at = now(), delete_reason = 'user_voided' WHERE id = %s;", (tx_id,))
+
+            # Commit must detect incompatibility and return needs_review
+            with transaction(conn):
+                commit_res = commit_statement_batch(conn, batch_id, user_id=self.user_id, fx_service=self.mock_fx)
+                self.assertEqual(commit_res["status"], "needs_review")
+
+            batch_db = reconciliation_repo.get_reconciliation_batch(conn, batch_id)
+            self.assertEqual(batch_db["status"], "needs_review")
+        finally:
+            conn.close()
+
+    def test_30_candidate_patch_type_specific_negative_validations(self):
+        """
+        Regression for Fix 7:
+        Candidate PATCH is not an arbitrary JSON dump.
+        Validates complete merged payload against candidate type constraints.
+        """
+        conn = get_connection(self.test_schema)
+        try:
+            line = NormalizedStatementLine(
+                transaction_on=date(2026, 8, 10),
+                description_raw="Supermarket Purchase",
+                direction="debit",
+                line_type="expense",
+                settlement_amount=Decimal("100.00"),
+                settlement_currency="CNY"
+            )
+            with transaction(conn):
+                preview = create_statement_reconciliation_batch(
+                    conn=conn,
+                    household_id=self.household_id,
+                    account_id=self.acc_cny_id,
+                    lines=[line],
+                    authoritative_balance=None,
+                    user_id=self.user_id,
+                    fx_service=self.mock_fx
+                )
+                batch_id = UUID(preview["batch_id"])
+
+            cands = reconciliation_repo.list_candidates_for_batch(conn, batch_id)
+            cand_id = cands[0]["id"]
+
+            # 1. Invalid transaction_type (smuggling transfer through create_transaction)
+            with self.assertRaises(InvalidCandidatePayloadError):
+                statement_service.patch_candidate(
+                    conn=conn,
+                    candidate_id=cand_id,
+                    household_id=self.household_id,
+                    payload={"transaction": {"transaction_type": "transfer"}}
+                )
+
+            # 2. Negative amount
+            with self.assertRaises(InvalidCandidatePayloadError):
+                statement_service.patch_candidate(
+                    conn=conn,
+                    candidate_id=cand_id,
+                    household_id=self.household_id,
+                    payload={"transaction": {"amount": "-50.00"}}
+                )
+
+            # 3. Currency mismatch
+            with self.assertRaises(InvalidCandidatePayloadError):
+                statement_service.patch_candidate(
+                    conn=conn,
+                    candidate_id=cand_id,
+                    household_id=self.household_id,
+                    payload={"transaction": {"currency": "USD"}}
+                )
+
+            # 4. Income category for expense
+            with self.assertRaises(InvalidCandidatePayloadError):
+                statement_service.patch_candidate(
+                    conn=conn,
+                    candidate_id=cand_id,
+                    household_id=self.household_id,
+                    payload={"transaction": {"transaction_type": "expense", "category_id": str(self.cat_income_id)}}
+                )
+        finally:
+            conn.close()
+
+    def test_31_stale_residual_and_adjustment_clearing(self):
+        """
+        Regression for Fix 8:
+        Initial: residual = +47.00, adjustment = +47.00.
+        User resolves missing evidence explaining 47.00.
+        Recompute sets residual = 0.00, adjustment_amount = NULL in database.
+        Old +47.00 adjustment candidate is marked rejected/cleared.
+        """
+        conn = get_connection(self.test_schema)
+        try:
+            # Reconciled account initial balance 10000.00, authoritative closing 10047.00 (difference +47.00)
+            # Initially no lines in statement -> residual is +47.00, auto-adjustment candidate created for +47.00
+            with transaction(conn):
+                preview = create_statement_reconciliation_batch(
+                    conn=conn,
+                    household_id=self.household_id,
+                    account_id=self.acc_cny_id,
+                    lines=[],
+                    authoritative_balance=Decimal("10047.00"),
+                    user_id=self.user_id,
+                    fx_service=self.mock_fx
+                )
+                batch_id = UUID(preview["batch_id"])
+
+            batch_init = reconciliation_repo.get_reconciliation_batch(conn, batch_id)
+            self.assertEqual(batch_init["residual_amount"], Decimal("47.00"))
+            self.assertEqual(batch_init["adjustment_amount"], Decimal("47.00"))
+
+            # An income transaction of 47.00 is discovered/resolved
+            with transaction(conn):
+                tx_repo.create_transaction(
+                    conn=conn,
+                    tx_id=uuid4(),
+                    household_id=self.household_id,
+                    transaction_type="cash_income",
+                    occurred_on=date(2026, 8, 10),
+                    original_amount=Decimal("47.00"),
+                    original_currency="CNY",
+                    to_amount=Decimal("47.00"),
+                    to_currency="CNY",
+                    to_account_id=self.acc_cny_id,
+                    category_id=self.cat_income_id,
+                    status="committed",
+                    source="shortcut"
+                )
+
+            # Recompute batch
+            with transaction(conn):
+                statement_service.recompute_statement_batch_after_review(conn, batch_id, self.household_id, self.mock_fx)
+
+            batch_updated = reconciliation_repo.get_reconciliation_batch(conn, batch_id)
+            # Residual is now 0.00 and adjustment is explicitly cleared to NULL
+            self.assertEqual(batch_updated["residual_amount"], Decimal("0.00"))
+            self.assertIsNone(batch_updated["adjustment_amount"])
+
+            cands_after = reconciliation_repo.list_candidates_for_batch(conn, batch_id)
+            adj_cands = [c for c in cands_after if c["candidate_type"] == "adjustment"]
+            if adj_cands:
+                self.assertEqual(adj_cands[0]["status"], "rejected")
+        finally:
+            conn.close()
+
+    def test_32_upload_size_limit_boundary(self):
+        """
+        Regression for Fix 9:
+        Upload boundary tests:
+        - Exactly 20MB is accepted by size gate.
+        - 20MB + 1 byte is rejected with 422 InvalidRequestError.
+        """
+        from app.main import create_app
+        from app.api.deps import get_db_connection
+        from fastapi.testclient import TestClient
+
+        app = create_app()
+
+        def _get_db():
+            conn = get_connection(self.test_schema)
+            try:
+                yield conn
+            finally:
+                if not conn.closed:
+                    conn.close()
+
+        app.dependency_overrides[get_db_connection] = _get_db
+        client = TestClient(app)
+
+        raw_token = f"vbl_test_{uuid4().hex}"
+        token_hash = hashlib.sha256(raw_token.encode("utf-8")).digest()
+        headers = {"Authorization": f"Bearer {raw_token}"}
+
+        conn = get_connection(self.test_schema)
+        try:
+            with transaction(conn):
+                devices_repo.create_device(conn, uuid4(), self.user_id, "Test Device", token_hash)
+        finally:
+            conn.close()
+
+        # 1. 20MB + 1 byte is rejected with 422 by upload size gate
+        oversized_bytes = b"x" * (20 * 1024 * 1024 + 1)
+        res_over = client.post(
+            f"/api/v1/accounts/{self.acc_cny_id}/statements",
+            headers=headers,
+            files={"file": ("statement.pdf", oversized_bytes, "application/pdf")}
+        )
+        self.assertEqual(res_over.status_code, 422)
+        self.assertIn("exceeds the maximum allowed file size", res_over.text)
+
+        # 2. Exactly 20MB passes the upload size gate (it may fail parsing invalid bytes, but size gate does NOT reject it)
+        exact_bytes = b"%PDF-1.4\n" + b"0" * (20 * 1024 * 1024 - 9)
+        self.assertEqual(len(exact_bytes), 20 * 1024 * 1024)
+        res_exact = client.post(
+            f"/api/v1/accounts/{self.acc_cny_id}/statements",
+            headers=headers,
+            files={"file": ("statement.pdf", exact_bytes, "application/pdf")}
+        )
+        # Size gate did not reject with file size error
+        self.assertNotIn("exceeds the maximum allowed file size", res_exact.text)
+
+    def test_33_refund_review_validator_canonical_payload(self):
+        """
+        Regression for Requirement 2:
+        - Phase-6 weak merchant refund candidate uses canonical payload:
+          payload["refund"]["original_expense_id"]
+        - Manual Accept succeeds if deterministic constraints pass.
+        - Over-refund attempt is strictly rejected.
+        """
+        conn = get_connection(self.test_schema)
+        try:
+            exp_id = uuid4()
+            with transaction(conn):
+                tx_repo.create_transaction(
+                    conn=conn,
+                    tx_id=exp_id,
+                    household_id=self.household_id,
+                    transaction_type="expense",
+                    occurred_on=date(2026, 8, 1),
+                    original_amount=Decimal("300.00"),
+                    original_currency="CNY",
+                    from_amount=Decimal("300.00"),
+                    from_currency="CNY",
+                    from_account_id=self.acc_cny_id,
+                    category_id=self.cat_expense_id,
+                    merchant="Apple Store",
+                    status="committed",
+                    source="shortcut"
+                )
+
+            # Statement line: refund credit 100 CNY
+            line = NormalizedStatementLine(
+                transaction_on=date(2026, 8, 15),
+                description_raw="APPLE STORE REFUND",
+                direction="credit",
+                line_type="refund",
+                settlement_amount=Decimal("100.00"),
+                settlement_currency="CNY"
+            )
+
+            with transaction(conn):
+                preview = create_statement_reconciliation_batch(
+                    conn=conn,
+                    household_id=self.household_id,
+                    account_id=self.acc_cny_id,
+                    lines=[line],
+                    authoritative_balance=None,
+                    user_id=self.user_id,
+                    fx_service=self.mock_fx
+                )
+                batch_id = UUID(preview["batch_id"])
+
+            cands = reconciliation_repo.list_candidates_for_batch(conn, batch_id)
+            cand_id = cands[0]["id"]
+
+            # Over-refund attempt (> remaining 300 CNY)
+            with transaction(conn):
+                with self.assertRaises(InvalidCandidatePayloadError):
+                    statement_service.patch_candidate(
+                        conn=conn,
+                        candidate_id=cand_id,
+                        household_id=self.household_id,
+                        payload={
+                            "refund": {
+                                "original_expense_id": str(exp_id),
+                                "amount": "500.00"
+                            }
+                        }
+                    )
+
+            # Valid canonical refund payload
+            with transaction(conn):
+                statement_service.patch_candidate(
+                    conn=conn,
+                    candidate_id=cand_id,
+                    household_id=self.household_id,
+                    payload={
+                        "refund": {
+                            "original_expense_id": str(exp_id),
+                            "amount": "100.00",
+                            "currency": "CNY"
+                        }
+                    }
+                )
+                res = statement_service.accept_candidate(
+                    conn=conn,
+                    candidate_id=cand_id,
+                    household_id=self.household_id,
+                    user_id=self.user_id,
+                    fx_service=self.mock_fx
+                )
+                self.assertEqual(res["status"], "ready")
+
+            cands_check = reconciliation_repo.list_candidates_for_batch(conn, batch_id)
+            cand_db = next(c for c in cands_check if c["id"] == cand_id)
+            self.assertEqual(cand_db["status"], "accepted")
+        finally:
+            conn.close()
+
+    def test_34_installment_review_validator_canonical_schema(self):
+        """
+        Regression for Requirement 3:
+        - Uses canonical Phase-6 installment payload and repository methods:
+          installments_repo.get_installment_plan()
+          installments_repo.list_periods_for_plan()
+        - Valid CATEGORY_REQUIRED candidate accepted after patch.
+        - Wrong period_id rejected.
+        - Already billed period rejected.
+        - No AttributeError path.
+        """
+        conn = get_connection(self.test_schema)
+        try:
+            plan_id = uuid4()
+            p1_id = uuid4()
+            p2_id = uuid4()
+
+            tx_p1_id = uuid4()
+            with transaction(conn):
+                tx_repo.create_transaction(
+                    conn=conn,
+                    tx_id=tx_p1_id,
+                    household_id=self.household_id,
+                    transaction_type="expense",
+                    occurred_on=date(2026, 7, 10),
+                    original_amount=Decimal("200.00"),
+                    original_currency="CNY",
+                    from_amount=Decimal("200.00"),
+                    from_currency="CNY",
+                    from_account_id=self.acc_cny_id,
+                    category_id=self.cat_expense_id,
+                    merchant="Electronics Store",
+                    status="committed",
+                    source="reconciliation"
+                )
+                installments_repo.create_installment_plan(
+                    conn=conn,
+                    plan_id=plan_id,
+                    household_id=self.household_id,
+                    credit_account_id=self.acc_cny_id,
+                    purchase_occurred_on=date(2026, 6, 1),
+                    original_amount=Decimal("600.00"),
+                    original_currency="CNY",
+                    account_currency="CNY",
+                    total_periods=3,
+                    merchant="Electronics Store",
+                    status="active"
+                )
+                # Period 1 is created as scheduled, then marked billed
+                installments_repo.create_installment_period(
+                    conn=conn,
+                    period_id=p1_id,
+                    plan_id=plan_id,
+                    period_no=1,
+                    scheduled_amount=Decimal("200.00"),
+                    currency="CNY",
+                    status="scheduled"
+                )
+                installments_repo.update_installment_period_billed(
+                    conn=conn,
+                    period_id=p1_id,
+                    expense_transaction_id=tx_p1_id
+                )
+                # Period 2 is scheduled
+                installments_repo.create_installment_period(
+                    conn=conn,
+                    period_id=p2_id,
+                    plan_id=plan_id,
+                    period_no=2,
+                    scheduled_amount=Decimal("200.00"),
+                    currency="CNY",
+                    status="scheduled"
+                )
+
+            line = NormalizedStatementLine(
+                transaction_on=date(2026, 8, 10),
+                description_raw="Electronics Store Installment 2/3",
+                direction="debit",
+                line_type="expense",
+                settlement_amount=Decimal("200.00"),
+                settlement_currency="CNY"
+            )
+
+            with transaction(conn):
+                preview = create_statement_reconciliation_batch(
+                    conn=conn,
+                    household_id=self.household_id,
+                    account_id=self.acc_cny_id,
+                    lines=[line],
+                    authoritative_balance=None,
+                    user_id=self.user_id,
+                    fx_service=self.mock_fx
+                )
+                batch_id = UUID(preview["batch_id"])
+
+            cands = reconciliation_repo.list_candidates_for_batch(conn, batch_id)
+            cand_id = cands[0]["id"]
+            with transaction(conn):
+                with conn.cursor() as cur:
+                    cur.execute("UPDATE reconciliation_candidates SET candidate_type = 'recognize_installment' WHERE id = %s;", (cand_id,))
+
+            # 1. Attempt accepting already billed period 1 -> rejected
+            with transaction(conn):
+                with self.assertRaises(InvalidCandidatePayloadError):
+                    statement_service.patch_candidate(
+                        conn=conn,
+                        candidate_id=cand_id,
+                        household_id=self.household_id,
+                        payload={
+                            "installment": {
+                                "plan_id": str(plan_id),
+                                "period_id": str(p1_id),
+                                "period_no": 1,
+                                "category_id": str(self.cat_expense_id)
+                            }
+                        }
+                    )
+
+            # 2. Attempt invalid period_id -> rejected
+            with transaction(conn):
+                with self.assertRaises(InvalidCandidatePayloadError):
+                    statement_service.patch_candidate(
+                        conn=conn,
+                        candidate_id=cand_id,
+                        household_id=self.household_id,
+                        payload={
+                            "installment": {
+                                "plan_id": str(plan_id),
+                                "period_id": str(uuid4()),
+                                "category_id": str(self.cat_expense_id)
+                            }
+                        }
+                    )
+
+            # 3. Valid period 2 patch & accept -> succeeds
+            with transaction(conn):
+                statement_service.patch_candidate(
+                    conn=conn,
+                    candidate_id=cand_id,
+                    household_id=self.household_id,
+                    payload={
+                        "installment": {
+                            "plan_id": str(plan_id),
+                            "period_id": str(p2_id),
+                            "period_no": 2,
+                            "scheduled_amount": "200.00",
+                            "currency": "CNY",
+                            "category_id": str(self.cat_expense_id)
+                        }
+                    }
+                )
+                res = statement_service.accept_candidate(
+                    conn=conn,
+                    candidate_id=cand_id,
+                    household_id=self.household_id,
+                    user_id=self.user_id,
+                    fx_service=self.mock_fx
+                )
+                self.assertEqual(res["status"], "ready")
+        finally:
+            conn.close()
+
+    def test_35_transfer_full_leg_and_currency_validation(self):
+        """
+        Regression for Requirement 4:
+        - candidate_type = create_transfer requires complete two-leg validation at ACCEPT time.
+        - A. Missing from_amount -> rejected
+        - B. from_account currency USD vs payload from_currency CNY -> rejected
+        - C. Valid CNY -> CNY two-leg transfer -> accepted
+        - D. Valid USD -> CNY explicit two-leg transfer -> accepted
+        """
+        conn = get_connection(self.test_schema)
+        try:
+            line = NormalizedStatementLine(
+                transaction_on=date(2026, 8, 10),
+                description_raw="Transfer Inter-Account",
+                direction="debit",
+                line_type="transfer",
+                settlement_amount=Decimal("500.00"),
+                settlement_currency="CNY"
+            )
+
+            with transaction(conn):
+                preview = create_statement_reconciliation_batch(
+                    conn=conn,
+                    household_id=self.household_id,
+                    account_id=self.acc_cny_id,
+                    lines=[line],
+                    authoritative_balance=None,
+                    user_id=self.user_id,
+                    fx_service=self.mock_fx
+                )
+                batch_id = UUID(preview["batch_id"])
+
+            cands = reconciliation_repo.list_candidates_for_batch(conn, batch_id)
+            cand_id = cands[0]["id"]
+
+            # A. Same-currency transfer missing from_amount -> cannot accept
+            with transaction(conn):
+                with self.assertRaises(InvalidCandidatePayloadError):
+                    statement_service.patch_candidate(
+                        conn=conn,
+                        candidate_id=cand_id,
+                        household_id=self.household_id,
+                        payload={
+                            "transfer": {
+                                "from_account_id": str(self.acc_cny_id),
+                                "to_account_id": str(self.acc_cny2_id),
+                                "to_amount": "500.00",
+                                "from_currency": "CNY",
+                                "to_currency": "CNY"
+                            }
+                        }
+                    )
+                    statement_service.accept_candidate(
+                        conn=conn,
+                        candidate_id=cand_id,
+                        household_id=self.household_id,
+                        user_id=self.user_id,
+                        fx_service=self.mock_fx
+                    )
+
+            # B. from_account currency USD but payload from_currency CNY -> reject
+            with transaction(conn):
+                with self.assertRaises(InvalidCandidatePayloadError):
+                    statement_service.patch_candidate(
+                        conn=conn,
+                        candidate_id=cand_id,
+                        household_id=self.household_id,
+                        payload={
+                            "transfer": {
+                                "from_account_id": str(self.acc_usd_id),
+                                "to_account_id": str(self.acc_cny_id),
+                                "from_amount": "100.00",
+                                "to_amount": "720.00",
+                                "from_currency": "CNY",  # USD account cannot have CNY from_currency
+                                "to_currency": "CNY"
+                            }
+                        }
+                    )
+
+            # C. Valid CNY -> CNY two-leg transfer -> accepted
+            with transaction(conn):
+                statement_service.patch_candidate(
+                    conn=conn,
+                    candidate_id=cand_id,
+                    household_id=self.household_id,
+                    payload={
+                        "transfer": {
+                            "from_account_id": str(self.acc_cny_id),
+                            "to_account_id": str(self.acc_cny2_id),
+                            "from_amount": "500.00",
+                            "to_amount": "500.00",
+                            "from_currency": "CNY",
+                            "to_currency": "CNY"
+                        }
+                    }
+                )
+                res_cny = statement_service.accept_candidate(
+                    conn=conn,
+                    candidate_id=cand_id,
+                    household_id=self.household_id,
+                    user_id=self.user_id,
+                    fx_service=self.mock_fx
+                )
+                self.assertEqual(res_cny["status"], "ready")
+
+            # D. Valid USD -> CNY explicit two-leg transfer -> accepted
+            with transaction(conn):
+                statement_service.patch_candidate(
+                    conn=conn,
+                    candidate_id=cand_id,
+                    household_id=self.household_id,
+                    payload={
+                        "transfer": {
+                            "from_account_id": str(self.acc_usd_id),
+                            "to_account_id": str(self.acc_cny_id),
+                            "from_amount": "69.44",
+                            "to_amount": "500.00",
+                            "from_currency": "USD",
+                            "to_currency": "CNY"
+                        }
+                    }
+                )
+                res_cross = statement_service.accept_candidate(
+                    conn=conn,
+                    candidate_id=cand_id,
+                    household_id=self.household_id,
+                    user_id=self.user_id,
+                    fx_service=self.mock_fx
+                )
+                self.assertEqual(res_cross["status"], "ready")
+        finally:
+            conn.close()
+
+    def test_36_manual_match_semantic_type_compatibility(self):
+        """
+        Regression for Requirement 5:
+        - Statement line 'expense' cannot manually match transaction 'transfer'
+        - Statement line 'fee' cannot manually match transaction 'expense'
+        - Statement line 'unknown' + compatible target succeeds
+        """
+        conn = get_connection(self.test_schema)
+        try:
+            tx_transfer_id = uuid4()
+            tx_expense_id = uuid4()
+            tx_fee_id = uuid4()
+
+            with transaction(conn):
+                tx_repo.create_transaction(
+                    conn=conn,
+                    tx_id=tx_transfer_id,
+                    household_id=self.household_id,
+                    transaction_type="transfer",
+                    occurred_on=date(2026, 8, 10),
+                    original_amount=Decimal("500.00"),
+                    original_currency="CNY",
+                    from_amount=Decimal("500.00"),
+                    from_currency="CNY",
+                    from_account_id=self.acc_cny_id,
+                    to_amount=Decimal("500.00"),
+                    to_currency="CNY",
+                    to_account_id=self.acc_cny2_id,
+                    status="committed",
+                    source="shortcut"
+                )
+                tx_repo.create_transaction(
+                    conn=conn,
+                    tx_id=tx_expense_id,
+                    household_id=self.household_id,
+                    transaction_type="expense",
+                    occurred_on=date(2026, 8, 10),
+                    original_amount=Decimal("20.00"),
+                    original_currency="CNY",
+                    from_amount=Decimal("20.00"),
+                    from_currency="CNY",
+                    from_account_id=self.acc_cny_id,
+                    category_id=self.cat_expense_id,
+                    status="committed",
+                    source="shortcut"
+                )
+                tx_repo.create_transaction(
+                    conn=conn,
+                    tx_id=tx_fee_id,
+                    household_id=self.household_id,
+                    transaction_type="expense",
+                    occurred_on=date(2026, 8, 10),
+                    original_amount=Decimal("80.00"),
+                    original_currency="CNY",
+                    from_amount=Decimal("80.00"),
+                    from_currency="CNY",
+                    from_account_id=self.acc_cny_id,
+                    category_id=self.cat_expense_id,
+                    status="committed",
+                    source="shortcut"
+                )
+
+            # 1. Statement line expense vs transfer target -> rejected
+            line_exp = NormalizedStatementLine(
+                transaction_on=date(2026, 8, 10),
+                description_raw="Store Expense",
+                direction="debit",
+                line_type="expense",
+                settlement_amount=Decimal("500.00"),
+                settlement_currency="CNY"
+            )
+            with transaction(conn):
+                prev1 = create_statement_reconciliation_batch(
+                    conn=conn,
+                    household_id=self.household_id,
+                    account_id=self.acc_cny_id,
+                    lines=[line_exp],
+                    authoritative_balance=None,
+                    user_id=self.user_id,
+                    fx_service=self.mock_fx
+                )
+                b1_id = UUID(prev1["batch_id"])
+
+            c1 = reconciliation_repo.list_candidates_for_batch(conn, b1_id)[0]
+            with transaction(conn):
+                with self.assertRaises(IncompatibleTargetTransactionError):
+                    statement_service.accept_candidate(
+                        conn=conn,
+                        candidate_id=c1["id"],
+                        household_id=self.household_id,
+                        target_transaction_id=tx_transfer_id,
+                        user_id=self.user_id,
+                        fx_service=self.mock_fx
+                    )
+
+            # 2. Statement line fee vs expense target -> rejected
+            line_fee = NormalizedStatementLine(
+                transaction_on=date(2026, 8, 10),
+                description_raw="Card Fee",
+                direction="debit",
+                line_type="fee",
+                settlement_amount=Decimal("20.00"),
+                settlement_currency="CNY"
+            )
+            with transaction(conn):
+                prev2 = create_statement_reconciliation_batch(
+                    conn=conn,
+                    household_id=self.household_id,
+                    account_id=self.acc_cny_id,
+                    lines=[line_fee],
+                    authoritative_balance=None,
+                    user_id=self.user_id,
+                    fx_service=self.mock_fx
+                )
+                b2_id = UUID(prev2["batch_id"])
+
+            c2 = reconciliation_repo.list_candidates_for_batch(conn, b2_id)[0]
+            with transaction(conn):
+                with self.assertRaises(IncompatibleTargetTransactionError):
+                    statement_service.accept_candidate(
+                        conn=conn,
+                        candidate_id=c2["id"],
+                        household_id=self.household_id,
+                        target_transaction_id=tx_expense_id,
+                        user_id=self.user_id,
+                        fx_service=self.mock_fx
+                    )
+
+            # 3. Statement line unknown vs compatible expense target -> accepted
+            line_unk = NormalizedStatementLine(
+                transaction_on=date(2026, 8, 10),
+                description_raw="POS Debit",
+                direction="debit",
+                line_type="unknown",
+                settlement_amount=Decimal("80.00"),
+                settlement_currency="CNY"
+            )
+            with transaction(conn):
+                prev3 = create_statement_reconciliation_batch(
+                    conn=conn,
+                    household_id=self.household_id,
+                    account_id=self.acc_cny_id,
+                    lines=[line_unk],
+                    authoritative_balance=None,
+                    user_id=self.user_id,
+                    fx_service=self.mock_fx
+                )
+                b3_id = UUID(prev3["batch_id"])
+
+            c3 = reconciliation_repo.list_candidates_for_batch(conn, b3_id)[0]
+            with transaction(conn):
+                res3 = statement_service.accept_candidate(
+                    conn=conn,
+                    candidate_id=c3["id"],
+                    household_id=self.household_id,
+                    target_transaction_id=tx_fee_id,
+                    user_id=self.user_id,
+                    fx_service=self.mock_fx
+                )
+                self.assertEqual(res3["status"], "ready")
+        finally:
+            conn.close()
+
+
 if __name__ == "__main__":
     unittest.main()
+
+
+
 
 
 

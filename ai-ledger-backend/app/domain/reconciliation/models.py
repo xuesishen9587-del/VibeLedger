@@ -1,4 +1,4 @@
-﻿from dataclasses import dataclass, field
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Optional, Dict, Any, List
@@ -162,6 +162,6 @@ class ReconciliationResult:
     matched_count: int
     created_count: int
     pending_count: int
-    residual_amount: Decimal
+    residual_amount: Optional[Decimal] = None
     adjustment_amount: Optional[Decimal] = None
     engine_version: str = "v1.0.0"

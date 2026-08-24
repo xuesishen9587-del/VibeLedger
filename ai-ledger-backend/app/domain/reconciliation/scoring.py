@@ -243,5 +243,58 @@ def compute_match_score(
         score.amount_score + score.date_score + score.merchant_score + score.type_score + score.extra_score
     )
 
-
     return score
+
+
+def validate_target_match_compatibility(
+    line: NormalizedStatementLine,
+    tx: Dict[str, Any],
+    selected_account_id: Any
+) -> None:
+    """
+    Deterministically validates that a target transaction satisfies all hard compatibility rules
+    with a statement line for human review and commit revalidation.
+    """
+    from app.domain.transactions import IncompatibleTargetTransactionError
+
+    if not tx or tx.get("deleted_at") is not None:
+        raise IncompatibleTargetTransactionError("Target transaction is deleted or does not exist.")
+    if tx.get("status") != "committed":
+        raise IncompatibleTargetTransactionError("Target transaction is not committed.")
+
+    sel_acc_str = str(selected_account_id)
+    from_acc = str(tx.get("from_account_id")) if tx.get("from_account_id") else None
+    to_acc = str(tx.get("to_account_id")) if tx.get("to_account_id") else None
+
+    if from_acc != sel_acc_str and to_acc != sel_acc_str:
+        raise IncompatibleTargetTransactionError("Target transaction does not involve the reconciled account.")
+
+    if line.direction == "debit" and from_acc != sel_acc_str:
+        raise IncompatibleTargetTransactionError("Debit statement line must match a transaction outgoing from the reconciled account.")
+    if line.direction == "credit" and to_acc != sel_acc_str:
+        raise IncompatibleTargetTransactionError("Credit statement line must match a transaction incoming to the reconciled account.")
+
+    # Hard semantic type compatibility:
+    tx_type = tx.get("transaction_type")
+    if line.line_type == "expense" and tx_type != "expense":
+        raise IncompatibleTargetTransactionError(f"Statement line type 'expense' cannot match transaction type '{tx_type}'.")
+    elif line.line_type == "fee" and tx_type != "fee":
+        raise IncompatibleTargetTransactionError(f"Statement line type 'fee' cannot match transaction type '{tx_type}'.")
+    elif line.line_type == "transfer" and tx_type != "transfer":
+        raise IncompatibleTargetTransactionError(f"Statement line type 'transfer' cannot match transaction type '{tx_type}'.")
+    elif line.line_type == "refund" and tx_type != "refund":
+        raise IncompatibleTargetTransactionError(f"Statement line type 'refund' cannot match transaction type '{tx_type}'.")
+    elif line.line_type == "income" and tx_type not in ("income", "cash_income"):
+        raise IncompatibleTargetTransactionError(f"Statement line type 'income' cannot match transaction type '{tx_type}'.")
+    # line_type == 'unknown' is allowed to match any valid transaction type if other gates pass
+
+    score = compute_match_score(line, tx, selected_account_id)
+    if score.is_blocked:
+        raise IncompatibleTargetTransactionError(
+            f"Target transaction is incompatible with statement line: {score.block_reason}"
+        )
+    if score.amount_score == 0:
+        raise IncompatibleTargetTransactionError(
+            "Target transaction amount/currency does not match statement line."
+        )
+

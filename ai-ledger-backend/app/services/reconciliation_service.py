@@ -14,6 +14,7 @@ from app.domain.reconciliation.models import (
 )
 from app.domain.reconciliation.normalizer import normalize_description
 from app.domain.reconciliation.engine import run_deterministic_reconciliation
+from app.domain.reconciliation.scoring import compute_match_score
 from app.domain.reconciliation.residuals import evaluate_residual_and_batch_readiness
 from app.services.reference_fx_service import ReferenceFxService
 from app.services.snapshot_service import ledger_balance_as_of
@@ -610,15 +611,23 @@ def commit_statement_batch(
                     # Candidate was explicitly reviewed/resolved by user
                     if old_c.get("status") == "accepted":
                         if old_c.get("candidate_type") == "match" and old_c.get("target_transaction_id"):
-                            # Check if explicit target transaction is still committed and active
-                            t_tx = next((t for t in fresh_txs if t["id"] == old_c["target_transaction_id"]), None)
-                            if t_tx and t_tx.get("status") == "committed" and t_tx.get("deleted_at") is None:
-                                fc.candidate_type = "match"
-                                fc.target_transaction_id = old_c["target_transaction_id"]
-                                fc.status = "accepted"
+                            # Check if explicit target transaction is still committed, active, and passes deterministic compatibility
+                            t_tx = tx_repo.get_transaction(conn, old_c["target_transaction_id"])
+                            st_line_obj = next((l for l in norm_lines if l.id == fc.statement_line_id), None)
+                            if t_tx and t_tx.get("status") == "committed" and t_tx.get("deleted_at") is None and st_line_obj:
+                                score = compute_match_score(st_line_obj, t_tx, primary_account_id)
+                                if not score.is_blocked and score.amount_score > 0:
+                                    fc.candidate_type = "match"
+                                    fc.target_transaction_id = old_c["target_transaction_id"]
+                                    fc.status = "accepted"
+                                else:
+                                    fc.status = "needs_review"
+                                    fc.reason_code = score.block_reason or "TARGET_TRANSACTION_INCOMPATIBLE"
+                                    fc.reason_detail = f"Target transaction is no longer compatible with statement line: {score.block_reason}"
                             else:
                                 fc.status = "needs_review"
                                 fc.reason_code = "TARGET_TRANSACTION_INVALID"
+                                fc.reason_detail = "Target transaction was modified, deleted, or is no longer active."
                         else:
                             fc.status = "accepted"
                 if isinstance(old_c.get("payload"), dict):

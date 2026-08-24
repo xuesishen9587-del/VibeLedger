@@ -5,7 +5,9 @@ from fastapi import APIRouter, Depends, UploadFile, File, Form, status
 from pydantic import BaseModel, Field
 
 from app.api.deps import get_db_connection, get_authenticated_device
+from app.config import get_settings
 from app.db import transaction
+from app.domain.transactions import InvalidRequestError
 from app.services.reference_fx_service import ReferenceFxService
 import app.services.statement_service as statement_service
 
@@ -31,7 +33,19 @@ async def upload_account_statement_endpoint(
     fx_svc = getattr(router, "_reference_fx_service", None) or ReferenceFxService()
     parser = getattr(router, "_statement_parser", None)
 
-    file_bytes = await file.read()
+    settings = get_settings()
+    max_bytes = settings.MAX_STATEMENT_PDF_BYTES
+    content = bytearray()
+    chunk_size = 1024 * 1024
+    while True:
+        chunk = await file.read(chunk_size)
+        if not chunk:
+            break
+        content.extend(chunk)
+        if len(content) > max_bytes:
+            raise InvalidRequestError("Uploaded statement PDF exceeds the maximum allowed file size of 20MB.")
+
+    file_bytes = bytes(content)
 
     with transaction(conn):
         result = statement_service.upload_and_process_statement(

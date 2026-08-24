@@ -40,6 +40,10 @@ class Settings(BaseSettings):
         10 * 1024 * 1024,
         description="Maximum allowed decoded image size in bytes (default: 10MB)."
     )
+    MAX_STATEMENT_PDF_BYTES: int = Field(
+        20 * 1024 * 1024,
+        description="Maximum allowed Statement PDF file size in bytes (default: 20MB)."
+    )
     FX_API_BASE_URL: str = Field(
         "https://api.frankfurter.app",
         description="Base URL for public reference FX rates provider."

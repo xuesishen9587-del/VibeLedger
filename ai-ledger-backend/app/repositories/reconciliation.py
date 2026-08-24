@@ -124,28 +124,44 @@ def lock_reconciliation_batch(conn, batch_id: UUID) -> Optional[Dict[str, Any]]:
             return None
         return _map_batch_row(row)
 
+class _UnsetType:
+    def __repr__(self):
+        return "UNSET"
+
+UNSET = _UnsetType()
+
+
 def update_reconciliation_batch(
     conn,
     batch_id: UUID,
     status: str,
-    residual_amount: Optional[Decimal] = None,
-    adjustment_amount: Optional[Decimal] = None,
-    committed_at: Optional[datetime] = None
+    residual_amount: Any = UNSET,
+    adjustment_amount: Any = UNSET,
+    committed_at: Any = UNSET
 ) -> None:
+    set_clauses = [
+        "status = %s",
+        "row_version = row_version + 1",
+        "updated_at = now()"
+    ]
+    params: List[Any] = [status]
+
+    if residual_amount is not UNSET:
+        set_clauses.append("residual_amount = %s")
+        params.append(residual_amount)
+
+    if adjustment_amount is not UNSET:
+        set_clauses.append("adjustment_amount = %s")
+        params.append(adjustment_amount)
+
+    if committed_at is not UNSET:
+        set_clauses.append("committed_at = %s")
+        params.append(committed_at)
+
+    params.append(batch_id)
+    query = f"UPDATE reconciliation_batches SET {', '.join(set_clauses)} WHERE id = %s;"
     with conn.cursor() as cur:
-        cur.execute(
-            """
-            UPDATE reconciliation_batches
-            SET status = %s,
-                residual_amount = COALESCE(%s, residual_amount),
-                adjustment_amount = COALESCE(%s, adjustment_amount),
-                committed_at = COALESCE(%s, committed_at),
-                row_version = row_version + 1,
-                updated_at = now()
-            WHERE id = %s;
-            """,
-            (status, residual_amount, adjustment_amount, committed_at, batch_id)
-        )
+        cur.execute(query, params)
 
 def update_reconciliation_batch_stats(
     conn,
@@ -154,32 +170,41 @@ def update_reconciliation_batch_stats(
     matched_count: int,
     created_count: int,
     pending_count: int,
-    residual_amount: Optional[Decimal] = None,
-    adjustment_amount: Optional[Decimal] = None,
-    engine_version: Optional[str] = "v1.0.0",
-    committed_at: Optional[datetime] = None
+    residual_amount: Any = UNSET,
+    adjustment_amount: Any = UNSET,
+    engine_version: Any = UNSET,
+    committed_at: Any = UNSET
 ) -> None:
+    set_clauses = [
+        "status = %s",
+        "matched_count = %s",
+        "created_count = %s",
+        "pending_count = %s",
+        "row_version = row_version + 1",
+        "updated_at = now()"
+    ]
+    params: List[Any] = [status, matched_count, created_count, pending_count]
+
+    if residual_amount is not UNSET:
+        set_clauses.append("residual_amount = %s")
+        params.append(residual_amount)
+
+    if adjustment_amount is not UNSET:
+        set_clauses.append("adjustment_amount = %s")
+        params.append(adjustment_amount)
+
+    if engine_version is not UNSET:
+        set_clauses.append("engine_version = %s")
+        params.append(engine_version)
+
+    if committed_at is not UNSET:
+        set_clauses.append("committed_at = %s")
+        params.append(committed_at)
+
+    params.append(batch_id)
+    query = f"UPDATE reconciliation_batches SET {', '.join(set_clauses)} WHERE id = %s;"
     with conn.cursor() as cur:
-        cur.execute(
-            """
-            UPDATE reconciliation_batches
-            SET status = %s,
-                matched_count = %s,
-                created_count = %s,
-                pending_count = %s,
-                residual_amount = COALESCE(%s, residual_amount),
-                adjustment_amount = COALESCE(%s, adjustment_amount),
-                engine_version = COALESCE(%s, engine_version),
-                committed_at = COALESCE(%s, committed_at),
-                row_version = row_version + 1,
-                updated_at = now()
-            WHERE id = %s;
-            """,
-            (
-                status, matched_count, created_count, pending_count,
-                residual_amount, adjustment_amount, engine_version, committed_at, batch_id
-            )
-        )
+        cur.execute(query, params)
 
 # --- Statement Lines ---
 
@@ -223,6 +248,23 @@ def create_statement_line(
             )
         )
         row = cur.fetchone()
+        return _map_statement_line_row(row)
+
+def get_statement_line(conn, line_id: UUID) -> Optional[Dict[str, Any]]:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT id, batch_id, source_page_no, source_row_no, transaction_on, posted_on,
+                   description_raw, description_normalized, amount, currency, direction, line_type,
+                   match_status, matched_transaction_id, confidence, line_fingerprint, created_at
+            FROM statement_lines
+            WHERE id = %s;
+            """,
+            (line_id,)
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
         return _map_statement_line_row(row)
 
 def list_statement_lines_for_batch(conn, batch_id: UUID) -> List[Dict[str, Any]]:

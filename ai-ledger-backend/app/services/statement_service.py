@@ -24,6 +24,7 @@ from app.domain.transactions import (
     SameAccountTransferError
 )
 from app.domain.reconciliation.models import NormalizedStatementLine, CandidateProposal
+from app.domain.reconciliation.scoring import compute_match_score
 from app.domain.reconciliation.residuals import evaluate_residual_and_batch_readiness, simulate_candidate_effects
 from app.services.statement_parser import (
     BaseStatementParser,
@@ -39,6 +40,7 @@ from app.services.reconciliation_service import (
 import app.repositories.accounts as accounts_repo
 import app.repositories.transactions as tx_repo
 import app.repositories.reconciliation as reconciliation_repo
+import app.repositories.installments as installments_repo
 import app.repositories.audit as audit_repo
 
 logger = logging.getLogger(__name__)
@@ -356,6 +358,206 @@ def list_statement_lines_for_batch(
     return {"items": items}
 
 
+def _row_to_normalized_line(st_line_row: Dict[str, Any]) -> NormalizedStatementLine:
+    return NormalizedStatementLine(
+        id=st_line_row["id"],
+        description_raw=st_line_row["description_raw"],
+        direction=st_line_row["direction"],
+        line_type=st_line_row.get("line_type", "unknown"),
+        settlement_amount=parse_decimal(st_line_row.get("amount") or st_line_row.get("settlement_amount")),
+        settlement_currency=st_line_row.get("currency") or st_line_row.get("settlement_currency"),
+        transaction_on=st_line_row.get("transaction_on"),
+        posted_on=st_line_row.get("posted_on"),
+        description_normalized=st_line_row.get("description_normalized") or st_line_row["description_raw"],
+        original_amount=parse_decimal(st_line_row["original_amount"]) if st_line_row.get("original_amount") is not None else None,
+        original_currency=st_line_row.get("original_currency"),
+        merchant_hint=st_line_row.get("merchant_hint"),
+        external_reference=st_line_row.get("external_reference"),
+        source_page_no=st_line_row.get("source_page_no"),
+        source_row_no=st_line_row.get("source_row_no") or 1,
+        confidence=st_line_row.get("confidence")
+    )
+
+
+def validate_target_match_compatibility(
+    line: NormalizedStatementLine,
+    tx: Dict[str, Any],
+    selected_account_id: UUID
+) -> None:
+    """
+    Deterministically validates that a target transaction satisfies all hard compatibility rules
+    with a statement line.
+    """
+    if not tx or tx.get("deleted_at") is not None:
+        raise IncompatibleTargetTransactionError("Target transaction is deleted or does not exist.")
+    if tx.get("status") != "committed":
+        raise IncompatibleTargetTransactionError("Target transaction is not committed.")
+
+    sel_acc_str = str(selected_account_id)
+    from_acc = str(tx.get("from_account_id")) if tx.get("from_account_id") else None
+    to_acc = str(tx.get("to_account_id")) if tx.get("to_account_id") else None
+
+    if from_acc != sel_acc_str and to_acc != sel_acc_str:
+        raise IncompatibleTargetTransactionError("Target transaction does not involve the reconciled account.")
+
+    if line.direction == "debit" and from_acc != sel_acc_str:
+        raise IncompatibleTargetTransactionError("Debit statement line must match a transaction outgoing from the reconciled account.")
+    if line.direction == "credit" and to_acc != sel_acc_str:
+        raise IncompatibleTargetTransactionError("Credit statement line must match a transaction incoming to the reconciled account.")
+
+    score = compute_match_score(line, tx, selected_account_id)
+    if score.is_blocked:
+        raise IncompatibleTargetTransactionError(
+            f"Target transaction is incompatible with statement line: {score.block_reason}"
+        )
+    if score.amount_score == 0:
+        raise IncompatibleTargetTransactionError(
+            "Target transaction amount/currency does not match statement line."
+        )
+
+
+def validate_candidate_payload_for_type(
+    conn,
+    candidate_type: str,
+    merged_payload: Dict[str, Any],
+    account: Dict[str, Any],
+    household_id: UUID,
+    for_accept: bool = False,
+    statement_line: Optional[Dict[str, Any]] = None
+) -> None:
+    """
+    Validates complete merged candidate payload according to candidate type invariants.
+    """
+    if candidate_type == "adjustment":
+        raise InvalidCandidatePayloadError("Reconciliation adjustments are engine-owned and cannot be manually modified.")
+
+    if candidate_type in ("create_transaction", "match"):
+        tx_data = merged_payload.get("transaction", merged_payload)
+        tx_type = tx_data.get("transaction_type")
+        
+        line_dir = statement_line.get("direction") if statement_line else None
+        
+        if tx_type:
+            if tx_type not in ("expense", "fee", "cash_income"):
+                raise InvalidCandidatePayloadError(f"Unsupported transaction type '{tx_type}' for create_transaction candidate.")
+        elif for_accept:
+            if line_dir == "debit":
+                tx_type = "expense"
+            elif line_dir == "credit":
+                tx_type = "cash_income"
+            else:
+                raise InvalidCandidatePayloadError("Cannot accept candidate with unknown transaction semantics. Please specify transaction_type.")
+
+        amt_val = tx_data.get("amount") or (statement_line.get("settlement_amount") or statement_line.get("amount") if statement_line else None)
+        if amt_val is not None:
+            amt = parse_decimal(amt_val)
+            if amt <= Decimal("0.00"):
+                raise InvalidCandidatePayloadError("Transaction amount must be strictly positive.")
+        elif for_accept:
+            raise InvalidCandidatePayloadError("Transaction amount is required.")
+
+        curr_val = tx_data.get("currency") or (statement_line.get("settlement_currency") or statement_line.get("currency") if statement_line else None)
+        if curr_val and curr_val.upper() != account["currency"].upper():
+            raise InvalidCandidatePayloadError(f"Transaction currency '{curr_val}' must match account currency '{account['currency']}'.")
+
+        # Account leg validation
+        if tx_type in ("expense", "fee"):
+            from_acc = tx_data.get("from_account_id")
+            if from_acc and str(from_acc) != str(account["id"]):
+                raise InvalidCandidatePayloadError("Expense/Fee from_account_id must match the reconciled account.")
+        elif tx_type == "cash_income":
+            to_acc = tx_data.get("to_account_id")
+            if to_acc and str(to_acc) != str(account["id"]):
+                raise InvalidCandidatePayloadError("Cash income to_account_id must match the reconciled account.")
+
+        cat_id_str = tx_data.get("category_id")
+        if cat_id_str:
+            try:
+                cat_id = UUID(str(cat_id_str))
+                cat = accounts_repo.get_category(conn, cat_id)
+                if not cat or cat["household_id"] != household_id or cat["status"] != "active":
+                    raise CategoryResourceNotFoundError(cat_id)
+                if tx_type in ("expense", "fee") and cat["category_type"] != "expense":
+                    raise InvalidCandidatePayloadError(f"Category type '{cat['category_type']}' is not valid for {tx_type} transaction.")
+                if tx_type == "cash_income" and cat["category_type"] != "income":
+                    raise InvalidCandidatePayloadError(f"Category type '{cat['category_type']}' is not valid for cash_income transaction.")
+            except (ValueError, TypeError):
+                raise InvalidCandidatePayloadError(f"Invalid category_id: {cat_id_str}")
+        elif for_accept and candidate_type == "create_transaction":
+            raise InvalidCandidatePayloadError(f"Active category is required to accept {tx_type or 'transaction'} candidate.")
+
+    elif candidate_type == "create_transfer":
+        tf_data = merged_payload.get("transfer", merged_payload)
+        from_acc_str = tf_data.get("from_account_id")
+        to_acc_str = tf_data.get("to_account_id")
+        if from_acc_str and to_acc_str:
+            if str(from_acc_str) == str(to_acc_str):
+                raise SameAccountTransferError("Transfer source and destination must be different.")
+            from_acc = accounts_repo.get_account(conn, UUID(str(from_acc_str)))
+            to_acc = accounts_repo.get_account(conn, UUID(str(to_acc_str)))
+            if not from_acc or from_acc["household_id"] != household_id or from_acc["status"] != "active":
+                raise AccountResourceNotFoundError(UUID(str(from_acc_str)))
+            if not to_acc or to_acc["household_id"] != household_id or to_acc["status"] != "active":
+                raise AccountResourceNotFoundError(UUID(str(to_acc_str)))
+
+            from_amt_val = tf_data.get("from_amount")
+            to_amt_val = tf_data.get("to_amount")
+            if from_amt_val is not None and parse_decimal(from_amt_val) <= Decimal("0.00"):
+                raise InvalidCandidatePayloadError("Transfer from_amount must be strictly positive.")
+            if to_amt_val is not None and parse_decimal(to_amt_val) <= Decimal("0.00"):
+                raise InvalidCandidatePayloadError("Transfer to_amount must be strictly positive.")
+
+            if from_acc["currency"] != to_acc["currency"]:
+                if for_accept and (from_amt_val is None or to_amt_val is None):
+                    raise InvalidCandidatePayloadError("Cross-currency transfer requires both from_amount and to_amount legs.")
+        elif for_accept:
+            raise InvalidCandidatePayloadError("Transfer requires both from_account_id and to_account_id.")
+
+    elif candidate_type == "refund":
+        rf_data = merged_payload.get("refund", merged_payload)
+        orig_tx_id_str = rf_data.get("original_transaction_id") or rf_data.get("target_transaction_id")
+        if orig_tx_id_str:
+            orig_tx = tx_repo.get_transaction(conn, UUID(str(orig_tx_id_str)))
+            if not orig_tx or orig_tx["household_id"] != household_id:
+                raise IncompatibleTargetTransactionError("Original transaction not found in household.")
+            if orig_tx["status"] != "committed" or orig_tx.get("deleted_at") is not None:
+                raise IncompatibleTargetTransactionError("Original transaction is not active.")
+            if orig_tx["transaction_type"] != "expense":
+                raise IncompatibleTargetTransactionError("Refund target must be an expense transaction.")
+            
+            amt_val = rf_data.get("amount") or (statement_line.get("settlement_amount") or statement_line.get("amount") if statement_line else None)
+            if amt_val is not None:
+                rf_amt = parse_decimal(amt_val)
+                if rf_amt <= Decimal("0.00"):
+                    raise InvalidCandidatePayloadError("Refund amount must be strictly positive.")
+                existing_refunds = tx_repo.get_active_refunds_for_expense(conn, orig_tx["id"])
+                total_refunded = sum(parse_decimal(r.get("from_amount") or r.get("to_amount") or r.get("original_amount")) for r in existing_refunds)
+                remaining = parse_decimal(orig_tx["from_amount"]) - total_refunded
+                if rf_amt > remaining:
+                    raise InvalidCandidatePayloadError(f"Refund amount {rf_amt} exceeds remaining refundable amount {remaining}.")
+        elif for_accept:
+            raise InvalidCandidatePayloadError("Refund candidate requires a valid original_transaction_id.")
+
+    elif candidate_type == "recognize_installment":
+        inst_data = merged_payload.get("installment", merged_payload)
+        plan_id_str = inst_data.get("plan_id")
+        period_no = inst_data.get("period_number")
+        if plan_id_str:
+            plan = installments_repo.get_plan(conn, UUID(str(plan_id_str)))
+            if not plan or plan["household_id"] != household_id:
+                raise InvalidCandidatePayloadError("Installment plan not found in household.")
+            if plan["credit_account_id"] != account["id"]:
+                raise InvalidCandidatePayloadError("Installment plan does not match the reconciled account.")
+            if period_no is not None:
+                period = installments_repo.get_period(conn, plan["id"], int(period_no))
+                if not period:
+                    raise InvalidCandidatePayloadError(f"Installment period {period_no} not found.")
+                if period["status"] != "pending":
+                    raise InvalidCandidatePayloadError(f"Installment period {period_no} is not pending (current status: {period['status']}).")
+        elif for_accept:
+            raise InvalidCandidatePayloadError("Installment candidate requires a valid plan_id and period_number.")
+
+
 def accept_candidate(
     conn,
     candidate_id: UUID,
@@ -396,9 +598,12 @@ def accept_candidate(
     if batch["status"] in ("committed", "rejected", "failed"):
         raise InvalidCandidateStateError(f"Cannot accept candidate on '{batch['status']}' batch.")
 
+    st_line_row = reconciliation_repo.get_statement_line(conn, sl_id) if sl_id else None
+    account = accounts_repo.get_account(conn, batch["account_id"])
+
     selected_target_tx = target_transaction_id or current_target_tx
 
-    # 3. If target_transaction_id provided, validate compatibility
+    # 3. If target_transaction_id provided or match candidate, validate compatibility
     if selected_target_tx:
         target_tx = tx_repo.get_transaction(conn, selected_target_tx)
         if not target_tx or target_tx["household_id"] != household_id:
@@ -408,11 +613,23 @@ def accept_candidate(
         if target_tx["status"] != "committed":
             raise IncompatibleTargetTransactionError("Target transaction is not committed.")
 
-        # Ensure target transaction involves the batch account
-        if target_tx.get("from_account_id") != batch["account_id"] and target_tx.get("to_account_id") != batch["account_id"]:
-            raise IncompatibleTargetTransactionError("Target transaction does not involve the reconciled account.")
+        # Ensure target transaction involves the batch account and satisfies deterministic compatibility
+        if st_line_row:
+            norm_line = _row_to_normalized_line(st_line_row)
+            validate_target_match_compatibility(norm_line, target_tx, batch["account_id"])
 
         c_type = "match"
+    else:
+        # Validate that candidate payload has sufficient deterministic facts to be accepted
+        validate_candidate_payload_for_type(
+            conn=conn,
+            candidate_type=c_type,
+            merged_payload=payload or {},
+            account=account,
+            household_id=household_id,
+            for_accept=True,
+            statement_line=st_line_row
+        )
 
     # 4. Update candidate status to 'accepted'
     reconciliation_repo.update_candidate_status(
@@ -506,31 +723,8 @@ def patch_candidate(
     if not isinstance(payload, dict):
         raise InvalidCandidatePayloadError("Payload must be a JSON object.")
 
-    if c_type in ("create_transaction", "match"):
-        tx_data = payload.get("transaction", payload)
-        cat_id_str = tx_data.get("category_id")
-        if cat_id_str:
-            try:
-                cat_id = UUID(str(cat_id_str))
-                cat = accounts_repo.get_category(conn, cat_id)
-                if not cat or cat["household_id"] != household_id or cat["status"] != "active":
-                    raise CategoryResourceNotFoundError(cat_id)
-            except (ValueError, TypeError):
-                raise InvalidCandidatePayloadError(f"Invalid category_id: {cat_id_str}")
-
-    elif c_type == "create_transfer":
-        tf_data = payload.get("transfer", payload)
-        from_acc_str = tf_data.get("from_account_id")
-        to_acc_str = tf_data.get("to_account_id")
-        if from_acc_str and to_acc_str:
-            if str(from_acc_str) == str(to_acc_str):
-                raise SameAccountTransferError("Transfer source and destination must be different.")
-            from_acc = accounts_repo.get_account(conn, UUID(str(from_acc_str)))
-            to_acc = accounts_repo.get_account(conn, UUID(str(to_acc_str)))
-            if not from_acc or from_acc["household_id"] != household_id or from_acc["status"] != "active":
-                raise AccountResourceNotFoundError(UUID(str(from_acc_str)))
-            if not to_acc or to_acc["household_id"] != household_id or to_acc["status"] != "active":
-                raise AccountResourceNotFoundError(UUID(str(to_acc_str)))
+    account = accounts_repo.get_account(conn, batch["account_id"])
+    st_line_row = reconciliation_repo.get_statement_line(conn, sl_id) if sl_id else None
 
     # 4. Merge payload preserving evidence and sub-dictionaries
     merged_payload = dict(old_payload if isinstance(old_payload, dict) else {})
@@ -541,6 +735,16 @@ def patch_candidate(
             merged_payload[k] = merged_sub
         else:
             merged_payload[k] = v
+
+    validate_candidate_payload_for_type(
+        conn=conn,
+        candidate_type=c_type,
+        merged_payload=merged_payload,
+        account=account,
+        household_id=household_id,
+        for_accept=False,
+        statement_line=st_line_row
+    )
 
     with conn.cursor() as cur:
         cur.execute(
@@ -754,13 +958,15 @@ def recompute_statement_batch_after_review(
             )
     else:
         if existing_adj:
-            # Mark existing adjustment applied / 0
+            # Stale adjustment candidate must be marked rejected/cleared
             reconciliation_repo.update_reconciliation_candidate_full(
                 conn=conn,
                 candidate_id=existing_adj["id"],
                 candidate_type="adjustment",
-                status="accepted",
-                payload={"adjustment_amount": "0.00", "currency": curr}
+                status="rejected",
+                payload={"adjustment_amount": "0.00", "currency": curr},
+                reason_code="RESIDUAL_EXPLAINED",
+                reason_detail="Residual is zero or explained by other evidence."
             )
 
     adj_amount = parse_decimal(adj_cand.payload["adjustment_amount"]) if (adj_cand and adj_cand.status == "accepted") else None

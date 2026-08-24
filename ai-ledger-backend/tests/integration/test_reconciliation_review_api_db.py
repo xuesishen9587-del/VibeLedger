@@ -296,7 +296,31 @@ class TestReconciliationReviewApiDb(BaseDbTestCase):
         sum_res = self.client.get(f"/api/v1/reconciliation-batches/{batch_id}", headers=self.headers)
         self.assertEqual(sum_res.json()["status"], "needs_review")
 
-        # Accept candidate
+        # 1. Empty accept on unknown candidate MUST be rejected (422)
+        empty_accept_res = self.client.post(
+            f"/api/v1/reconciliation-candidates/{cand_id}/accept",
+            headers=self.headers,
+            json={}
+        )
+        self.assertEqual(empty_accept_res.status_code, 422)
+
+        # 2. PATCH candidate with explicit validated facts
+        patch_res = self.client.patch(
+            f"/api/v1/reconciliation-candidates/{cand_id}",
+            headers=self.headers,
+            json={
+                "payload": {
+                    "transaction": {
+                        "transaction_type": "expense",
+                        "category_id": str(self.cat_dining_id),
+                        "from_account_id": str(self.acc_cny_id)
+                    }
+                }
+            }
+        )
+        self.assertEqual(patch_res.status_code, 200)
+
+        # 3. Accept candidate after validated PATCH
         accept_res = self.client.post(
             f"/api/v1/reconciliation-candidates/{cand_id}/accept",
             headers=self.headers,

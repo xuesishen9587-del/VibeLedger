@@ -546,11 +546,13 @@ class TestStatementReconciliationDb(BaseDbTestCase):
 
             updated_tx = tx_repo.get_transaction(conn, tx_id)
             self.assertEqual(updated_tx["verification_status"], "statement_confirmed")
-            self.assertEqual(updated_tx["from_amount"], Decimal("68.90"))
-            self.assertEqual(updated_tx["account_leg_status"], "estimated")
+            self.assertEqual(updated_tx["from_amount"], Decimal("68.20"))
+            self.assertEqual(updated_tx["account_leg_status"], "authoritative")
+            self.assertEqual(updated_tx["posted_on"], date(2026, 8, 12))
+            self.assertIsNotNone(updated_tx["reporting_fx_locked_at"])
 
             acc_state = accounts_repo.get_account_state(conn, self.acc_usd_id)
-            self.assertEqual(acc_state["ledger_balance"], Decimal("1931.10"))
+            self.assertEqual(acc_state["ledger_balance"], Decimal("1931.80"))
         finally:
             conn.close()
 

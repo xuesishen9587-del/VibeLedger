@@ -116,6 +116,35 @@ def upload_and_process_statement(
             caller_period_end=period_end
         )
 
+        # Build workflow-only snapshot candidate payload for credit card accounts
+        cc_snapshot_payload: Optional[Dict[str, Any]] = None
+        if account.get("account_type") == "credit":
+            rem_due = None
+            if extraction.remaining_statement_due is not None:
+                rem_due = quantize_money(extraction.remaining_statement_due, account["currency"])
+                if rem_due < Decimal("0.00"):
+                    raise StatementParseFailedError("Remaining statement due must be non-negative.")
+
+            has_cc_facts = (stmt_bal is not None or rem_due is not None or unbilled_bal is not None or curr_out is not None)
+            if has_cc_facts:
+                cc_data: Dict[str, Any] = {}
+                if extraction.statement_date is not None:
+                    cc_data["statement_date"] = extraction.statement_date.isoformat()
+                if p_start is not None:
+                    cc_data["statement_period_start"] = p_start.isoformat()
+                if p_end is not None:
+                    cc_data["statement_period_end"] = p_end.isoformat()
+                if stmt_bal is not None:
+                    cc_data["statement_balance"] = str(stmt_bal)
+                if rem_due is not None:
+                    cc_data["remaining_statement_due"] = str(rem_due)
+                if unbilled_bal is not None:
+                    cc_data["unbilled_balance"] = str(unbilled_bal)
+                if curr_out is not None:
+                    cc_data["current_outstanding"] = str(curr_out)
+                cc_data["currency"] = account["currency"]
+                cc_snapshot_payload = {"credit_card_snapshot": cc_data}
+
         # 6. Execute deterministic reconciliation engine and persist batch
         batch_record = create_statement_reconciliation_batch(
             conn=conn,
@@ -132,7 +161,9 @@ def upload_and_process_statement(
             user_id=user_id,
             default_expense_category_id=default_expense_category_id,
             default_income_category_id=default_income_category_id,
-            fx_service=fx_service
+            household_movements=None,
+            fx_service=fx_service,
+            credit_card_snapshot_payload=cc_snapshot_payload
         )
 
         # Update parser_version on batch record

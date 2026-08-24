@@ -14,7 +14,7 @@ from app.domain.reconciliation.models import (
 )
 from app.domain.reconciliation.normalizer import normalize_description
 from app.domain.reconciliation.engine import run_deterministic_reconciliation
-from app.domain.reconciliation.scoring import compute_match_score
+from app.domain.reconciliation.scoring import compute_match_score, validate_target_match_compatibility
 from app.domain.reconciliation.residuals import evaluate_residual_and_batch_readiness
 from app.services.reference_fx_service import ReferenceFxService
 from app.services.snapshot_service import ledger_balance_as_of
@@ -614,16 +614,16 @@ def commit_statement_batch(
                             # Check if explicit target transaction is still committed, active, and passes deterministic compatibility
                             t_tx = tx_repo.get_transaction(conn, old_c["target_transaction_id"])
                             st_line_obj = next((l for l in norm_lines if l.id == fc.statement_line_id), None)
-                            if t_tx and t_tx.get("status") == "committed" and t_tx.get("deleted_at") is None and st_line_obj:
-                                score = compute_match_score(st_line_obj, t_tx, primary_account_id)
-                                if not score.is_blocked and score.amount_score > 0:
+                            if t_tx and st_line_obj:
+                                try:
+                                    validate_target_match_compatibility(st_line_obj, t_tx, primary_account_id)
                                     fc.candidate_type = "match"
                                     fc.target_transaction_id = old_c["target_transaction_id"]
                                     fc.status = "accepted"
-                                else:
+                                except Exception as ce:
                                     fc.status = "needs_review"
-                                    fc.reason_code = score.block_reason or "TARGET_TRANSACTION_INCOMPATIBLE"
-                                    fc.reason_detail = f"Target transaction is no longer compatible with statement line: {score.block_reason}"
+                                    fc.reason_code = getattr(ce, "code", "TARGET_TRANSACTION_INCOMPATIBLE")
+                                    fc.reason_detail = str(ce)
                             else:
                                 fc.status = "needs_review"
                                 fc.reason_code = "TARGET_TRANSACTION_INVALID"

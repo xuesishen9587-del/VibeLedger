@@ -282,6 +282,9 @@ class GeminiStatementParser(BaseStatementParser):
                     confidence=parse_decimal(l_data.get("confidence")) if l_data.get("confidence") is not None else None
                 ))
 
+            raw_doc_currency = parsed_data.get("currency")
+            doc_currency = str(raw_doc_currency).strip().upper() if raw_doc_currency and str(raw_doc_currency).strip() else None
+
             result = StatementExtractionResult(
                 period_start=date.fromisoformat(parsed_data["period_start"]) if parsed_data.get("period_start") else None,
                 period_end=date.fromisoformat(parsed_data["period_end"]) if parsed_data.get("period_end") else None,
@@ -292,7 +295,7 @@ class GeminiStatementParser(BaseStatementParser):
                 remaining_statement_due=parse_decimal(parsed_data.get("remaining_statement_due")) if parsed_data.get("remaining_statement_due") is not None else None,
                 unbilled_balance=parse_decimal(parsed_data.get("unbilled_balance")) if parsed_data.get("unbilled_balance") is not None else None,
                 current_outstanding=parse_decimal(parsed_data.get("current_outstanding")) if parsed_data.get("current_outstanding") is not None else None,
-                currency=parsed_data.get("currency") or acc_curr,
+                currency=doc_currency,
                 lines=lines,
                 metadata=parsed_data.get("metadata", {}),
                 parser_version=self.version
@@ -322,19 +325,39 @@ def validate_and_normalize_extraction(
     """
     Validates extraction output against domain invariants and converts parsed lines
     into deterministic NormalizedStatementLine models ready for reconciliation matching.
-    Enforces strict selected-account currency isolation: fail closed if a line settlement
-    currency does not match the selected account currency.
+    Enforces strict selected-account currency isolation:
+    1. Document-level financial balances (closing_balance, statement_balance, current_outstanding,
+       unbilled_balance) MUST have an explicit currency declaration matching selected account.
+    2. All statement line items must match the selected account currency.
     """
     account_curr = account["currency"].upper()
 
-    # 1. Period validation
+    # 1. Document-level financial balances currency binding
+    has_financial_balance = (
+        extraction.closing_balance is not None
+        or extraction.statement_balance is not None
+        or extraction.current_outstanding is not None
+        or extraction.unbilled_balance is not None
+    )
+
+    if has_financial_balance:
+        if not extraction.currency or not str(extraction.currency).strip():
+            raise StatementParseFailedError(
+                "Statement document contains financial balance(s) but is missing explicit currency declaration."
+            )
+        if extraction.currency.strip().upper() != account_curr:
+            raise StatementParseFailedError(
+                f"Statement document balance currency '{extraction.currency.strip().upper()}' does not match selected account currency '{account_curr}'."
+            )
+
+    # 2. Period validation
     p_start = caller_period_start or extraction.period_start
     p_end = caller_period_end or extraction.period_end
 
     if p_start and p_end and p_end < p_start:
         raise StatementParseFailedError("Invalid statement period: period_end cannot be earlier than period_start.")
 
-    # 2. Credit Card / Account Balances Validation
+    # 3. Credit Card / Account Balances Validation
     stmt_bal = extraction.statement_balance
     if stmt_bal is not None:
         stmt_bal = quantize_money(stmt_bal, account_curr)
@@ -353,7 +376,7 @@ def validate_and_normalize_extraction(
         if unbilled_bal < 0:
             raise StatementParseFailedError("Unbilled balance must be non-negative.")
 
-    # 3. Determine authoritative balance:
+    # 4. Determine authoritative balance:
     # If closing_balance is present, use it. If absent, authoritative_balance MUST remain NULL.
     auth_balance = None
     if extraction.closing_balance is not None:

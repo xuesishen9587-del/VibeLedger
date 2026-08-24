@@ -191,6 +191,7 @@ class TestStatementParserUnit(unittest.TestCase):
         extraction = StatementExtractionResult(
             period_start=date(2026, 7, 1),
             period_end=date(2026, 7, 31),
+            currency="CNY",
             closing_balance=Decimal("1234.56"),
             statement_balance=Decimal("500.00"),
             current_outstanding=Decimal("200.00"),
@@ -582,7 +583,61 @@ class TestStatementParserUnit(unittest.TestCase):
             if os.path.exists(temp_path):
                 os.remove(temp_path)
 
+    def test_document_level_balance_currency_binding(self):
+        """
+        Regression for Requirement 1:
+        1. Selected account SGD, mock extraction currency = CNH, closing_balance = 126725.94 -> StatementParseFailedError
+        2. Currency missing, closing_balance present -> StatementParseFailedError
+        3. Currency SGD, closing_balance valid -> Accepted
+        """
+        account_sgd = {"name": "DBS SGD Savings", "currency": "SGD", "account_type": "savings"}
+
+        # 1. Extraction currency CNH, selected account SGD
+        extraction_cnh = StatementExtractionResult(
+            currency="CNH",
+            closing_balance=Decimal("126725.94"),
+            lines=[
+                ParsedStatementLine(
+                    source_page_no=1,
+                    source_row_no=1,
+                    transaction_on=date(2026, 7, 10),
+                    description_raw="Restaurant",
+                    amount=Decimal("50.00"),
+                    currency="SGD",
+                    direction="debit",
+                    line_type="expense"
+                )
+            ]
+        )
+        with self.assertRaises(StatementParseFailedError) as ctx1:
+            validate_and_normalize_extraction(extraction=extraction_cnh, account=account_sgd)
+        self.assertIn("CNH", str(ctx1.exception))
+        self.assertIn("SGD", str(ctx1.exception))
+
+        # 2. Currency missing, closing_balance present -> fail closed
+        extraction_no_curr = StatementExtractionResult(
+            currency=None,
+            closing_balance=Decimal("1000.00"),
+            lines=[]
+        )
+        with self.assertRaises(StatementParseFailedError) as ctx2:
+            validate_and_normalize_extraction(extraction=extraction_no_curr, account=account_sgd)
+        self.assertIn("missing explicit currency", str(ctx2.exception))
+
+        # 3. Currency SGD, closing_balance valid -> accepted
+        extraction_sgd = StatementExtractionResult(
+            currency="SGD",
+            closing_balance=Decimal("5432.10"),
+            lines=[]
+        )
+        auth_bal, stmt_bal, curr_out, unbilled_bal, p_start, p_end, norm_lines = validate_and_normalize_extraction(
+            extraction=extraction_sgd,
+            account=account_sgd
+        )
+        self.assertEqual(auth_bal, Decimal("5432.10"))
+
 
 if __name__ == "__main__":
     unittest.main()
+
 

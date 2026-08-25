@@ -15,7 +15,7 @@ from app.domain.reconciliation.models import (
 from app.domain.reconciliation.normalizer import normalize_description
 from app.domain.reconciliation.engine import run_deterministic_reconciliation
 from app.domain.reconciliation.scoring import compute_match_score, validate_target_match_compatibility
-from app.domain.reconciliation.residuals import evaluate_residual_and_batch_readiness
+from app.domain.reconciliation.residuals import evaluate_residual_and_batch_readiness, evaluate_credit_card_statement_cycle
 from app.services.reference_fx_service import ReferenceFxService
 from app.services.snapshot_service import ledger_balance_as_of
 
@@ -173,6 +173,13 @@ def create_statement_reconciliation_batch(
         fx_rate_to_cny=fx_rate_cny
     )
 
+    # 6.5. For credit accounts with authoritative statement_balance, evaluate comparable billed cycle
+    if is_credit and statement_balance is not None:
+        cycle_ok = evaluate_credit_card_statement_cycle(lines, statement_balance, account_curr)
+        if cycle_ok is False:
+            result.batch_status = "needs_review"
+            result.adjustment_amount = None
+            result.candidates = [c for c in result.candidates if c.candidate_type != "adjustment"]
 
     # 7. Persist reconciliation batch
     batch_id = uuid4()
@@ -675,6 +682,14 @@ def commit_statement_batch(
         account_currency=curr,
         fx_rate_to_cny=fx_rate_cny
     )
+    # For credit account with authoritative statement_balance, evaluate comparable billed cycle
+    if is_credit and batch.get("statement_balance") is not None:
+        cycle_ok = evaluate_credit_card_statement_cycle(norm_lines, batch["statement_balance"], curr)
+        if cycle_ok is False:
+            b_status = "needs_review"
+            fresh_adj = None
+            fresh_result.adjustment_amount = None
+
     fresh_result.batch_status = b_status
     fresh_result.residual_amount = fresh_residual
     fresh_result.matched_count = sum(1 for c in active_cands if c.candidate_type == "match" and c.status == "accepted")
@@ -908,11 +923,9 @@ def commit_statement_batch(
                             rep_amt = leg_amt
                         else:
                             rep_rate = fx_srv.get_rate(curr_leg, rep_curr_target, as_of=occ_on)
-                            if rep_rate is None:
-                                rep_rate = Decimal("1.000000000000")
-                                rep_amt = leg_amt
-                            else:
-                                rep_amt = quantize_money(leg_amt * rep_rate, rep_curr_target)
+                            if rep_rate is None or rep_rate <= Decimal("0.00"):
+                                raise ValueError(f"Reference FX rate unavailable for {curr_leg}->{rep_curr_target} on {occ_on}")
+                            rep_amt = quantize_money(leg_amt * rep_rate, rep_curr_target)
                         rep_curr_tx = rep_curr_target
                         rep_locked_at = datetime.now(timezone.utc)
 
@@ -988,11 +1001,9 @@ def commit_statement_batch(
                 rep_amt = amt
             else:
                 rep_rate = fx_srv.get_rate(c_curr, rep_curr_target, as_of=occ_on)
-                if rep_rate is None:
-                    rep_rate = Decimal("1.000000000000")
-                    rep_amt = amt
-                else:
-                    rep_amt = quantize_money(amt * rep_rate, rep_curr_target)
+                if rep_rate is None or rep_rate <= Decimal("0.00"):
+                    raise ValueError(f"Reference FX rate unavailable for {c_curr}->{rep_curr_target} on {occ_on}")
+                rep_amt = quantize_money(amt * rep_rate, rep_curr_target)
             rep_locked_at = datetime.now(timezone.utc)
 
             tx_repo.create_transaction(
@@ -1290,11 +1301,9 @@ def commit_statement_batch(
                 rep_amt = amt
             else:
                 rep_rate = fx_srv.get_rate(inst_curr, rep_curr_target, as_of=occ_on)
-                if rep_rate is None:
-                    rep_rate = Decimal("1.000000000000")
-                    rep_amt = amt
-                else:
-                    rep_amt = quantize_money(amt * rep_rate, rep_curr_target)
+                if rep_rate is None or rep_rate <= Decimal("0.00"):
+                    raise ValueError(f"Reference FX rate unavailable for {inst_curr}->{rep_curr_target} on {occ_on}")
+                rep_amt = quantize_money(amt * rep_rate, rep_curr_target)
             rep_locked_at = datetime.now(timezone.utc)
 
             new_tx_id = uuid4()

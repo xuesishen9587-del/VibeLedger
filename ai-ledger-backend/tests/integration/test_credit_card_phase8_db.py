@@ -13,6 +13,8 @@ from unittest.mock import patch
 from app.db import get_connection, transaction
 from tests.support.db_helper import BaseDbTestCase
 from app.domain.reconciliation.models import NormalizedStatementLine
+from app.domain.installments import calculate_installment_schedule
+from app.domain.transactions import InvalidBatchStateError
 from app.services.reconciliation_service import (
     create_statement_reconciliation_batch,
     commit_statement_batch
@@ -642,6 +644,556 @@ class TestCreditCardPhase8Db(BaseDbTestCase):
         finally:
             conn.close()
 
+    def test_07_post_statement_repayment_cutoff_with_as_of(self):
+        """
+        Regression for Fix 1:
+        statement_period_end = 2026-07-30
+        statement_date/as_of = 2026-07-31
+        Repayment A: occurred_on = 2026-07-31 (on as_of date) -> already reflected in snapshot -> MUST NOT be subtracted.
+        Repayment B: occurred_on = 2026-08-01 (after as_of date) -> post-statement repayment -> MUST reduce remaining due.
+        statement_balance remains unchanged.
+        """
+        conn = get_connection(self.test_schema)
+        try:
+            with transaction(conn):
+                snap_id = uuid4()
+                credit_cards_repo.create_credit_card_snapshot(
+                    conn=conn,
+                    snapshot_id=snap_id,
+                    household_id=self.household_id,
+                    account_id=self.acc_cny_credit_id,
+                    as_of=datetime(2026, 7, 31, 18, 0, 0, tzinfo=timezone.utc),
+                    statement_period_start=date(2026, 7, 1),
+                    statement_period_end=date(2026, 7, 30),
+                    statement_balance=Decimal("5000.00"),
+                    remaining_statement_due=Decimal("5000.00"),
+                    unbilled_balance=Decimal("1000.00"),
+                    current_outstanding=Decimal("6000.00"),
+                    currency="CNY",
+                    source="statement"
+                )
+
+                # Repayment A: occurred on 2026-07-31 (same day as statement/snapshot issuance)
+                tx_repo.create_transaction(
+                    conn=conn,
+                    tx_id=uuid4(),
+                    household_id=self.household_id,
+                    transaction_type="transfer",
+                    occurred_on=date(2026, 7, 31),
+                    original_amount=Decimal("1000.00"),
+                    original_currency="CNY",
+                    from_amount=Decimal("1000.00"),
+                    from_currency="CNY",
+                    to_amount=Decimal("1000.00"),
+                    to_currency="CNY",
+                    from_account_id=self.acc_checking_id,
+                    to_account_id=self.acc_cny_credit_id,
+                    status="committed"
+                )
+
+            # State check after Repayment A: occurred_on (2026-07-31) <= as_of (2026-07-31), so not subtracted
+            state_a = credit_cards_repo.get_current_credit_card_state(conn, self.acc_cny_credit_id, self.household_id)
+            self.assertEqual(state_a["statement_balance"], Decimal("5000.00"))
+            self.assertEqual(state_a["remaining_statement_due"], Decimal("5000.00"))
+            self.assertEqual(state_a["unbilled_balance"], Decimal("1000.00"))
+            self.assertEqual(state_a["current_outstanding"], Decimal("6000.00"))
+
+            # Repayment B: occurred on 2026-08-01 (post-statement)
+            with transaction(conn):
+                tx_repo.create_transaction(
+                    conn=conn,
+                    tx_id=uuid4(),
+                    household_id=self.household_id,
+                    transaction_type="transfer",
+                    occurred_on=date(2026, 8, 1),
+                    original_amount=Decimal("1500.00"),
+                    original_currency="CNY",
+                    from_amount=Decimal("1500.00"),
+                    from_currency="CNY",
+                    to_amount=Decimal("1500.00"),
+                    to_currency="CNY",
+                    from_account_id=self.acc_checking_id,
+                    to_account_id=self.acc_cny_credit_id,
+                    status="committed"
+                )
+
+            # State check after Repayment B: occurred_on (2026-08-01) > as_of (2026-07-31), so subtracted
+            state_b = credit_cards_repo.get_current_credit_card_state(conn, self.acc_cny_credit_id, self.household_id)
+            self.assertEqual(state_b["statement_balance"], Decimal("5000.00")) # statement_balance unchanged
+            self.assertEqual(state_b["remaining_statement_due"], Decimal("3500.00")) # 5000 - 1500
+            self.assertEqual(state_b["unbilled_balance"], Decimal("1000.00"))
+            self.assertEqual(state_b["current_outstanding"], Decimal("4500.00")) # 6000 - 1500
+        finally:
+            conn.close()
+
+    def test_08_reporting_fx_unavailable_fails_closed_and_rolls_back(self):
+        """
+        Regression for Fix 2:
+        A. USD transaction, reporting currency CNY, FX service returns None:
+           -> commit fails (ValueError)
+           -> entire transaction rolls back
+           -> transaction reporting fields remain unchanged
+           -> account_state unchanged
+           -> snapshot not created
+           -> batch remains uncommitted (status 'ready')
+        B. Same currency CNY -> CNY: rate exactly 1 succeeds.
+        """
+        conn = get_connection(self.test_schema)
+        try:
+            # Setup Case A: USD transaction
+            tx_usd_id = uuid4()
+            with transaction(conn):
+                tx_repo.create_transaction(
+                    conn=conn,
+                    tx_id=tx_usd_id,
+                    household_id=self.household_id,
+                    transaction_type="expense",
+                    occurred_on=date(2026, 8, 10),
+                    original_amount=Decimal("100.00"),
+                    original_currency="USD",
+                    from_amount=Decimal("100.00"),
+                    from_currency="USD",
+                    from_account_id=self.acc_usd_credit_id,
+                    merchant="US Tech",
+                    account_leg_status="estimated",
+                    source="shortcut",
+                    status="committed"
+                )
+                accounts_repo.update_account_state_projection(
+                    conn, self.acc_usd_credit_id, Decimal("-100.00"), datetime.now(timezone.utc)
+                )
+
+            line_usd = NormalizedStatementLine(
+                transaction_on=date(2026, 8, 10),
+                posted_on=date(2026, 8, 11),
+                description_raw="US Tech",
+                direction="debit",
+                line_type="expense",
+                settlement_amount=Decimal("100.00"),
+                settlement_currency="USD"
+            )
+
+            with transaction(conn):
+                preview = create_statement_reconciliation_batch(
+                    conn=conn,
+                    household_id=self.household_id,
+                    account_id=self.acc_usd_credit_id,
+                    lines=[line_usd],
+                    authoritative_balance=Decimal("-100.00"),
+                    user_id=self.user_id,
+                    fx_service=self.mock_fx
+                )
+                batch_id = UUID(preview["batch_id"])
+
+            # Mock FX service that returns None for USD -> CNY
+            class FailingFx(ReferenceFxService):
+                def get_rate(self, base: str, target: str, as_of: Optional[date] = None) -> Optional[Decimal]:
+                    if base == target:
+                        return Decimal("1.000000000000")
+                    return None
+
+            failing_fx = FailingFx()
+
+            # Attempting commit must fail closed and roll back
+            with self.assertRaises(ValueError):
+                with transaction(conn):
+                    commit_statement_batch(conn, batch_id, user_id=self.user_id, fx_service=failing_fx)
+
+            # Assert rollback: transaction reporting fields unchanged
+            tx_after = tx_repo.get_transaction(conn, tx_usd_id)
+            self.assertIsNone(tx_after.get("reporting_fx_rate"))
+            self.assertIsNone(tx_after.get("reporting_amount"))
+            self.assertIsNone(tx_after.get("reporting_fx_locked_at"))
+            self.assertEqual(tx_after.get("account_leg_status"), "estimated")
+
+            # Account state projection unchanged (-100.00)
+            acc_state = accounts_repo.get_account_state(conn, self.acc_usd_credit_id)
+            self.assertEqual(acc_state["ledger_balance"], Decimal("-100.00"))
+
+            # Snapshot not created
+            snap = credit_cards_repo.get_credit_card_snapshot_by_batch_id(conn, batch_id)
+            self.assertIsNone(snap)
+
+            # Batch remains uncommitted
+            batch = reconciliation_repo.get_reconciliation_batch(conn, batch_id)
+            self.assertEqual(batch["status"], "ready")
+
+            # Setup Case B: Same currency CNY -> CNY succeeds with rate 1.0
+            line_cny = NormalizedStatementLine(
+                transaction_on=date(2026, 8, 10),
+                posted_on=date(2026, 8, 11),
+                description_raw="CNY Store",
+                direction="debit",
+                line_type="expense",
+                settlement_amount=Decimal("50.00"),
+                settlement_currency="CNY"
+            )
+            with transaction(conn):
+                preview_cny = create_statement_reconciliation_batch(
+                    conn=conn,
+                    household_id=self.household_id,
+                    account_id=self.acc_cny_credit_id,
+                    lines=[line_cny],
+                    authoritative_balance=Decimal("-50.00"),
+                    user_id=self.user_id,
+                    default_expense_category_id=self.cat_expense_id,
+                    fx_service=failing_fx # Same currency CNY->CNY succeeds even with failing_fx
+                )
+                batch_cny_id = UUID(preview_cny["batch_id"])
+
+            with transaction(conn):
+                commit_res = commit_statement_batch(conn, batch_cny_id, user_id=self.user_id, fx_service=failing_fx)
+                self.assertEqual(commit_res["status"], "committed")
+        finally:
+            conn.close()
+
+    def test_09_statement_balance_cycle_check_and_contradiction_handling(self):
+        """
+        Regression for Fix 3:
+        purchases 800 + fee 20 - refund 100 + installment 280 = statement_balance 1000 -> PASS.
+        Post-statement repayment 600 -> statement_balance remains 1000, remaining_statement_due decreases to 400.
+        Contradiction: statement_balance 1100 -> needs_review, no snapshot/ledger mutation.
+        """
+        conn = get_connection(self.test_schema)
+        try:
+            # 1. Setup installment plan for the 280 portion
+            inst_plan_id = uuid4()
+            p1_id = uuid4()
+            with transaction(conn):
+                installments_repo.create_installment_plan(
+                    conn=conn,
+                    plan_id=inst_plan_id,
+                    household_id=self.household_id,
+                    credit_account_id=self.acc_cny_credit_id,
+                    purchase_occurred_on=date(2026, 6, 15),
+                    original_amount=Decimal("840.00"),
+                    original_currency="CNY",
+                    account_currency="CNY",
+                    total_periods=3,
+                    merchant="Furniture Mall",
+                    status="pending_first_bill"
+                )
+                installments_repo.create_installment_period(conn, p1_id, inst_plan_id, 1, Decimal("280.00"), "CNY", status="scheduled")
+                installments_repo.create_installment_period(conn, uuid4(), inst_plan_id, 2, Decimal("280.00"), "CNY", status="scheduled")
+                installments_repo.create_installment_period(conn, uuid4(), inst_plan_id, 3, Decimal("280.00"), "CNY", status="scheduled")
+
+                # Setup prior expense for refund of 100
+                orig_exp_id = uuid4()
+                tx_repo.create_transaction(
+                    conn=conn,
+                    tx_id=orig_exp_id,
+                    household_id=self.household_id,
+                    transaction_type="expense",
+                    occurred_on=date(2026, 6, 20),
+                    original_amount=Decimal("200.00"),
+                    original_currency="CNY",
+                    from_amount=Decimal("200.00"),
+                    from_currency="CNY",
+                    from_account_id=self.acc_cny_credit_id,
+                    category_id=self.cat_expense_id,
+                    merchant="Shoe Store",
+                    status="committed"
+                )
+
+            lines = [
+                NormalizedStatementLine(
+                    transaction_on=date(2026, 7, 5),
+                    description_raw="Supermarket purchase",
+                    direction="debit",
+                    line_type="expense",
+                    settlement_amount=Decimal("800.00"),
+                    settlement_currency="CNY"
+                ),
+                NormalizedStatementLine(
+                    transaction_on=date(2026, 7, 6),
+                    description_raw="Late fee",
+                    direction="debit",
+                    line_type="fee",
+                    settlement_amount=Decimal("20.00"),
+                    settlement_currency="CNY"
+                ),
+                NormalizedStatementLine(
+                    transaction_on=date(2026, 7, 10),
+                    description_raw="Shoe Store Refund",
+                    merchant_hint="Shoe Store",
+                    direction="credit",
+                    line_type="refund",
+                    settlement_amount=Decimal("100.00"),
+                    settlement_currency="CNY"
+                ),
+                NormalizedStatementLine(
+                    transaction_on=date(2026, 7, 15),
+                    description_raw="Furniture Mall (1/3)",
+                    direction="debit",
+                    line_type="expense",
+                    settlement_amount=Decimal("280.00"),
+                    settlement_currency="CNY"
+                )
+            ]
+
+            # A. Valid cycle: statement_balance = 1000.00 (800 + 20 - 100 + 280 = 1000.00)
+            snap_payload = {
+                "credit_card_snapshot": {
+                    "statement_date": "2026-07-31",
+                    "statement_period_start": "2026-07-01",
+                    "statement_period_end": "2026-07-31",
+                    "statement_balance": "1000.00",
+                    "remaining_statement_due": "1000.00",
+                    "unbilled_balance": "560.00",
+                    "current_outstanding": "1560.00",
+                    "currency": "CNY"
+                }
+            }
+
+            with transaction(conn):
+                preview_pass = create_statement_reconciliation_batch(
+                    conn=conn,
+                    household_id=self.household_id,
+                    account_id=self.acc_cny_credit_id,
+                    lines=lines,
+                    statement_balance=Decimal("1000.00"),
+                    current_outstanding=Decimal("1560.00"),
+                    unbilled_balance=Decimal("560.00"),
+                    period_start=date(2026, 7, 1),
+                    period_end=date(2026, 7, 31),
+                    user_id=self.user_id,
+                    default_expense_category_id=self.cat_expense_id,
+                    fx_service=self.mock_fx,
+                    credit_card_snapshot_payload=snap_payload
+                )
+                self.assertEqual(preview_pass["status"], "ready")
+                batch_pass_id = UUID(preview_pass["batch_id"])
+
+            with transaction(conn):
+                commit_res = commit_statement_batch(conn, batch_pass_id, user_id=self.user_id, fx_service=self.mock_fx)
+                self.assertEqual(commit_res["status"], "committed")
+
+            state_initial = credit_cards_repo.get_current_credit_card_state(conn, self.acc_cny_credit_id, self.household_id)
+            self.assertEqual(state_initial["statement_balance"], Decimal("1000.00"))
+            self.assertEqual(state_initial["remaining_statement_due"], Decimal("1000.00"))
+
+            # Post-statement repayment of 600.00 CNY on 2026-08-05
+            with transaction(conn):
+                tx_repo.create_transaction(
+                    conn=conn,
+                    tx_id=uuid4(),
+                    household_id=self.household_id,
+                    transaction_type="transfer",
+                    occurred_on=date(2026, 8, 5),
+                    original_amount=Decimal("600.00"),
+                    original_currency="CNY",
+                    from_amount=Decimal("600.00"),
+                    from_currency="CNY",
+                    to_amount=Decimal("600.00"),
+                    to_currency="CNY",
+                    from_account_id=self.acc_checking_id,
+                    to_account_id=self.acc_cny_credit_id,
+                    status="committed"
+                )
+
+            state_after_repay = credit_cards_repo.get_current_credit_card_state(conn, self.acc_cny_credit_id, self.household_id)
+            self.assertEqual(state_after_repay["statement_balance"], Decimal("1000.00")) # statement_balance unchanged
+            self.assertEqual(state_after_repay["remaining_statement_due"], Decimal("400.00")) # 1000 - 600 = 400
+
+            # B. Contradiction case: statement_balance = 1100.00 (computed cycle 1000 != 1100)
+            lines_fail = [
+                NormalizedStatementLine(
+                    transaction_on=date(2026, 7, 5),
+                    description_raw="Supermarket purchase",
+                    direction="debit",
+                    line_type="expense",
+                    settlement_amount=Decimal("800.00"),
+                    settlement_currency="CNY"
+                ),
+                NormalizedStatementLine(
+                    transaction_on=date(2026, 7, 6),
+                    description_raw="Late fee",
+                    direction="debit",
+                    line_type="fee",
+                    settlement_amount=Decimal("20.00"),
+                    settlement_currency="CNY"
+                ),
+                NormalizedStatementLine(
+                    transaction_on=date(2026, 7, 10),
+                    description_raw="Shoe Store Refund",
+                    merchant_hint="Shoe Store",
+                    direction="credit",
+                    line_type="refund",
+                    settlement_amount=Decimal("100.00"),
+                    settlement_currency="CNY"
+                ),
+                NormalizedStatementLine(
+                    transaction_on=date(2026, 7, 15),
+                    description_raw="Furniture Mall (1/3)",
+                    direction="debit",
+                    line_type="expense",
+                    settlement_amount=Decimal("280.00"),
+                    settlement_currency="CNY"
+                )
+            ]
+            with transaction(conn):
+                preview_fail = create_statement_reconciliation_batch(
+                    conn=conn,
+                    household_id=self.household_id,
+                    account_id=self.acc_cny_credit_id,
+                    lines=lines_fail,
+                    statement_balance=Decimal("1100.00"),
+                    period_start=date(2026, 7, 1),
+                    period_end=date(2026, 7, 31),
+                    user_id=self.user_id,
+                    default_expense_category_id=self.cat_expense_id,
+                    fx_service=self.mock_fx
+                )
+                # Batch must become needs_review and must not hide contradiction via auto-adjustment
+                self.assertEqual(preview_fail["status"], "needs_review")
+                self.assertIsNone(preview_fail.get("adjustment_amount"))
+                batch_fail_id = UUID(preview_fail["batch_id"])
+
+            # Attempt to commit needs_review batch must fail closed
+            with self.assertRaises((ValueError, InvalidBatchStateError)):
+                with transaction(conn):
+                    commit_statement_batch(conn, batch_fail_id, user_id=self.user_id, fx_service=self.mock_fx)
+        finally:
+            conn.close()
+
+    def test_10_twelve_period_installment_full_lifecycle(self):
+        """
+        Regression for Fix 4:
+        Full 12-period installment plan lifecycle:
+        - 12 scheduled periods (1000.00 CNY principal: 11 * 83.33 + 1 * 83.37).
+        - No future financial transactions at capture.
+        - First bill -> active.
+        - Intermediate billed periods leave future periods scheduled.
+        - Final billed period -> completed.
+        - Exactly 12 billed expense transactions total.
+        - Sum == exact account principal (1000.00 CNY).
+        - Repeated final statement does not duplicate final expense.
+        """
+        conn = get_connection(self.test_schema)
+        try:
+            total_principal = Decimal("1000.00")
+            schedule = calculate_installment_schedule(total_principal, "CNY", 12)
+            self.assertEqual(len(schedule), 12)
+            self.assertEqual(sum(schedule), total_principal)
+
+            plan_id = uuid4()
+            period_ids = [uuid4() for _ in range(12)]
+
+            with transaction(conn):
+                installments_repo.create_installment_plan(
+                    conn=conn,
+                    plan_id=plan_id,
+                    household_id=self.household_id,
+                    credit_account_id=self.acc_cny_credit_id,
+                    purchase_occurred_on=date(2026, 1, 15),
+                    original_amount=total_principal,
+                    original_currency="CNY",
+                    account_currency="CNY",
+                    total_periods=12,
+                    merchant="Laptop Center",
+                    status="pending_first_bill"
+                )
+                for idx, (p_id, amt) in enumerate(zip(period_ids, schedule), start=1):
+                    installments_repo.create_installment_period(
+                        conn=conn,
+                        period_id=p_id,
+                        plan_id=plan_id,
+                        period_no=idx,
+                        scheduled_amount=amt,
+                        currency="CNY",
+                        status="scheduled"
+                    )
+
+            # Bill all 12 periods month by month
+            for month_idx in range(1, 13):
+                stmt_month = month_idx + 1 # Feb 2026 .. Jan 2027
+                stmt_year = 2026 if stmt_month <= 12 else 2027
+                actual_month = stmt_month if stmt_month <= 12 else (stmt_month - 12)
+                stmt_date = date(stmt_year, actual_month, 1)
+
+                line = NormalizedStatementLine(
+                    transaction_on=stmt_date,
+                    posted_on=date(stmt_year, actual_month, 2),
+                    description_raw=f"Laptop Center ({month_idx}/12)",
+                    direction="debit",
+                    line_type="expense",
+                    settlement_amount=schedule[month_idx - 1],
+                    settlement_currency="CNY"
+                )
+
+                with transaction(conn):
+                    prev = create_statement_reconciliation_batch(
+                        conn=conn,
+                        household_id=self.household_id,
+                        account_id=self.acc_cny_credit_id,
+                        lines=[line],
+                        user_id=self.user_id,
+                        default_expense_category_id=self.cat_expense_id,
+                        fx_service=self.mock_fx
+                    )
+                    batch_id = UUID(prev["batch_id"])
+
+                with transaction(conn):
+                    commit_statement_batch(conn, batch_id, user_id=self.user_id, fx_service=self.mock_fx)
+
+                plan_state = installments_repo.get_installment_plan(conn, plan_id)
+                if month_idx == 1:
+                    self.assertEqual(plan_state["status"], "active")
+                    self.assertEqual(plan_state["first_statement_month"], stmt_date)
+                elif month_idx < 12:
+                    self.assertEqual(plan_state["status"], "active")
+                else:
+                    self.assertEqual(plan_state["status"], "completed")
+
+            # Verify final state: plan completed, all 12 periods billed
+            plan_final = installments_repo.get_installment_plan(conn, plan_id)
+            self.assertEqual(plan_final["status"], "completed")
+
+            all_periods = installments_repo.list_periods_for_plan(conn, plan_id)
+            self.assertEqual(len(all_periods), 12)
+            expense_tx_ids = []
+            for p in all_periods:
+                self.assertEqual(p["status"], "billed")
+                self.assertIsNotNone(p["expense_transaction_id"])
+                expense_tx_ids.append(p["expense_transaction_id"])
+
+            # Verify exactly 12 billed expense transactions created and sum equals 1000.00
+            self.assertEqual(len(set(expense_tx_ids)), 12)
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT SUM(from_amount) FROM transactions WHERE id = ANY(%s);",
+                    (expense_tx_ids,)
+                )
+                total_billed = Decimal(str(cur.fetchone()[0]))
+                self.assertEqual(total_billed, Decimal("1000.00"))
+
+            # Repeated final Statement replay safety: replaying month 12 does not duplicate expense
+            line_repeat_12 = NormalizedStatementLine(
+                transaction_on=date(2027, 1, 1),
+                posted_on=date(2027, 1, 2),
+                description_raw="Laptop Center (12/12)",
+                direction="debit",
+                line_type="expense",
+                settlement_amount=schedule[11],
+                settlement_currency="CNY"
+            )
+            with transaction(conn):
+                prev_repeat = create_statement_reconciliation_batch(
+                    conn=conn,
+                    household_id=self.household_id,
+                    account_id=self.acc_cny_credit_id,
+                    lines=[line_repeat_12],
+                    user_id=self.user_id,
+                    default_expense_category_id=self.cat_expense_id,
+                    fx_service=self.mock_fx
+                )
+                # Matches existing period 12 expense transaction
+                self.assertEqual(prev_repeat["matched_count"], 1)
+                self.assertEqual(prev_repeat["created_count"], 0)
+        finally:
+            conn.close()
+
 
 if __name__ == "__main__":
     unittest.main()
+

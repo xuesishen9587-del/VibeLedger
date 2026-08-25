@@ -141,7 +141,7 @@ class TestDashboardApiDb(BaseDbTestCase):
                         );
                         """,
                         (
-                            self.household_id, self.acc_credit_id, now_utc,
+                            self.household_id, self.acc_credit_id, datetime(2026, 8, 5, 0, 0, 0, tzinfo=timezone.utc),
                             date(2026, 7, 6), date(2026, 8, 5)
                         )
                     )

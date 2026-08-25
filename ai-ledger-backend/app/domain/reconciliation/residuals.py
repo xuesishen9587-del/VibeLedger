@@ -157,3 +157,58 @@ def evaluate_residual_and_batch_readiness(
         batch_status = "needs_review"
 
     return batch_status, residual, adjustment_candidate
+
+
+def evaluate_credit_card_statement_cycle(
+    lines: List[Any],
+    statement_balance: Optional[Decimal],
+    account_currency: str
+) -> Optional[bool]:
+    """
+    Evaluates whether the credit card statement's comparable billed cycle:
+        billed purchases (expenses)
+        + fees
+        - billed refunds
+        + billed installment portions
+    matches the authoritative statement_balance, excluding transfer / repayment lines.
+
+    Returns:
+    - True: Complete deterministic evidence exists and cycle matches statement_balance exactly.
+    - False: Complete deterministic evidence exists and cycle contradicts statement_balance.
+    - None: Line semantics are unknown/ambiguous, missing statement_balance, or non-comparable.
+    """
+    if statement_balance is None or not lines:
+        return None
+
+    computed_billed_cycle = Decimal("0.00")
+    for line in lines:
+        amt = parse_decimal(getattr(line, "settlement_amount", None) or (line.get("amount") if isinstance(line, dict) else 0))
+        curr = getattr(line, "settlement_currency", None) or (line.get("currency") if isinstance(line, dict) else None)
+        direction = getattr(line, "direction", None) or (line.get("direction") if isinstance(line, dict) else None)
+        ltype = getattr(line, "line_type", None) or (line.get("line_type") if isinstance(line, dict) else None)
+
+        if curr and curr.upper() != account_currency.upper():
+            return None
+
+        # Exclude transfer / repayment lines from billed purchase amount
+        if ltype == "transfer":
+            continue
+
+        if ltype in ("expense", "fee") and direction == "debit":
+            computed_billed_cycle += amt
+        elif ltype == "installment" and direction == "debit":
+            computed_billed_cycle += amt
+        elif ltype == "refund" and direction == "credit":
+            computed_billed_cycle -= amt
+        elif ltype == "expense" and direction == "credit":
+            # Negative expense / credit adjustment
+            computed_billed_cycle -= amt
+        else:
+            # Ambiguous line semantics or unknown line type -> do not pretend cycle is fully validated
+            return None
+
+    quantized_cycle = quantize_money(computed_billed_cycle, account_currency)
+    quantized_stmt_bal = quantize_money(abs(statement_balance), account_currency)
+
+    return quantized_cycle == quantized_stmt_bal
+

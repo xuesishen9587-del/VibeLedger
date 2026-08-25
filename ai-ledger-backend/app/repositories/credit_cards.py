@@ -1,4 +1,4 @@
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Optional, Dict, Any
 from uuid import UUID
@@ -198,12 +198,10 @@ def get_current_credit_card_state(
         query += " AND (statement_batch_id IS NULL OR statement_batch_id != %s)"
         params.append(snap_batch_id)
 
-    if snap_period_end is not None:
-        query += " AND occurred_on > %s"
-        params.append(snap_period_end)
-    elif snap_as_of is not None:
-        query += " AND (occurred_at > %s OR (occurred_at IS NULL AND occurred_on > %s::date))"
-        params.extend([snap_as_of, snap_as_of])
+    if snap_as_of is not None:
+        snap_as_of_date = snap_as_of.astimezone(timezone.utc).date() if isinstance(snap_as_of, datetime) else snap_as_of
+        query += " AND (occurred_at > %s OR (occurred_at IS NULL AND occurred_on > %s))"
+        params.extend([snap_as_of, snap_as_of_date])
 
     with conn.cursor() as cur:
         cur.execute(query, tuple(params))

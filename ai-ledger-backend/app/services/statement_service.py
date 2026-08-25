@@ -25,7 +25,11 @@ from app.domain.transactions import (
 )
 from app.domain.reconciliation.models import NormalizedStatementLine, CandidateProposal
 from app.domain.reconciliation.scoring import compute_match_score, validate_target_match_compatibility
-from app.domain.reconciliation.residuals import evaluate_residual_and_batch_readiness, simulate_candidate_effects
+from app.domain.reconciliation.residuals import (
+    evaluate_residual_and_batch_readiness,
+    simulate_candidate_effects,
+    evaluate_credit_card_statement_cycle
+)
 from app.services.statement_parser import (
     BaseStatementParser,
     GeminiStatementParser,
@@ -1011,6 +1015,15 @@ def recompute_statement_batch_after_review(
         account_currency=curr,
         fx_rate_to_cny=fx_rate_cny
     )
+
+    account = accounts_repo.get_account(conn, batch["account_id"])
+    is_credit = account and account.get("account_type") == "credit"
+    if is_credit and batch.get("statement_balance") is not None:
+        db_lines = reconciliation_repo.list_statement_lines_for_batch(conn, batch_id)
+        cycle_ok = evaluate_credit_card_statement_cycle(db_lines, batch["statement_balance"], curr)
+        if cycle_ok is False:
+            batch_status = "needs_review"
+            adj_cand = None
 
     existing_adj = next((c for c in candidates if c["candidate_type"] == "adjustment"), None)
     if adj_cand is not None:

@@ -141,7 +141,7 @@ class TestDashboardApiDb(BaseDbTestCase):
                         );
                         """,
                         (
-                            self.household_id, self.acc_credit_id, now_utc,
+                            self.household_id, self.acc_credit_id, datetime(2026, 8, 5, 0, 0, 0, tzinfo=timezone.utc),
                             date(2026, 7, 6), date(2026, 8, 5)
                         )
                     )
@@ -337,7 +337,7 @@ class TestDashboardApiDb(BaseDbTestCase):
         self.assertGreaterEqual(items["Chase USD"]["age_days"], 115)
 
     def test_credit_card_state_endpoint(self):
-        # 1. Successful state retrieval for credit card account with snapshot
+        # 1. Successful state retrieval for credit card account with snapshot (reflecting 2000.00 repayment on Aug 18)
         res = self.client.get(f"/api/v1/credit-cards/{self.acc_credit_id}/state", headers=self.headers)
         self.assertEqual(res.status_code, 200)
         data = res.json()
@@ -345,9 +345,9 @@ class TestDashboardApiDb(BaseDbTestCase):
         self.assertEqual(data["currency"], "CNY")
         self.assertIsNotNone(data["latest_snapshot"])
         self.assertEqual(data["latest_snapshot"]["statement_balance"], "12000.00")
-        self.assertEqual(data["latest_snapshot"]["remaining_statement_due"], "8000.00")
+        self.assertEqual(data["latest_snapshot"]["remaining_statement_due"], "6000.00") # 8000 - 2000 repayment
         self.assertEqual(data["latest_snapshot"]["unbilled_balance"], "2500.00")
-        self.assertEqual(data["latest_snapshot"]["current_outstanding"], "10500.00")
+        self.assertEqual(data["latest_snapshot"]["current_outstanding"], "8500.00") # 10500 - 2000 repayment
 
         # 2. Credit card with NO snapshot returns latest_snapshot=null
         res_no_snap = self.client.get(f"/api/v1/credit-cards/{self.acc_credit_no_snap_id}/state", headers=self.headers)

@@ -27,7 +27,7 @@ def get_credit_card_state(
     if acc["account_type"] != "credit":
         raise AccountTypeMismatchError(f"Account {account_id} is '{acc['account_type']}', not a credit card account.")
 
-    snap = credit_cards_repo.get_latest_credit_card_snapshot(conn, account_id, household_id)
+    snap = credit_cards_repo.get_current_credit_card_state(conn, account_id, household_id)
     curr = acc["currency"]
 
     if snap:

@@ -25,6 +25,7 @@ def get_connection(schema: str = None) -> psycopg2.extensions.connection:
         try:
             conn = psycopg2.connect(
                 db_url,
+                options=f"-c search_path={schema}",
                 connect_timeout=10,
                 keepalives=1,
                 keepalives_idle=30,
@@ -36,6 +37,7 @@ def get_connection(schema: str = None) -> psycopg2.extensions.connection:
                 quoted_schema = sql.Identifier(schema)
                 query = sql.SQL("SET search_path = {schema}").format(schema=quoted_schema)
                 cur.execute(query)
+            conn.commit()
             return conn
         except psycopg2.OperationalError:
             if attempt == max_retries - 1:

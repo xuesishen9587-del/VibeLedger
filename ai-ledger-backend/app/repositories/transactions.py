@@ -91,6 +91,8 @@ def create_transaction(
     account_leg_status: Optional[str] = "authoritative",
     reporting_amount: Optional[Decimal] = None,
     reporting_currency: Optional[str] = None,
+    reporting_fx_rate: Optional[Decimal] = None,
+    reporting_fx_locked_at: Optional[datetime] = None,
     source: str = "shortcut",
     status: str = "committed",
     verification_status: str = "unverified",
@@ -118,6 +120,8 @@ def create_transaction(
         "account_leg_status": account_leg_status,
         "reporting_amount": reporting_amount,
         "reporting_currency": reporting_currency,
+        "reporting_fx_rate": reporting_fx_rate,
+        "reporting_fx_locked_at": reporting_fx_locked_at,
         "source": source,
         "status": status,
         "verification_status": verification_status,
@@ -288,7 +292,13 @@ def update_transaction_statement_confirmed(
     posted_on: Optional[date] = None,
     account_leg_status: Optional[str] = None,
     from_amount: Optional[Decimal] = None,
+    from_currency: Optional[str] = None,
     to_amount: Optional[Decimal] = None,
+    to_currency: Optional[str] = None,
+    reporting_amount: Optional[Decimal] = None,
+    reporting_currency: Optional[str] = None,
+    reporting_fx_rate: Optional[Decimal] = None,
+    reporting_fx_locked_at: Optional[datetime] = None,
     statement_batch_id: Optional[UUID] = None
 ) -> None:
     with conn.cursor() as cur:
@@ -299,13 +309,24 @@ def update_transaction_statement_confirmed(
                 posted_on = COALESCE(%s, posted_on),
                 account_leg_status = COALESCE(%s, account_leg_status),
                 from_amount = COALESCE(%s, from_amount),
+                from_currency = COALESCE(%s, from_currency),
                 to_amount = COALESCE(%s, to_amount),
+                to_currency = COALESCE(%s, to_currency),
+                reporting_amount = COALESCE(%s, reporting_amount),
+                reporting_currency = COALESCE(%s, reporting_currency),
+                reporting_fx_rate = COALESCE(%s, reporting_fx_rate),
+                reporting_fx_locked_at = COALESCE(%s, reporting_fx_locked_at),
                 statement_batch_id = COALESCE(%s, statement_batch_id),
                 row_version = row_version + 1,
                 updated_at = now()
             WHERE id = %s;
             """,
-            (posted_on, account_leg_status, from_amount, to_amount, statement_batch_id, transaction_id)
+            (
+                posted_on, account_leg_status, from_amount, from_currency,
+                to_amount, to_currency, reporting_amount, reporting_currency,
+                reporting_fx_rate, reporting_fx_locked_at, statement_batch_id,
+                transaction_id
+            )
         )
 
 

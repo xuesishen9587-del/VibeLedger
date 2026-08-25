@@ -319,3 +319,31 @@ def populate_scheduled_period_recognition_months(
             )
 
 
+def check_and_update_plan_completion(conn, plan_id: UUID) -> bool:
+    """
+    Checks if all periods for an installment plan are billed (no scheduled periods remain).
+    If so, transitions the plan status to 'completed'.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT count(*) FROM installment_periods
+            WHERE plan_id = %s AND status = 'scheduled';
+            """,
+            (plan_id,)
+        )
+        row = cur.fetchone()
+        remaining_scheduled = row[0] if row else 0
+        if remaining_scheduled == 0:
+            cur.execute(
+                """
+                UPDATE installment_plans
+                SET status = 'completed', updated_at = now()
+                WHERE id = %s AND status != 'completed';
+                """,
+                (plan_id,)
+            )
+            return True
+        return False
+
+

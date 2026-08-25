@@ -15,7 +15,7 @@ from app.domain.reconciliation.models import (
 from app.domain.reconciliation.normalizer import normalize_description
 from app.domain.reconciliation.engine import run_deterministic_reconciliation
 from app.domain.reconciliation.scoring import compute_match_score, validate_target_match_compatibility
-from app.domain.reconciliation.residuals import evaluate_residual_and_batch_readiness
+from app.domain.reconciliation.residuals import evaluate_residual_and_batch_readiness, evaluate_credit_card_statement_cycle
 from app.services.reference_fx_service import ReferenceFxService
 from app.services.snapshot_service import ledger_balance_as_of
 
@@ -23,6 +23,7 @@ import app.repositories.accounts as accounts_repo
 import app.repositories.reconciliation as reconciliation_repo
 import app.repositories.transactions as tx_repo
 import app.repositories.installments as installments_repo
+import app.repositories.credit_cards as credit_cards_repo
 import app.repositories.audit as audit_repo
 
 
@@ -31,7 +32,7 @@ def create_statement_reconciliation_batch(
     household_id: UUID,
     account_id: UUID,
     lines: List[NormalizedStatementLine],
-    authoritative_balance: Decimal,
+    authoritative_balance: Optional[Decimal] = None,
     period_start: Optional[date] = None,
     period_end: Optional[date] = None,
     statement_balance: Optional[Decimal] = None,
@@ -42,7 +43,8 @@ def create_statement_reconciliation_batch(
     default_expense_category_id: Optional[UUID] = None,
     default_income_category_id: Optional[UUID] = None,
     household_movements: Optional[List[Dict[str, Any]]] = None,
-    fx_service: Optional[ReferenceFxService] = None
+    fx_service: Optional[ReferenceFxService] = None,
+    credit_card_snapshot_payload: Optional[Dict[str, Any]] = None
 ) -> Dict[str, Any]:
 
     """
@@ -171,6 +173,13 @@ def create_statement_reconciliation_batch(
         fx_rate_to_cny=fx_rate_cny
     )
 
+    # 6.5. For credit accounts with authoritative statement_balance, evaluate comparable billed cycle
+    if is_credit and statement_balance is not None:
+        cycle_ok = evaluate_credit_card_statement_cycle(lines, statement_balance, account_curr)
+        if cycle_ok is False:
+            result.batch_status = "needs_review"
+            result.adjustment_amount = None
+            result.candidates = [c for c in result.candidates if c.candidate_type != "adjustment"]
 
     # 7. Persist reconciliation batch
     batch_id = uuid4()
@@ -249,7 +258,6 @@ def create_statement_reconciliation_batch(
         )
         persisted_candidates.append(db_cand)
 
-        
         # Update statement line match_status if applicable
         if cand.statement_line_id:
             if cand.candidate_type == "match":
@@ -266,6 +274,22 @@ def create_statement_reconciliation_batch(
                     line_id=cand.statement_line_id,
                     match_status="new_candidate"
                 )
+
+    if credit_card_snapshot_payload:
+        cc_cand_id = uuid4()
+        db_cand = reconciliation_repo.create_reconciliation_candidate(
+            conn=conn,
+            candidate_id=cc_cand_id,
+            batch_id=batch_id,
+            statement_line_id=None,
+            candidate_type="snapshot",
+            status="accepted",
+            payload=credit_card_snapshot_payload,
+            confidence=Decimal("1.00"),
+            reason_code=None,
+            reason_detail="Authoritative credit card statement snapshot metadata"
+        )
+        persisted_candidates.append(db_cand)
 
     # 10. Update batch summary statistics
     reconciliation_repo.update_reconciliation_batch_stats(
@@ -599,6 +623,17 @@ def commit_statement_batch(
 
     old_cand_by_line = {c["statement_line_id"]: c for c in candidates if c.get("statement_line_id")}
     old_adj_cand = next((c for c in candidates if c["candidate_type"] == "adjustment"), None)
+    old_snapshot_cand = next((c for c in candidates if c["candidate_type"] == "snapshot"), None)
+
+    if old_snapshot_cand:
+        fresh_result.candidates.append(CandidateProposal(
+            id=old_snapshot_cand["id"],
+            candidate_type="snapshot",
+            status=old_snapshot_cand["status"],
+            statement_line_id=None,
+            payload=old_snapshot_cand["payload"],
+            confidence=Decimal("1.00")
+        ))
 
     # Incorporate user-reviewed candidate statuses and patched payloads
     for fc in fresh_result.candidates:
@@ -638,7 +673,7 @@ def commit_statement_batch(
                             fc.payload[k].update(v)
 
     # Re-evaluate residual and batch status with reviewed candidate states
-    active_cands = [c for c in fresh_result.candidates if c.candidate_type != "adjustment"]
+    active_cands = [c for c in fresh_result.candidates if c.candidate_type not in ("adjustment", "snapshot")]
     b_status, fresh_residual, fresh_adj = evaluate_residual_and_batch_readiness(
         baseline_projected_balance=fresh_baseline,
         authoritative_balance=auth_balance,
@@ -647,6 +682,14 @@ def commit_statement_batch(
         account_currency=curr,
         fx_rate_to_cny=fx_rate_cny
     )
+    # For credit account with authoritative statement_balance, evaluate comparable billed cycle
+    if is_credit and batch.get("statement_balance") is not None:
+        cycle_ok = evaluate_credit_card_statement_cycle(norm_lines, batch["statement_balance"], curr)
+        if cycle_ok is False:
+            b_status = "needs_review"
+            fresh_adj = None
+            fresh_result.adjustment_amount = None
+
     fresh_result.batch_status = b_status
     fresh_result.residual_amount = fresh_residual
     fresh_result.matched_count = sum(1 for c in active_cands if c.candidate_type == "match" and c.status == "accepted")
@@ -764,14 +807,139 @@ def commit_statement_batch(
         if c_type == "match":
             target_tx_id = fresh_cand.target_transaction_id
             if target_tx_id:
-                posted_on = stmt_line.get("posted_on") if stmt_line else None
-                # Phase 8 foreign-card boundary: mark statement-confirmed without mutating from_amount or account_leg_status
-                tx_repo.update_transaction_statement_confirmed(
-                    conn=conn,
-                    transaction_id=target_tx_id,
-                    posted_on=posted_on,
-                    statement_batch_id=batch_id
-                )
+                target_tx = tx_repo.lock_transaction(conn, target_tx_id)
+                if not target_tx or target_tx["household_id"] != household_id or target_tx["status"] != "committed" or target_tx.get("deleted_at") is not None:
+                    raise ValueError(f"Target transaction {target_tx_id} is no longer valid for reconciliation commit.")
+
+                is_estimated = (target_tx.get("account_leg_status") == "estimated")
+                sp = fresh_cand.payload.get("settlement_patch") or fresh_cand.payload.get("evidence", {}).get("settlement_patch") or {}
+
+                posted_on = date.fromisoformat(sp["posted_on"]) if sp.get("posted_on") else (stmt_line.get("posted_on") if stmt_line else None)
+                household_row = accounts_repo.get_household(conn, household_id)
+                rep_curr_target = household_row["reporting_currency"] if household_row else "CNY"
+
+                if is_estimated and sp:
+                    actual_settlement_amt = parse_decimal(sp.get("settlement_amount") or sp.get("actual_settlement_amount") or (stmt_line.get("amount") if stmt_line else "0"))
+                    settlement_curr = sp.get("settlement_currency") or (stmt_line.get("currency") if stmt_line else curr)
+
+                    is_from = (target_tx.get("from_account_id") == primary_account_id)
+                    is_to = (target_tx.get("to_account_id") == primary_account_id)
+
+                    if is_from:
+                        old_leg_amt = parse_decimal(target_tx["from_amount"])
+                        before_effect = -old_leg_amt
+                        after_effect = -actual_settlement_amt
+                        proj_delta = after_effect - before_effect
+                        account_deltas[primary_account_id] += proj_delta
+                        new_from_amt = actual_settlement_amt
+                        new_from_curr = settlement_curr
+                        new_to_amt = target_tx.get("to_amount")
+                        new_to_curr = target_tx.get("to_currency")
+                    elif is_to:
+                        old_leg_amt = parse_decimal(target_tx["to_amount"])
+                        before_effect = old_leg_amt
+                        after_effect = actual_settlement_amt
+                        proj_delta = after_effect - before_effect
+                        account_deltas[primary_account_id] += proj_delta
+                        new_from_amt = target_tx.get("from_amount")
+                        new_from_curr = target_tx.get("from_currency")
+                        new_to_amt = actual_settlement_amt
+                        new_to_curr = settlement_curr
+                    else:
+                        new_from_amt = target_tx.get("from_amount")
+                        new_from_curr = target_tx.get("from_currency")
+                        new_to_amt = target_tx.get("to_amount")
+                        new_to_curr = target_tx.get("to_currency")
+
+                    # Historical reporting FX freeze
+                    occ_on = target_tx["occurred_on"]
+                    if settlement_curr == rep_curr_target:
+                        rep_rate = Decimal("1.000000000000")
+                        rep_amt = actual_settlement_amt
+                    else:
+                        rep_rate = fx_srv.get_rate(settlement_curr, rep_curr_target, as_of=occ_on)
+                        if rep_rate is None or rep_rate <= Decimal("0.00"):
+                            raise ValueError(f"Reference FX rate unavailable for {settlement_curr}->{rep_curr_target} on {occ_on}")
+                        rep_amt = quantize_money(actual_settlement_amt * rep_rate, rep_curr_target)
+                    rep_locked_at = datetime.now(timezone.utc)
+
+                    tx_repo.update_transaction_statement_confirmed(
+                        conn=conn,
+                        transaction_id=target_tx_id,
+                        posted_on=posted_on,
+                        account_leg_status="authoritative",
+                        from_amount=new_from_amt,
+                        from_currency=new_from_curr,
+                        to_amount=new_to_amt,
+                        to_currency=new_to_curr,
+                        reporting_amount=rep_amt,
+                        reporting_currency=rep_curr_target,
+                        reporting_fx_rate=rep_rate,
+                        reporting_fx_locked_at=rep_locked_at,
+                        statement_batch_id=batch_id
+                    )
+
+                    audit_repo.insert_audit_event(
+                        conn=conn,
+                        household_id=household_id,
+                        actor_type="device" if device_id else "user",
+                        actor_user_id=user_id,
+                        actor_device_id=device_id,
+                        reconciliation_batch_id=batch_id,
+                        entity_type="transaction",
+                        entity_id=target_tx_id,
+                        action="reconcile",
+                        before_data={
+                            "from_amount": str(target_tx.get("from_amount")),
+                            "from_currency": target_tx.get("from_currency"),
+                            "account_leg_status": target_tx.get("account_leg_status"),
+                            "reporting_amount": str(target_tx.get("reporting_amount")) if target_tx.get("reporting_amount") else None,
+                            "reporting_fx_rate": str(target_tx.get("reporting_fx_rate")) if target_tx.get("reporting_fx_rate") else None
+                        },
+                        after_data={
+                            "from_amount": str(new_from_amt) if new_from_amt else None,
+                            "from_currency": new_from_curr,
+                            "account_leg_status": "authoritative",
+                            "reporting_amount": str(rep_amt),
+                            "reporting_currency": rep_curr_target,
+                            "reporting_fx_rate": str(rep_rate),
+                            "verification_status": "statement_confirmed",
+                            "statement_batch_id": str(batch_id)
+                        }
+                    )
+                else:
+                    # Already authoritative: freeze reporting FX if not already locked
+                    rep_amt = target_tx.get("reporting_amount")
+                    rep_curr_tx = target_tx.get("reporting_currency")
+                    rep_rate = target_tx.get("reporting_fx_rate")
+                    rep_locked_at = target_tx.get("reporting_fx_locked_at")
+
+                    if rep_locked_at is None:
+                        leg_amt = parse_decimal(target_tx.get("from_amount") or target_tx.get("to_amount") or target_tx.get("original_amount"))
+                        curr_leg = target_tx.get("from_currency") or target_tx.get("to_currency") or curr
+                        occ_on = target_tx["occurred_on"]
+                        if curr_leg == rep_curr_target:
+                            rep_rate = Decimal("1.000000000000")
+                            rep_amt = leg_amt
+                        else:
+                            rep_rate = fx_srv.get_rate(curr_leg, rep_curr_target, as_of=occ_on)
+                            if rep_rate is None or rep_rate <= Decimal("0.00"):
+                                raise ValueError(f"Reference FX rate unavailable for {curr_leg}->{rep_curr_target} on {occ_on}")
+                            rep_amt = quantize_money(leg_amt * rep_rate, rep_curr_target)
+                        rep_curr_tx = rep_curr_target
+                        rep_locked_at = datetime.now(timezone.utc)
+
+                    tx_repo.update_transaction_statement_confirmed(
+                        conn=conn,
+                        transaction_id=target_tx_id,
+                        posted_on=posted_on,
+                        reporting_amount=rep_amt,
+                        reporting_currency=rep_curr_tx,
+                        reporting_fx_rate=rep_rate,
+                        reporting_fx_locked_at=rep_locked_at,
+                        statement_batch_id=batch_id
+                    )
+
                 applied_tx_ids.append(target_tx_id)
                 persisted_payload = merge_canonical_line_evidence(fresh_cand.payload, stmt_line_id)
                 if old_cand:
@@ -826,6 +994,18 @@ def commit_statement_batch(
             to_amt = amt if to_acc else None
             to_cur = c_curr if to_acc else None
 
+            household_row = accounts_repo.get_household(conn, household_id)
+            rep_curr_target = household_row["reporting_currency"] if household_row else "CNY"
+            if c_curr == rep_curr_target:
+                rep_rate = Decimal("1.000000000000")
+                rep_amt = amt
+            else:
+                rep_rate = fx_srv.get_rate(c_curr, rep_curr_target, as_of=occ_on)
+                if rep_rate is None or rep_rate <= Decimal("0.00"):
+                    raise ValueError(f"Reference FX rate unavailable for {c_curr}->{rep_curr_target} on {occ_on}")
+                rep_amt = quantize_money(amt * rep_rate, rep_curr_target)
+            rep_locked_at = datetime.now(timezone.utc)
+
             tx_repo.create_transaction(
                 conn=conn,
                 tx_id=new_tx_id,
@@ -842,6 +1022,10 @@ def commit_statement_batch(
                 to_account_id=to_acc,
                 category_id=cat_id,
                 merchant=merchant,
+                reporting_amount=rep_amt,
+                reporting_currency=rep_curr_target,
+                reporting_fx_rate=rep_rate,
+                reporting_fx_locked_at=rep_locked_at,
                 source="statement",
                 status="committed",
                 verification_status="statement_confirmed",
@@ -1110,6 +1294,18 @@ def commit_statement_batch(
             is_first = inst_data.get("is_first_period", False)
             is_last = inst_data.get("is_last_period", False)
 
+            household_row = accounts_repo.get_household(conn, household_id)
+            rep_curr_target = household_row["reporting_currency"] if household_row else "CNY"
+            if inst_curr == rep_curr_target:
+                rep_rate = Decimal("1.000000000000")
+                rep_amt = amt
+            else:
+                rep_rate = fx_srv.get_rate(inst_curr, rep_curr_target, as_of=occ_on)
+                if rep_rate is None or rep_rate <= Decimal("0.00"):
+                    raise ValueError(f"Reference FX rate unavailable for {inst_curr}->{rep_curr_target} on {occ_on}")
+                rep_amt = quantize_money(amt * rep_rate, rep_curr_target)
+            rep_locked_at = datetime.now(timezone.utc)
+
             new_tx_id = uuid4()
             tx_repo.create_transaction(
                 conn=conn,
@@ -1124,6 +1320,10 @@ def commit_statement_batch(
                 from_account_id=primary_account_id,
                 category_id=cat_id,
                 merchant=merchant,
+                reporting_amount=rep_amt,
+                reporting_currency=rep_curr_target,
+                reporting_fx_rate=rep_rate,
+                reporting_fx_locked_at=rep_locked_at,
                 source="installment",
                 status="committed",
                 verification_status="statement_confirmed",
@@ -1144,8 +1344,8 @@ def commit_statement_batch(
                     first_stmt_month = date(occ_on.year, occ_on.month, 1)
                     installments_repo.update_installment_plan_first_statement_month_and_status(conn, plan_id, "active", first_stmt_month)
                     installments_repo.populate_scheduled_period_recognition_months(conn, plan_id, first_stmt_month)
-                elif is_last:
-                    installments_repo.update_installment_plan_status(conn, plan_id, "completed")
+
+                installments_repo.check_and_update_plan_completion(conn, plan_id)
 
                 applied_tx_ids.append(new_tx_id)
 
@@ -1181,7 +1381,6 @@ def commit_statement_batch(
                         matched_transaction_id=new_tx_id
                     )
 
-
                 account_deltas[primary_account_id] -= amt
 
                 audit_repo.insert_audit_event(
@@ -1202,7 +1401,69 @@ def commit_statement_batch(
                     }
                 )
 
-        # Case F: Adjustment
+        # Case F: Credit Card Snapshot
+        elif c_type == "snapshot":
+            cc_data = fresh_cand.payload.get("credit_card_snapshot") or {}
+            if is_credit and cc_data:
+                stmt_date_val = cc_data.get("statement_date")
+                p_end_val = cc_data.get("statement_period_end")
+                if stmt_date_val:
+                    d = date.fromisoformat(stmt_date_val)
+                    as_of_dt = datetime(d.year, d.month, d.day, 0, 0, 0, tzinfo=timezone.utc)
+                elif p_end_val:
+                    d = date.fromisoformat(p_end_val)
+                    as_of_dt = datetime(d.year, d.month, d.day, 0, 0, 0, tzinfo=timezone.utc)
+                else:
+                    as_of_dt = batch.get("created_at") or datetime.now(timezone.utc)
+
+                p_start = date.fromisoformat(cc_data["statement_period_start"]) if cc_data.get("statement_period_start") else None
+                p_end = date.fromisoformat(cc_data["statement_period_end"]) if cc_data.get("statement_period_end") else None
+                stmt_bal = parse_decimal(cc_data["statement_balance"]) if cc_data.get("statement_balance") is not None else None
+                rem_due = parse_decimal(cc_data["remaining_statement_due"]) if cc_data.get("remaining_statement_due") is not None else None
+                unbilled_bal = parse_decimal(cc_data["unbilled_balance"]) if cc_data.get("unbilled_balance") is not None else None
+                curr_out = parse_decimal(cc_data["current_outstanding"]) if cc_data.get("current_outstanding") is not None else None
+                snap_curr = cc_data.get("currency") or curr
+
+                credit_cards_repo.create_credit_card_snapshot(
+                    conn=conn,
+                    snapshot_id=uuid4(),
+                    household_id=household_id,
+                    account_id=primary_account_id,
+                    as_of=as_of_dt,
+                    statement_period_start=p_start,
+                    statement_period_end=p_end,
+                    statement_balance=stmt_bal,
+                    remaining_statement_due=rem_due,
+                    unbilled_balance=unbilled_bal,
+                    current_outstanding=curr_out,
+                    currency=snap_curr,
+                    source="statement",
+                    reconciliation_batch_id=batch_id
+                )
+
+            old_cand = next((c for c in candidates if c["candidate_type"] == "snapshot"), None)
+            if old_cand:
+                reconciliation_repo.update_reconciliation_candidate_full(
+                    conn=conn,
+                    candidate_id=old_cand["id"],
+                    candidate_type="snapshot",
+                    status="applied",
+                    payload=fresh_cand.payload,
+                    confidence=fresh_cand.confidence
+                )
+            else:
+                reconciliation_repo.create_reconciliation_candidate(
+                    conn=conn,
+                    candidate_id=fresh_cand.id,
+                    batch_id=batch_id,
+                    statement_line_id=None,
+                    candidate_type="snapshot",
+                    status="applied",
+                    payload=fresh_cand.payload,
+                    confidence=fresh_cand.confidence
+                )
+
+        # Case G: Adjustment
         elif c_type == "adjustment":
             adj_amt = parse_decimal(fresh_cand.payload.get("adjustment_amount", "0"))
             if adj_amt != Decimal("0.00"):

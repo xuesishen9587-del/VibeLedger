@@ -302,7 +302,7 @@ class TestStatementApiDb(BaseDbTestCase):
         err = response.json()
         self.assertEqual(err["error"]["code"], "ACCOUNT_INACTIVE")
 
-    def test_statement_upload_investment_account_rejected(self):
+    def test_statement_upload_investment_account_supported(self):
         pdf_bytes = make_pdf_bytes(["Investment Statement"])
         statements_router._statement_parser = MockStatementParser()
 
@@ -311,9 +311,10 @@ class TestStatementApiDb(BaseDbTestCase):
             headers=self.headers,
             files={"file": ("statement.pdf", pdf_bytes, "application/pdf")}
         )
-        self.assertEqual(response.status_code, 422)
-        err = response.json()
-        self.assertEqual(err["error"]["code"], "ACCOUNT_TYPE_MISMATCH")
+        self.assertEqual(response.status_code, 201)
+        res = response.json()
+        self.assertIn("batch_id", res)
+        self.assertEqual(res["status"], "ready")
 
     def test_statement_upload_invalid_file_rejected(self):
         response = self.client.post(

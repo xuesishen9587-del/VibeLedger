@@ -139,6 +139,41 @@ def list_snapshots_for_account(
         rows = cur.fetchall()
         return [_map_snapshot_row(r) for r in rows]
 
+def get_latest_authoritative_investment_valuation_snapshot(
+    conn,
+    household_id: UUID,
+    account_id: UUID,
+    before_as_of: Optional[datetime] = None
+) -> Optional[Dict[str, Any]]:
+    """
+    Returns the latest authoritative investment_valuation snapshot for the given account.
+    Filters by snapshot_type = 'investment_valuation' and is_authoritative = true.
+    """
+    query = """
+        SELECT id, household_id, account_id, as_of, balance, currency,
+               snapshot_type, source, reconciliation_batch_id, source_request_id,
+               is_authoritative, created_by_user_id, created_at
+        FROM account_snapshots
+        WHERE household_id = %s
+          AND account_id = %s
+          AND snapshot_type = 'investment_valuation'
+          AND is_authoritative = true
+    """
+    params: List[Any] = [household_id, account_id]
+    if before_as_of is not None:
+        query += " AND as_of < %s"
+        params.append(before_as_of)
+
+    query += " ORDER BY as_of DESC, created_at DESC, id DESC LIMIT 1;"
+
+    with conn.cursor() as cur:
+        cur.execute(query, tuple(params))
+        row = cur.fetchone()
+        if not row:
+            return None
+        return _map_snapshot_row(row)
+
+
 def _map_snapshot_row(row) -> Dict[str, Any]:
     return {
         "id": row[0],
@@ -155,3 +190,4 @@ def _map_snapshot_row(row) -> Dict[str, Any]:
         "created_by_user_id": row[11],
         "created_at": row[12]
     }
+

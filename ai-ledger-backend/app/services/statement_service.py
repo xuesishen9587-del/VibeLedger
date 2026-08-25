@@ -80,7 +80,21 @@ def upload_and_process_statement(
         raise AccountInactiveError(account_id)
 
     if account["account_type"] == "investment":
-        raise AccountTypeMismatchError("Investment statements are not supported in Phase 7.")
+        import app.services.investment_service as investment_service
+        return investment_service.process_investment_statement(
+            conn=conn,
+            household_id=household_id,
+            account=account,
+            file_bytes=file_bytes,
+            filename=filename,
+            password=password,
+            period_start=period_start,
+            period_end=period_end,
+            user_id=user_id,
+            device_id=device_id,
+            parser=parser,
+            fx_service=fx_service
+        )
 
     # 2. Validate PDF file format
     if not file_bytes or not (file_bytes.startswith(b"%PDF-") or (len(file_bytes) > 4 and b"%PDF" in file_bytes[:1024])):
@@ -644,6 +658,79 @@ def validate_candidate_payload_for_type(
         elif for_accept:
             raise InvalidCandidatePayloadError("Installment candidate requires plan_id.")
 
+    elif candidate_type == "snapshot":
+        snap_data = merged_payload.get("investment_snapshot", merged_payload)
+        as_of_val = snap_data.get("as_of")
+        if not as_of_val:
+            raise InvalidCandidatePayloadError("Snapshot candidate requires 'as_of' timestamp.")
+        try:
+            datetime.fromisoformat(str(as_of_val))
+        except Exception:
+            raise InvalidCandidatePayloadError("Invalid ISO timestamp for snapshot as_of.")
+
+        tot_val = snap_data.get("total_asset_value")
+        if tot_val is None:
+            raise InvalidCandidatePayloadError("Snapshot candidate requires 'total_asset_value'.")
+        if parse_decimal(tot_val) < Decimal("0.00"):
+            raise InvalidCandidatePayloadError("Snapshot total_asset_value must be non-negative.")
+
+        curr_val = snap_data.get("currency")
+        if curr_val and str(curr_val).strip().upper() != account["currency"].upper():
+            raise InvalidCandidatePayloadError(f"Snapshot currency '{curr_val}' must match account currency '{account['currency']}'.")
+
+    elif candidate_type == "investment_pnl":
+        pnl_data = merged_payload.get("investment_pnl", merged_payload)
+        matched_c_ids = pnl_data.get("matched_contribution_transfer_ids", [])
+        matched_w_ids = pnl_data.get("matched_withdrawal_transfer_ids", [])
+
+        c_amt = Decimal("0.00")
+        for tid_str in matched_c_ids:
+            try:
+                tid = UUID(str(tid_str))
+                tx = tx_repo.get_transaction(conn, tid)
+            except (ValueError, TypeError):
+                raise InvalidCandidatePayloadError(f"Invalid contribution transfer ID: {tid_str}")
+            if not tx or tx["household_id"] != household_id or tx["status"] != "committed" or tx.get("deleted_at") is not None:
+                raise InvalidCandidatePayloadError(f"Contribution transfer {tid_str} not found or not active.")
+            if tx["transaction_type"] != "transfer" or str(tx.get("to_account_id")) != str(account["id"]):
+                raise InvalidCandidatePayloadError(f"Transaction {tid_str} is not a valid transfer into investment account.")
+            if str(tx.get("to_currency")).strip().upper() != account["currency"].upper():
+                raise InvalidCandidatePayloadError(f"Transfer {tid_str} currency does not match account currency.")
+            c_amt += parse_decimal(tx["to_amount"])
+
+        w_amt = Decimal("0.00")
+        for tid_str in matched_w_ids:
+            try:
+                tid = UUID(str(tid_str))
+                tx = tx_repo.get_transaction(conn, tid)
+            except (ValueError, TypeError):
+                raise InvalidCandidatePayloadError(f"Invalid withdrawal transfer ID: {tid_str}")
+            if not tx or tx["household_id"] != household_id or tx["status"] != "committed" or tx.get("deleted_at") is not None:
+                raise InvalidCandidatePayloadError(f"Withdrawal transfer {tid_str} not found or not active.")
+            if tx["transaction_type"] != "transfer" or str(tx.get("from_account_id")) != str(account["id"]):
+                raise InvalidCandidatePayloadError(f"Transaction {tid_str} is not a valid transfer out of investment account.")
+            if str(tx.get("from_currency")).strip().upper() != account["currency"].upper():
+                raise InvalidCandidatePayloadError(f"Transfer {tid_str} currency does not match account currency.")
+            w_amt += parse_decimal(tx["from_amount"])
+
+        op_val = pnl_data.get("opening_value")
+        cl_val = pnl_data.get("closing_value")
+        if op_val is not None and cl_val is not None:
+            op_d = parse_decimal(op_val)
+            cl_d = parse_decimal(cl_val)
+            from app.domain.investments import calculate_investment_pnl
+            recalculated_pnl = calculate_investment_pnl(
+                opening_value=op_d,
+                closing_value=cl_d,
+                contributions=quantize_money(c_amt, account["currency"]),
+                withdrawals=quantize_money(w_amt, account["currency"]),
+                currency=account["currency"]
+            )
+            pnl_data["contributions_amount"] = str(quantize_money(c_amt, account["currency"]))
+            pnl_data["withdrawals_amount"] = str(quantize_money(w_amt, account["currency"]))
+            pnl_data["pnl_amount"] = str(recalculated_pnl)
+
+
 
 def accept_candidate(
     conn,
@@ -972,6 +1059,30 @@ def recompute_statement_batch_after_review(
     created_count = sum(1 for c in candidates if c["candidate_type"] in ("create_transaction", "create_transfer", "refund", "recognize_installment") and c["status"] in ("accepted", "applied"))
 
     account = accounts_repo.get_account(conn, batch["account_id"])
+    if account and account.get("account_type") == "investment":
+        batch_status = "needs_review" if pending_count > 0 else "ready"
+        if existing_adj:
+            reconciliation_repo.update_reconciliation_candidate_full(
+                conn=conn,
+                candidate_id=existing_adj["id"],
+                candidate_type="adjustment",
+                status="rejected",
+                payload={"adjustment_amount": "0.00", "currency": curr},
+                reason_code="RESIDUAL_EXPLAINED",
+                reason_detail="Investment accounts do not use reconciliation adjustments."
+            )
+        reconciliation_repo.update_reconciliation_batch_stats(
+            conn=conn,
+            batch_id=batch_id,
+            status=batch_status,
+            matched_count=matched_count,
+            created_count=0,
+            pending_count=pending_count,
+            residual_amount=None,
+            adjustment_amount=None
+        )
+        return
+
     is_credit = account and account.get("account_type") == "credit"
     cycle_ok = None
     if is_credit and batch.get("statement_balance") is not None:

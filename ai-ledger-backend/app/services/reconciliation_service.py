@@ -372,6 +372,18 @@ def commit_statement_batch(
     primary_account_id = batch["account_id"]
     curr = batch["currency"]
 
+    account = accounts_repo.get_account(conn, primary_account_id)
+    if account and account.get("account_type") == "investment":
+        import app.services.investment_service as investment_service
+        return investment_service.commit_investment_statement_batch(
+            conn=conn,
+            batch_id=batch_id,
+            batch=batch,
+            candidates=candidates,
+            user_id=user_id,
+            device_id=device_id
+        )
+
     household = accounts_repo.get_household(conn, household_id)
     reporting_currency = household["reporting_currency"] if household else "CNY"
 

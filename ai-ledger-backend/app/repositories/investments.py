@@ -139,14 +139,40 @@ def get_investment_pnl_period(conn, period_id: UUID) -> Optional[Dict[str, Any]]
                    p.period_start, p.period_end, p.contributions_amount, p.withdrawals_amount,
                    p.pnl_amount, p.currency, p.status, p.calculation_version, p.reconciliation_batch_id,
                    p.created_at, p.updated_at,
-                   op.balance AS opening_value,
-                   cl.balance AS closing_value
+                   s_open.balance AS opening_value,
+                   s_close.balance AS closing_value
             FROM investment_pnl_periods p
-            JOIN account_snapshots op ON p.opening_snapshot_id = op.id
-            JOIN account_snapshots cl ON p.closing_snapshot_id = cl.id
+            LEFT JOIN account_snapshots s_open ON s_open.id = p.opening_snapshot_id
+            LEFT JOIN account_snapshots s_close ON s_close.id = p.closing_snapshot_id
             WHERE p.id = %s;
             """,
             (period_id,)
+        )
+        row = cur.fetchone()
+        return _map_pnl_row(row)
+
+
+def get_investment_pnl_period_by_closing_snapshot(conn, closing_snapshot_id: UUID) -> Optional[Dict[str, Any]]:
+    """
+    Retrieves a confirmed investment P&L period where closing_snapshot_id matches.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT p.id, p.household_id, p.account_id, p.opening_snapshot_id, p.closing_snapshot_id,
+                   p.period_start, p.period_end, p.contributions_amount, p.withdrawals_amount,
+                   p.pnl_amount, p.currency, p.status, p.calculation_version, p.reconciliation_batch_id,
+                   p.created_at, p.updated_at,
+                   s_open.balance AS opening_value,
+                   s_close.balance AS closing_value
+            FROM investment_pnl_periods p
+            LEFT JOIN account_snapshots s_open ON s_open.id = p.opening_snapshot_id
+            LEFT JOIN account_snapshots s_close ON s_close.id = p.closing_snapshot_id
+            WHERE p.closing_snapshot_id = %s
+              AND p.status = 'confirmed'
+            LIMIT 1;
+            """,
+            (closing_snapshot_id,)
         )
         row = cur.fetchone()
         return _map_pnl_row(row)

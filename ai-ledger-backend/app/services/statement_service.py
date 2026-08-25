@@ -45,6 +45,7 @@ import app.repositories.accounts as accounts_repo
 import app.repositories.transactions as tx_repo
 import app.repositories.reconciliation as reconciliation_repo
 import app.repositories.installments as installments_repo
+import app.repositories.investments as investments_repo
 import app.repositories.audit as audit_repo
 
 logger = logging.getLogger(__name__)
@@ -680,8 +681,73 @@ def validate_candidate_payload_for_type(
 
     elif candidate_type == "investment_pnl":
         pnl_data = merged_payload.get("investment_pnl", merged_payload)
-        matched_c_ids = pnl_data.get("matched_contribution_transfer_ids", [])
-        matched_w_ids = pnl_data.get("matched_withdrawal_transfer_ids", [])
+        unresolved_flows = pnl_data.get("unresolved_flow_evidence", [])
+        flow_resolutions = pnl_data.get("flow_resolutions", [])
+
+        # Validate flow_resolutions if provided
+        resolved_indices = set()
+        for res in flow_resolutions:
+            f_idx = res.get("flow_index")
+            sel_tid_str = res.get("selected_transfer_id")
+            if f_idx is None or sel_tid_str is None:
+                raise InvalidCandidatePayloadError("Flow resolution requires 'flow_index' and 'selected_transfer_id'.")
+
+            target_flow = next((uf for uf in unresolved_flows if uf.get("flow_index") == f_idx), None)
+            if not target_flow:
+                raise InvalidCandidatePayloadError(f"Flow index {f_idx} not found in unresolved flow evidence.")
+
+            cand_tids = target_flow.get("candidate_transfer_ids", [])
+            if str(sel_tid_str) not in [str(ctid) for ctid in cand_tids]:
+                raise InvalidCandidatePayloadError(f"Selected transfer {sel_tid_str} is not a valid candidate for flow index {f_idx}.")
+
+            try:
+                sel_tid = UUID(str(sel_tid_str))
+                tx = tx_repo.get_transaction(conn, sel_tid)
+            except (ValueError, TypeError):
+                raise InvalidCandidatePayloadError(f"Invalid transfer ID in flow resolution: {sel_tid_str}")
+            if not tx or tx["household_id"] != household_id or tx["status"] != "committed" or tx.get("deleted_at") is not None:
+                raise InvalidCandidatePayloadError(f"Selected transfer {sel_tid_str} not found or not active.")
+
+            expected_dir = target_flow.get("direction")
+            if expected_dir == "contribution":
+                if tx["transaction_type"] != "transfer" or str(tx.get("to_account_id")) != str(account["id"]):
+                    raise InvalidCandidatePayloadError(f"Transfer {sel_tid_str} is not a valid transfer into investment account.")
+                if str(tx.get("to_currency")).strip().upper() != account["currency"].upper():
+                    raise InvalidCandidatePayloadError(f"Transfer {sel_tid_str} currency does not match account currency.")
+                if parse_decimal(tx["to_amount"]) != parse_decimal(target_flow["amount"]):
+                    raise InvalidCandidatePayloadError(f"Transfer {sel_tid_str} amount does not match statement flow amount.")
+            elif expected_dir == "withdrawal":
+                if tx["transaction_type"] != "transfer" or str(tx.get("from_account_id")) != str(account["id"]):
+                    raise InvalidCandidatePayloadError(f"Transfer {sel_tid_str} is not a valid transfer out of investment account.")
+                if str(tx.get("from_currency")).strip().upper() != account["currency"].upper():
+                    raise InvalidCandidatePayloadError(f"Transfer {sel_tid_str} currency does not match account currency.")
+                if parse_decimal(tx["from_amount"]) != parse_decimal(target_flow["amount"]):
+                    raise InvalidCandidatePayloadError(f"Transfer {sel_tid_str} amount does not match statement flow amount.")
+
+            resolved_indices.add(f_idx)
+
+        if for_accept:
+            for uf in unresolved_flows:
+                uf_idx = uf.get("flow_index")
+                if uf_idx is not None and uf_idx not in resolved_indices:
+                    raise InvalidCandidatePayloadError("Cannot accept investment P&L candidate with unresolved capital-flow evidence.")
+
+        matched_c_ids = list(pnl_data.get("matched_contribution_transfer_ids", []))
+        matched_w_ids = list(pnl_data.get("matched_withdrawal_transfer_ids", []))
+
+        # Add resolved transfers to matched lists if not already present
+        for res in flow_resolutions:
+            f_idx = res.get("flow_index")
+            sel_tid_str = str(res.get("selected_transfer_id"))
+            target_flow = next((uf for uf in unresolved_flows if uf.get("flow_index") == f_idx), None)
+            if target_flow:
+                if target_flow.get("direction") == "contribution" and sel_tid_str not in matched_c_ids:
+                    matched_c_ids.append(sel_tid_str)
+                elif target_flow.get("direction") == "withdrawal" and sel_tid_str not in matched_w_ids:
+                    matched_w_ids.append(sel_tid_str)
+
+        pnl_data["matched_contribution_transfer_ids"] = matched_c_ids
+        pnl_data["matched_withdrawal_transfer_ids"] = matched_w_ids
 
         c_amt = Decimal("0.00")
         for tid_str in matched_c_ids:
@@ -1058,9 +1124,39 @@ def recompute_statement_batch_after_review(
     matched_count = sum(1 for c in candidates if c["candidate_type"] == "match" and c["status"] in ("accepted", "applied"))
     created_count = sum(1 for c in candidates if c["candidate_type"] in ("create_transaction", "create_transfer", "refund", "recognize_installment") and c["status"] in ("accepted", "applied"))
 
+    existing_adj = next((c for c in candidates if c["candidate_type"] == "adjustment"), None)
+
     account = accounts_repo.get_account(conn, batch["account_id"])
     if account and account.get("account_type") == "investment":
-        batch_status = "needs_review" if pending_count > 0 else "ready"
+        snap_cand = next((c for c in candidates if c["candidate_type"] == "snapshot"), None)
+        pnl_cand = next((c for c in candidates if c["candidate_type"] == "investment_pnl"), None)
+
+        opening_snap = investments_repo.get_latest_authoritative_investment_valuation_snapshot(
+            conn=conn,
+            household_id=household_id,
+            account_id=batch["account_id"]
+        )
+
+        has_unresolved_flows = False
+        if pnl_cand:
+            p_data = pnl_cand.get("payload", {}).get("investment_pnl", {})
+            unresolved = p_data.get("unresolved_flow_evidence", [])
+            resolutions = p_data.get("flow_resolutions", [])
+            res_indices = {r.get("flow_index") for r in resolutions if r.get("flow_index") is not None and r.get("selected_transfer_id")}
+            has_unresolved = any(uf.get("flow_index", idx) not in res_indices for idx, uf in enumerate(unresolved))
+            if has_unresolved:
+                has_unresolved_flows = True
+
+        snap_ok = snap_cand is not None and snap_cand["status"] == "accepted"
+        pnl_ok = True
+        if opening_snap is not None:
+            pnl_ok = pnl_cand is not None and pnl_cand["status"] == "accepted" and not has_unresolved_flows
+
+        if pending_count == 0 and snap_ok and pnl_ok:
+            batch_status = "ready"
+        else:
+            batch_status = "needs_review"
+
         if existing_adj:
             reconciliation_repo.update_reconciliation_candidate_full(
                 conn=conn,
@@ -1088,8 +1184,6 @@ def recompute_statement_batch_after_review(
     if is_credit and batch.get("statement_balance") is not None:
         db_lines = reconciliation_repo.list_statement_lines_for_batch(conn, batch_id)
         cycle_ok = evaluate_credit_card_statement_cycle(db_lines, batch["statement_balance"], curr)
-
-    existing_adj = next((c for c in candidates if c["candidate_type"] == "adjustment"), None)
 
     # If authoritative balance is absent, residual remains None and no adjustment candidate is created
     if batch.get("authoritative_balance") is None:

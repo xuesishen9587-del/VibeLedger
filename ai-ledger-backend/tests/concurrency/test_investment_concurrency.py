@@ -5,7 +5,7 @@ os.environ.setdefault("DB_SCHEMA", "vibeledger_test_runner")
 
 import unittest
 import threading
-import time
+import hashlib
 from uuid import uuid4, UUID
 from decimal import Decimal
 from datetime import datetime, date, timezone
@@ -14,6 +14,7 @@ from app.db import get_connection, transaction
 from tests.support.db_helper import BaseDbTestCase
 import app.repositories.accounts as accounts_repo
 import app.repositories.investments as investments_repo
+import app.repositories.devices as devices_repo
 import app.services.investment_service as investment_service
 
 
@@ -58,10 +59,10 @@ class TestInvestmentConcurrency(BaseDbTestCase):
 
     def test_concurrent_investment_snapshots_serialized_by_account_lock(self):
         """
-        Section 41: Deterministic PostgreSQL concurrency test for two concurrent
+        Section 41 & Section 11: Sleep-free deterministic PostgreSQL concurrency test for two concurrent
         investment snapshots on the same account.
         Worker 1 acquires account_state row lock and submits snapshot 1 (2026-08-10).
-        Worker 2 attempts to lock account_state for snapshot 2 (2026-08-20) and blocks.
+        Worker 2 enters transaction and blocks on account_state lock for snapshot 2 (2026-08-20).
         Worker 1 commits.
         Worker 2 acquires the lock, re-reads latest authoritative valuation under the lock,
         and computes P&L against Worker 1's valuation.
@@ -69,7 +70,6 @@ class TestInvestmentConcurrency(BaseDbTestCase):
         """
         w1_locked = threading.Event()
         w2_started = threading.Event()
-        w1_can_commit = threading.Event()
 
         results = [None, None]
         errors = [None, None]
@@ -82,9 +82,8 @@ class TestInvestmentConcurrency(BaseDbTestCase):
                     accounts_repo.lock_account_states(conn, [self.inv_account_id])
                     w1_locked.set()
 
-                    # Wait until worker 2 has launched and is blocked waiting for lock
+                    # Wait until worker 2 has launched and reached its attempt to lock
                     w2_started.wait()
-                    time.sleep(0.1)
 
                     res = investment_service.create_manual_investment_snapshot(
                         conn=conn,
@@ -162,6 +161,100 @@ class TestInvestmentConcurrency(BaseDbTestCase):
 
                 # Period 2: 120,000 -> 150,000, P&L = 30,000
                 self.assertEqual(periods[1]["pnl_amount"], Decimal("30000.000000"))
+        finally:
+            conn.close()
+
+    def test_concurrent_manual_snapshot_idempotency_ownership(self):
+        """
+        Section 10 & Clarification A: Concurrent same-device requests with same idempotency key
+        and same payload execute exactly ONCE under PostgreSQL uniqueness arbitration.
+        """
+        device_id = uuid4()
+        token_raw = "test-idem-ownership-token"
+        token_hash = hashlib.sha256(token_raw.encode("utf-8")).digest()
+
+        conn = get_connection(self.test_schema)
+        try:
+            with transaction(conn):
+                devices_repo.create_device(
+                    conn=conn,
+                    device_id=device_id,
+                    user_id=self.user_id,
+                    device_name="Test Idem Device",
+                    token_hash=token_hash
+                )
+        finally:
+            conn.close()
+
+        barrier = threading.Barrier(2)
+        results = [None, None]
+        errors = [None, None]
+
+        payload = {
+            "idempotency_key": "conc-idem-key-001",
+            "as_of": "2026-08-15T00:00:00+08:00",
+            "total_asset_value": "135000.00",
+            "currency": "CNY",
+            "source": "shortcut"
+        }
+
+        def worker(idx):
+            conn = get_connection(self.test_schema)
+            try:
+                barrier.wait()
+                with transaction(conn):
+                    res = investment_service.create_manual_investment_snapshot(
+                        conn=conn,
+                        household_id=self.household_id,
+                        account_id=self.inv_account_id,
+                        payload=payload,
+                        user_id=self.user_id,
+                        device_id=device_id
+                    )
+                    results[idx] = res
+            except Exception as e:
+                errors[idx] = e
+            finally:
+                conn.close()
+
+        t1 = threading.Thread(target=worker, args=(0,))
+        t2 = threading.Thread(target=worker, args=(1,))
+
+        t1.start()
+        t2.start()
+
+        t1.join()
+        t2.join()
+
+        # At least one succeeded, and if the other returned or failed retryable, no duplicate snapshots were created
+        succeeded_results = [r for r in results if r is not None]
+        self.assertGreaterEqual(len(succeeded_results), 1)
+
+        # Verify DB has exactly one snapshot for this as_of
+        conn = get_connection(self.test_schema)
+        try:
+            with transaction(conn):
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT count(*) FROM account_snapshots
+                        WHERE account_id = %s AND snapshot_type = 'investment_valuation'
+                          AND as_of = '2026-08-15T00:00:00+08:00';
+                        """,
+                        (self.inv_account_id,)
+                    )
+                    count = cur.fetchone()[0]
+                    self.assertEqual(count, 1)
+
+                    cur.execute(
+                        """
+                        SELECT count(*) FROM investment_pnl_periods
+                        WHERE account_id = %s AND period_end = '2026-08-15T00:00:00+08:00';
+                        """,
+                        (self.inv_account_id,)
+                    )
+                    pnl_count = cur.fetchone()[0]
+                    self.assertEqual(pnl_count, 1)
         finally:
             conn.close()
 

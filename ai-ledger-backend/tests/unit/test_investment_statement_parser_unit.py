@@ -178,6 +178,60 @@ class TestInvestmentStatementParserUnit(unittest.TestCase):
             self.assertTrue(result.capital_flow_evidence_complete)
             self.assertEqual(result.broker_reported_pnl, Decimal("-3589.17"))
 
+    def test_missing_valuation_date_fails_closed(self):
+        extraction = InvestmentStatementExtractionResult(
+            total_asset_value=Decimal("150000.00"),
+            currency="CNY",
+            valuation_as_of=None,
+            statement_period_start=None,
+            statement_period_end=None,
+            clear_capital_flows=[]
+        )
+        with self.assertRaises(StatementParseFailedError):
+            validate_and_normalize_investment_extraction(extraction, self.account_cny)
+
+    def test_capital_flow_evidence_complete_boolean_normalization(self):
+        # Missing or None -> False
+        ext1 = InvestmentStatementExtractionResult(
+            total_asset_value=Decimal("150000.00"),
+            currency="CNY",
+            valuation_as_of=date(2026, 7, 31),
+            capital_flow_evidence_complete=None
+        )
+        *_, comp1 = validate_and_normalize_investment_extraction(ext1, self.account_cny)
+        self.assertFalse(comp1)
+
+        # False -> False
+        ext2 = InvestmentStatementExtractionResult(
+            total_asset_value=Decimal("150000.00"),
+            currency="CNY",
+            valuation_as_of=date(2026, 7, 31),
+            capital_flow_evidence_complete=False
+        )
+        *_, comp2 = validate_and_normalize_investment_extraction(ext2, self.account_cny)
+        self.assertFalse(comp2)
+
+        # String "false" -> False
+        ext3 = InvestmentStatementExtractionResult(
+            total_asset_value=Decimal("150000.00"),
+            currency="CNY",
+            valuation_as_of=date(2026, 7, 31),
+            capital_flow_evidence_complete="false"  # type: ignore
+        )
+        *_, comp3 = validate_and_normalize_investment_extraction(ext3, self.account_cny)
+        self.assertFalse(comp3)
+
+        # True -> True
+        ext4 = InvestmentStatementExtractionResult(
+            total_asset_value=Decimal("150000.00"),
+            currency="CNY",
+            valuation_as_of=date(2026, 7, 31),
+            capital_flow_evidence_complete=True
+        )
+        *_, comp4 = validate_and_normalize_investment_extraction(ext4, self.account_cny)
+        self.assertTrue(comp4)
+
 
 if __name__ == "__main__":
     unittest.main()
+

@@ -458,7 +458,8 @@ class GeminiStatementParser(BaseStatementParser):
                     external_reference=f_data.get("external_reference")
                 ))
 
-            evidence_complete = bool(parsed_data.get("capital_flow_evidence_complete", True))
+            raw_complete = parsed_data.get("capital_flow_evidence_complete")
+            evidence_complete = True if raw_complete is True else False
             broker_pnl = parse_decimal(parsed_data.get("broker_reported_pnl")) if parsed_data.get("broker_reported_pnl") is not None else None
 
             return InvestmentStatementExtractionResult(
@@ -675,7 +676,10 @@ def validate_and_normalize_investment_extraction(
     if p_start and p_end and p_end < p_start:
         raise StatementParseFailedError("Invalid statement period: period_end cannot be earlier than period_start.")
 
-    val_as_of = caller_period_end or extraction.valuation_as_of or extraction.statement_period_end or date.today()
+    val_as_of = caller_period_end or extraction.valuation_as_of or extraction.statement_period_end
+    if not val_as_of:
+        raise StatementParseFailedError("Investment statement missing authoritative valuation date.")
+
     opening_as_of = caller_period_start or extraction.opening_valuation_as_of or extraction.statement_period_start
 
     norm_flows: List[InvestmentCapitalFlow] = []
@@ -700,6 +704,8 @@ def validate_and_normalize_investment_extraction(
             external_reference=flow.external_reference
         ))
 
+    evidence_complete = True if extraction.capital_flow_evidence_complete is True else False
+
     return (
         total_asset_val,
         account_curr,
@@ -709,6 +715,6 @@ def validate_and_normalize_investment_extraction(
         opening_val,
         opening_as_of,
         norm_flows,
-        extraction.capital_flow_evidence_complete
+        evidence_complete
     )
 

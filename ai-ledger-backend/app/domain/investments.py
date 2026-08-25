@@ -75,3 +75,135 @@ def calculate_investment_pnl(
 
     raw_pnl = closing_value - opening_value - contributions + withdrawals
     return quantize_money(raw_pnl, currency)
+
+
+def is_flow_compatible_with_transfer(
+    flow: Any,
+    transfer: Dict[str, Any],
+    account_id: UUID,
+    account_currency: str
+) -> bool:
+    """
+    Deterministic compatibility check between a statement flow (or unresolved flow evidence)
+    and a committed ledger transfer transaction.
+
+    Rules:
+    1. Transfer must be committed, not deleted, and transaction_type == 'transfer'.
+    2. Direction & Account Leg:
+       - 'contribution': to_account_id == account_id, to_amount == flow_amount, to_currency == account_currency == flow_currency
+       - 'withdrawal': from_account_id == account_id, from_amount == flow_amount, from_currency == account_currency == flow_currency
+    3. Date compatibility:
+       - If flow occurred_on is present: require transfer occurred_on == flow occurred_on.
+       - Else if flow posted_on is present: require (transfer posted_on or transfer occurred_on) == flow posted_on.
+    4. External reference compatibility:
+       - If both flow external_reference and transfer remarks/reference are present and non-empty:
+         Must be compatible (equal or substring). If contradictory: not compatible.
+       - If absent on either side, absence does not block compatibility.
+    """
+    from app.domain.money import parse_decimal
+
+    if not transfer:
+        return False
+    if transfer.get("status") and transfer.get("status") != "committed":
+        return False
+    if transfer.get("deleted_at") is not None:
+        return False
+    if transfer.get("transaction_type") and transfer.get("transaction_type") != "transfer":
+        return False
+
+    # Extract flow fields
+    if hasattr(flow, "direction"):
+        f_dir = getattr(flow, "direction")
+        f_amt = getattr(flow, "amount")
+        f_curr = getattr(flow, "currency")
+        f_occ = getattr(flow, "occurred_on")
+        f_post = getattr(flow, "posted_on")
+        f_ref = getattr(flow, "external_reference")
+    elif isinstance(flow, dict):
+        f_dir = flow.get("direction")
+        f_amt = flow.get("amount")
+        f_curr = flow.get("currency")
+        f_occ = flow.get("occurred_on")
+        f_post = flow.get("posted_on")
+        f_ref = flow.get("external_reference")
+    else:
+        return False
+
+    if isinstance(f_occ, str):
+        try:
+            f_occ = date.fromisoformat(f_occ)
+        except Exception:
+            pass
+    if isinstance(f_post, str):
+        try:
+            f_post = date.fromisoformat(f_post)
+        except Exception:
+            pass
+
+    f_amt_dec = parse_decimal(f_amt) if f_amt is not None else None
+    if f_amt_dec is None or f_amt_dec <= Decimal("0.00"):
+        return False
+
+    acc_curr = account_currency.strip().upper()
+    if f_curr and str(f_curr).strip().upper() != acc_curr:
+        return False
+
+    # Direction & Leg
+    if f_dir == "contribution":
+        if str(transfer.get("to_account_id")) != str(account_id):
+            return False
+        tx_curr = str(transfer.get("to_currency") or "").strip().upper()
+        if tx_curr != acc_curr:
+            return False
+        tx_amt = parse_decimal(transfer.get("to_amount") if transfer.get("to_amount") is not None else transfer.get("amount"))
+        if tx_amt != f_amt_dec:
+            return False
+    elif f_dir == "withdrawal":
+        if str(transfer.get("from_account_id")) != str(account_id):
+            return False
+        tx_curr = str(transfer.get("from_currency") or "").strip().upper()
+        if tx_curr != acc_curr:
+            return False
+        tx_amt = parse_decimal(transfer.get("from_amount") if transfer.get("from_amount") is not None else transfer.get("amount"))
+        if tx_amt != f_amt_dec:
+            return False
+    else:
+        return False
+
+    # Date compatibility
+    tx_occ = transfer.get("occurred_on") or transfer.get("transaction_on")
+    if isinstance(tx_occ, datetime):
+        tx_occ = tx_occ.date()
+    elif isinstance(tx_occ, str):
+        try:
+            tx_occ = date.fromisoformat(tx_occ)
+        except Exception:
+            pass
+
+    tx_post = transfer.get("posted_on")
+    if isinstance(tx_post, datetime):
+        tx_post = tx_post.date()
+    elif isinstance(tx_post, str):
+        try:
+            tx_post = date.fromisoformat(tx_post)
+        except Exception:
+            pass
+
+    if f_occ is not None:
+        if tx_occ != f_occ:
+            return False
+    elif f_post is not None:
+        effective_tx_date = tx_post if tx_post is not None else tx_occ
+        if effective_tx_date != f_post:
+            return False
+
+    # External reference compatibility
+    f_ref_str = str(f_ref).strip() if f_ref is not None and str(f_ref).strip() else None
+    tx_ref_raw = transfer.get("remarks") or transfer.get("external_reference") or transfer.get("description")
+    tx_ref_str = str(tx_ref_raw).strip() if tx_ref_raw is not None and str(tx_ref_raw).strip() else None
+
+    if f_ref_str and tx_ref_str:
+        if f_ref_str != tx_ref_str and f_ref_str not in tx_ref_str and tx_ref_str not in f_ref_str:
+            return False
+
+    return True

@@ -240,7 +240,7 @@ def get_known_committed_transfers(
     # Contributions: transfers into the investment account (to_account_id = account_id)
     query_contrib = """
         SELECT id, occurred_on, occurred_at, to_amount AS amount, to_currency AS currency,
-               from_account_id, to_account_id, remarks, status
+               from_account_id, to_account_id, remarks, status, posted_on
         FROM transactions
         WHERE household_id = %s
           AND transaction_type = 'transfer'
@@ -258,7 +258,7 @@ def get_known_committed_transfers(
     # Withdrawals: transfers out of the investment account (from_account_id = account_id)
     query_withdr = """
         SELECT id, occurred_on, occurred_at, from_amount AS amount, from_currency AS currency,
-               from_account_id, to_account_id, remarks, status
+               from_account_id, to_account_id, remarks, status, posted_on
         FROM transactions
         WHERE household_id = %s
           AND transaction_type = 'transfer'
@@ -283,14 +283,19 @@ def get_known_committed_transfers(
             if curr == account_currency.upper():
                 contributions.append({
                     "id": r[0],
+                    "transaction_type": "transfer",
                     "occurred_on": r[1],
                     "occurred_at": r[2],
                     "amount": amt,
                     "currency": curr,
+                    "to_amount": amt,
+                    "to_currency": curr,
                     "from_account_id": r[5],
                     "to_account_id": r[6],
+                    "remarks": r[7],
                     "description": r[7],
-                    "status": r[8]
+                    "status": r[8],
+                    "posted_on": r[9] if len(r) > 9 else None
                 })
 
         cur.execute(query_withdr, params_withdr)
@@ -302,14 +307,19 @@ def get_known_committed_transfers(
             if curr == account_currency.upper():
                 withdrawals.append({
                     "id": r[0],
+                    "transaction_type": "transfer",
                     "occurred_on": r[1],
                     "occurred_at": r[2],
                     "amount": amt,
                     "currency": curr,
+                    "from_amount": amt,
+                    "from_currency": curr,
                     "from_account_id": r[5],
                     "to_account_id": r[6],
+                    "remarks": r[7],
                     "description": r[7],
-                    "status": r[8]
+                    "status": r[8],
+                    "posted_on": r[9] if len(r) > 9 else None
                 })
 
     return contributions, withdrawals

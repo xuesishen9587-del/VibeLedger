@@ -1,3 +1,4 @@
+import os
 import hashlib
 import json
 import logging
@@ -452,14 +453,22 @@ def process_investment_statement(
 
     # 1. Parse PDF using provided parser
     stmt_parser = parser or GeminiStatementParser()
-    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=True) as tmp:
-        tmp.write(file_bytes)
-        tmp.flush()
+    temp_file = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False)
+    temp_path = temp_file.name
+    try:
+        temp_file.write(file_bytes)
+        temp_file.close()
         extraction = stmt_parser.extract_investment_statement(
-            pdf_path=tmp.name,
+            pdf_path=temp_path,
             account_context=account,
             password=password
         )
+    finally:
+        if os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except Exception as e:
+                logger.warning(f"Failed to delete temp PDF file {temp_path}: {e}")
 
     # 2. Validate and normalize extraction
     (
@@ -539,18 +548,15 @@ def process_investment_statement(
 
     used_transfer_ids = set()
 
+    from app.domain.investments import is_flow_compatible_with_transfer
+
     for idx, flow in enumerate(norm_flows):
         if flow.direction == "contribution":
             candidates = [
                 t for t in db_contribs
                 if t["id"] not in used_transfer_ids
-                and t["amount"] == flow.amount
-                and t["currency"] == flow.currency
+                and is_flow_compatible_with_transfer(flow, t, account_id, account_curr)
             ]
-            if flow.occurred_on:
-                candidates = [t for t in candidates if (t.get("occurred_on") or t.get("transaction_on")) == flow.occurred_on]
-            if flow.external_reference:
-                candidates = [t for t in candidates if not t.get("remarks") or flow.external_reference in t.get("remarks")]
 
             if len(candidates) == 1:
                 matched_t = candidates[0]
@@ -560,6 +566,7 @@ def process_investment_statement(
                 is_ambiguous = True
                 unresolved_flows.append({
                     "flow_index": idx,
+                    "evidence_kind": "statement_flow",
                     "direction": flow.direction,
                     "amount": str(flow.amount),
                     "currency": flow.currency,
@@ -572,13 +579,8 @@ def process_investment_statement(
             candidates = [
                 t for t in db_withdrws
                 if t["id"] not in used_transfer_ids
-                and t["amount"] == flow.amount
-                and t["currency"] == flow.currency
+                and is_flow_compatible_with_transfer(flow, t, account_id, account_curr)
             ]
-            if flow.occurred_on:
-                candidates = [t for t in candidates if (t.get("occurred_on") or t.get("transaction_on")) == flow.occurred_on]
-            if flow.external_reference:
-                candidates = [t for t in candidates if not t.get("remarks") or flow.external_reference in t.get("remarks")]
 
             if len(candidates) == 1:
                 matched_t = candidates[0]
@@ -588,6 +590,7 @@ def process_investment_statement(
                 is_ambiguous = True
                 unresolved_flows.append({
                     "flow_index": idx,
+                    "evidence_kind": "statement_flow",
                     "direction": flow.direction,
                     "amount": str(flow.amount),
                     "currency": flow.currency,
@@ -597,15 +600,41 @@ def process_investment_statement(
                     "candidate_transfer_ids": [str(c["id"]) for c in candidates]
                 })
 
-    # Complete evidence check against canonical ledger transfers
-    if evidence_complete:
-        total_db_transfers = len(db_contribs) + len(db_withdrws)
-        if len(used_transfer_ids) < total_db_transfers:
+    # Represent unrepresented ledger flows as unresolved workflow evidence (Item 2)
+    next_idx = len(norm_flows)
+    for t in db_contribs:
+        if t["id"] not in used_transfer_ids:
             is_ambiguous = True
-            ambiguity_reasons.append("Known committed ledger transfer(s) are not represented on the statement.")
-        if len(norm_flows) != total_db_transfers:
+            ambiguity_reasons.append(f"Committed ledger contribution {t['id']} ({t['amount']} {t['currency']}) is unrepresented on statement.")
+            unresolved_flows.append({
+                "flow_index": next_idx,
+                "evidence_kind": "ledger_unrepresented",
+                "direction": "contribution",
+                "amount": str(t["amount"]),
+                "currency": t["currency"],
+                "occurred_on": t["occurred_on"].isoformat() if t.get("occurred_on") else None,
+                "posted_on": t["posted_on"].isoformat() if t.get("posted_on") else None,
+                "external_reference": t.get("remarks"),
+                "candidate_transfer_ids": [str(t["id"])]
+            })
+            next_idx += 1
+
+    for t in db_withdrws:
+        if t["id"] not in used_transfer_ids:
             is_ambiguous = True
-            ambiguity_reasons.append("Number of statement capital flows does not match known ledger transfers.")
+            ambiguity_reasons.append(f"Committed ledger withdrawal {t['id']} ({t['amount']} {t['currency']}) is unrepresented on statement.")
+            unresolved_flows.append({
+                "flow_index": next_idx,
+                "evidence_kind": "ledger_unrepresented",
+                "direction": "withdrawal",
+                "amount": str(t["amount"]),
+                "currency": t["currency"],
+                "occurred_on": t["occurred_on"].isoformat() if t.get("occurred_on") else None,
+                "posted_on": t["posted_on"].isoformat() if t.get("posted_on") else None,
+                "external_reference": t.get("remarks"),
+                "candidate_transfer_ids": [str(t["id"])]
+            })
+            next_idx += 1
 
     # 6. Calculate PnL preview using CANONICAL ledger totals
     if opening_snap is not None:
@@ -641,7 +670,7 @@ def process_investment_statement(
         conn=conn,
         batch_id=batch_id,
         status=batch_status,
-        matched_count=len(norm_flows) - len(unresolved_flows),
+        matched_count=len(norm_flows) - sum(1 for uf in unresolved_flows if uf.get("evidence_kind") == "statement_flow"),
         created_count=0,
         pending_count=len(unresolved_flows) if is_ambiguous else 0,
         residual_amount=None,
@@ -734,8 +763,9 @@ def commit_investment_statement_batch(
     Atomically commits a ready investment statement batch:
     - Locks account_state for the investment account.
     - Re-validates snapshot candidate and investment_pnl candidate.
-    - Re-reads and re-validates selected transfer transactions.
-    - Re-computes P&L from fresh state.
+    - Fresh-reads full canonical ledger transfer set.
+    - Re-validates all evidence and flow resolutions against the fresh canonical set.
+    - Re-computes P&L from fresh canonical ledger state.
     - Inserts closing investment_valuation snapshot.
     - Inserts confirmed investment_pnl_period (if prior valuation exists).
     - Updates account_state projection.
@@ -821,38 +851,238 @@ def commit_investment_statement_batch(
 
     opening_snap = latest_snap
 
-    matched_contrib_ids = []
-    matched_withdrw_ids = []
+    # Fresh-read the full canonical capital-flow set under lock (Item 4)
+    if opening_snap is not None:
+        fresh_contribs, fresh_withdrws = investments_repo.get_known_committed_transfers(
+            conn=conn,
+            household_id=household_id,
+            account_id=account_id,
+            account_currency=account_curr,
+            opening_as_of=opening_snap["as_of"],
+            closing_as_of=as_of_dt
+        )
+    else:
+        fresh_contribs, fresh_withdrws = [], []
+
+    fresh_contrib_total = quantize_money(sum((c["amount"] for c in fresh_contribs), Decimal("0.00")), account_curr)
+    fresh_withdrw_total = quantize_money(sum((w["amount"] for w in fresh_withdrws), Decimal("0.00")), account_curr)
+
+    # Fresh commit evidence revalidation (Item 5)
     if pnl_cand:
         p_data = pnl_cand.get("payload", {}).get("investment_pnl", {})
-        matched_contrib_ids = [UUID(str(tid)) for tid in p_data.get("matched_contribution_transfer_ids", [])]
-        matched_withdrw_ids = [UUID(str(tid)) for tid in p_data.get("matched_withdrawal_transfer_ids", [])]
+        matched_c_ids = {UUID(str(tid)) for tid in p_data.get("matched_contribution_transfer_ids", [])}
+        matched_w_ids = {UUID(str(tid)) for tid in p_data.get("matched_withdrawal_transfer_ids", [])}
+        flow_resolutions = p_data.get("flow_resolutions", [])
+        unresolved_flows = p_data.get("unresolved_flow_evidence", [])
 
-    # Re-validate all matched transfers
-    contrib_total = Decimal("0.00")
-    for tid in matched_contrib_ids:
-        tx = tx_repo.get_transaction(conn, tid)
-        if not tx or tx["household_id"] != household_id or tx["status"] != "committed" or tx.get("deleted_at") is not None:
-            raise ValueError(f"Matched contribution transfer {tid} is invalid, voided, or deleted.")
-        if tx["transaction_type"] != "transfer" or str(tx.get("to_account_id")) != str(account_id):
-            raise ValueError(f"Transaction {tid} is not a valid transfer into investment account {account_id}.")
-        if str(tx.get("to_currency")).strip().upper() != account_curr:
-            raise ValueError(f"Transfer {tid} currency does not match investment account currency.")
-        contrib_total += parse_decimal(tx["to_amount"])
+        resolved_tids = {UUID(str(r["selected_transfer_id"])) for r in flow_resolutions if r.get("selected_transfer_id")}
+        all_accounted_tids = matched_c_ids | matched_w_ids | resolved_tids
 
-    withdrw_total = Decimal("0.00")
-    for tid in matched_withdrw_ids:
-        tx = tx_repo.get_transaction(conn, tid)
-        if not tx or tx["household_id"] != household_id or tx["status"] != "committed" or tx.get("deleted_at") is not None:
-            raise ValueError(f"Matched withdrawal transfer {tid} is invalid, voided, or deleted.")
-        if tx["transaction_type"] != "transfer" or str(tx.get("from_account_id")) != str(account_id):
-            raise ValueError(f"Transaction {tid} is not a valid transfer out of investment account {account_id}.")
-        if str(tx.get("from_currency")).strip().upper() != account_curr:
-            raise ValueError(f"Transfer {tid} currency does not match investment account currency.")
-        withdrw_total += parse_decimal(tx["from_amount"])
+        fresh_c_ids = {t["id"] for t in fresh_contribs}
+        fresh_w_ids = {t["id"] for t in fresh_withdrws}
+        all_fresh_tids = fresh_c_ids | fresh_w_ids
 
-    contrib_total = quantize_money(contrib_total, account_curr)
-    withdrw_total = quantize_money(withdrw_total, account_curr)
+        # Case B: New committed transfer appeared that is not explained / accounted for
+        if not all_fresh_tids.issubset(all_accounted_tids) and len(all_fresh_tids) > len(all_accounted_tids):
+            reconciliation_repo.update_reconciliation_batch(conn, batch_id, status="needs_review")
+            reconciliation_repo.update_candidate_status(conn, pnl_cand["id"], status="needs_review")
+            return {
+                "status": "needs_review",
+                "batch_id": str(batch_id),
+                "reason": "AMBIGUOUS_INVESTMENT_CAPITAL_FLOW"
+            }
+
+        # Case C: Previously selected transfer was voided/deleted/changed or no longer satisfies compatibility
+        from app.domain.investments import is_flow_compatible_with_transfer
+        fresh_tx_map = {t["id"]: t for t in fresh_contribs + fresh_withdrws}
+
+        for tid in matched_c_ids:
+            if tid not in fresh_c_ids:
+                reconciliation_repo.update_reconciliation_batch(conn, batch_id, status="needs_review")
+                reconciliation_repo.update_candidate_status(conn, pnl_cand["id"], status="needs_review")
+                return {
+                    "status": "needs_review",
+                    "batch_id": str(batch_id),
+                    "reason": "INVALID_OR_MODIFIED_MATCHED_TRANSFER"
+                }
+
+        for tid in matched_w_ids:
+            if tid not in fresh_w_ids:
+                reconciliation_repo.update_reconciliation_batch(conn, batch_id, status="needs_review")
+                reconciliation_repo.update_candidate_status(conn, pnl_cand["id"], status="needs_review")
+                return {
+                    "status": "needs_review",
+                    "batch_id": str(batch_id),
+                    "reason": "INVALID_OR_MODIFIED_MATCHED_TRANSFER"
+                }
+
+        for res in flow_resolutions:
+            sel_tid_str = res.get("selected_transfer_id")
+            f_idx = res.get("flow_index")
+            if not sel_tid_str:
+                continue
+            sel_tid = UUID(str(sel_tid_str))
+            if sel_tid not in fresh_tx_map:
+                reconciliation_repo.update_reconciliation_batch(conn, batch_id, status="needs_review")
+                reconciliation_repo.update_candidate_status(conn, pnl_cand["id"], status="needs_review")
+                return {
+                    "status": "needs_review",
+                    "batch_id": str(batch_id),
+                    "reason": "INVALID_OR_MODIFIED_MATCHED_TRANSFER"
+                }
+            target_uf = next((uf for uf in unresolved_flows if uf.get("flow_index") == f_idx), None)
+            if target_uf and not is_flow_compatible_with_transfer(target_uf, fresh_tx_map[sel_tid], account_id, account_curr):
+                reconciliation_repo.update_reconciliation_batch(conn, batch_id, status="needs_review")
+                reconciliation_repo.update_candidate_status(conn, pnl_cand["id"], status="needs_review")
+                return {
+                    "status": "needs_review",
+                    "batch_id": str(batch_id),
+                    "reason": "INVALID_OR_MODIFIED_MATCHED_TRANSFER"
+                }
+
+    # 3. Create closing snapshot
+    closing_snap_id = uuid4()
+    snapshots_repo.create_account_snapshot(
+        conn=conn,
+        snapshot_id=closing_snap_id,
+        household_id=household_id,
+        account_id=account_id,
+        as_of=as_of_dt,
+        balance=closing_val,
+        currency=account_curr,
+        snapshot_type="investment_valuation",
+        source="statement",
+        reconciliation_batch_id=batch_id,
+        is_authoritative=True,
+        created_by_user_id=user_id
+    )
+
+    # 4. If opening snapshot exists, compute P&L using fresh canonical totals and create confirmed investment_pnl_period
+    pnl_period_id = None
+    pnl_val = None
+    if opening_snap is not None:
+        pnl_val = calculate_investment_pnl(
+            opening_value=opening_snap["balance"],
+            closing_value=closing_val,
+            contributions=fresh_contrib_total,
+            withdrawals=fresh_withdrw_total,
+            currency=account_curr
+        )
+        pnl_period_id = uuid4()
+        investments_repo.create_investment_pnl_period(
+            conn=conn,
+            period_id=pnl_period_id,
+            household_id=household_id,
+            account_id=account_id,
+            opening_snapshot_id=opening_snap["id"],
+            closing_snapshot_id=closing_snap_id,
+            period_start=opening_snap["as_of"],
+            period_end=as_of_dt,
+            contributions_amount=fresh_contrib_total,
+            withdrawals_amount=fresh_withdrw_total,
+            pnl_amount=pnl_val,
+            currency=account_curr,
+            status="confirmed",
+            calculation_version=1,
+            reconciliation_batch_id=batch_id
+        )
+
+    # 5. Update account_state projection to closing_val using authoritative reconciliation helper
+    accounts_repo.update_account_state_after_reconciliation(
+        conn=conn,
+        account_id=account_id,
+        new_balance=closing_val,
+        snapshot_as_of=as_of_dt,
+        last_transaction_at=None
+    )
+
+    # 6. Mark candidates applied
+    for c in candidates:
+        reconciliation_repo.update_candidate_status(conn, c["id"], status="applied", resolved_by_user_id=user_id)
+
+    # 7. Mark batch committed
+    reconciliation_repo.update_reconciliation_batch(
+        conn=conn,
+        batch_id=batch_id,
+        status="committed",
+        committed_at=datetime.now(timezone.utc)
+    )
+
+    # 8. Audit events
+    audit_repo.insert_audit_event(
+        conn=conn,
+        household_id=household_id,
+        actor_type="device" if device_id else "user",
+        actor_user_id=user_id,
+        actor_device_id=device_id,
+        reconciliation_batch_id=batch_id,
+        entity_type="account_snapshot",
+        entity_id=closing_snap_id,
+        action="create",
+        after_data={
+            "snapshot_type": "investment_valuation",
+            "balance": str(closing_val),
+            "currency": account_curr,
+            "as_of": as_of_dt.isoformat()
+        }
+    )
+
+    if pnl_period_id is not None:
+        audit_repo.insert_audit_event(
+            conn=conn,
+            household_id=household_id,
+            actor_type="device" if device_id else "user",
+            actor_user_id=user_id,
+            actor_device_id=device_id,
+            reconciliation_batch_id=batch_id,
+            entity_type="investment_pnl_period",
+            entity_id=pnl_period_id,
+            action="confirm",
+            after_data={
+                "pnl_amount": str(pnl_val),
+                "currency": account_curr,
+                "period_start": opening_snap["as_of"].isoformat(),
+                "period_end": as_of_dt.isoformat(),
+                "contributions": str(fresh_contrib_total),
+                "withdrawals": str(fresh_withdrw_total)
+            }
+        )
+
+    audit_repo.insert_audit_event(
+        conn=conn,
+        household_id=household_id,
+        actor_type="device" if device_id else "user",
+        actor_user_id=user_id,
+        actor_device_id=device_id,
+        reconciliation_batch_id=batch_id,
+        entity_type="reconciliation_batch",
+        entity_id=batch_id,
+        action="commit",
+        after_data={
+            "status": "committed",
+            "closing_snapshot_id": str(closing_snap_id),
+            "pnl_period_id": str(pnl_period_id) if pnl_period_id else None
+        }
+    )
+
+    return {
+        "status": "committed",
+        "batch_id": str(batch_id),
+        "snapshot_id": str(closing_snap_id),
+        "investment_pnl": {
+            "period_id": str(pnl_period_id) if pnl_period_id else None,
+            "opening_snapshot_id": str(opening_snap["id"]) if opening_snap else None,
+            "closing_snapshot_id": str(closing_snap_id),
+            "period_start": opening_snap["as_of"].isoformat() if opening_snap else None,
+            "period_end": as_of_dt.isoformat(),
+            "opening_value": str(opening_snap["balance"]) if opening_snap else None,
+            "closing_value": str(closing_val),
+            "contributions": str(fresh_contrib_total),
+            "withdrawals": str(fresh_withdrw_total),
+            "pnl_amount": str(pnl_val) if pnl_val is not None else None,
+            "currency": account_curr
+        } if opening_snap is not None else None
+    }
 
     # 3. Create closing snapshot
     closing_snap_id = uuid4()

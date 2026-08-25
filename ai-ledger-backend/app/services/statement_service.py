@@ -684,7 +684,9 @@ def validate_candidate_payload_for_type(
         unresolved_flows = pnl_data.get("unresolved_flow_evidence", [])
         flow_resolutions = pnl_data.get("flow_resolutions", [])
 
-        # Validate flow_resolutions if provided
+        from app.domain.investments import is_flow_compatible_with_transfer, calculate_investment_pnl
+
+        # 1. Validate flow_resolutions if provided
         resolved_indices = set()
         for res in flow_resolutions:
             f_idx = res.get("flow_index")
@@ -692,7 +694,7 @@ def validate_candidate_payload_for_type(
             if f_idx is None or sel_tid_str is None:
                 raise InvalidCandidatePayloadError("Flow resolution requires 'flow_index' and 'selected_transfer_id'.")
 
-            target_flow = next((uf for uf in unresolved_flows if uf.get("flow_index") == f_idx), None)
+            target_flow = next((uf for uf in unresolved_flows if str(uf.get("flow_index")) == str(f_idx)), None)
             if not target_flow:
                 raise InvalidCandidatePayloadError(f"Flow index {f_idx} not found in unresolved flow evidence.")
 
@@ -708,92 +710,62 @@ def validate_candidate_payload_for_type(
             if not tx or tx["household_id"] != household_id or tx["status"] != "committed" or tx.get("deleted_at") is not None:
                 raise InvalidCandidatePayloadError(f"Selected transfer {sel_tid_str} not found or not active.")
 
-            expected_dir = target_flow.get("direction")
-            if expected_dir == "contribution":
-                if tx["transaction_type"] != "transfer" or str(tx.get("to_account_id")) != str(account["id"]):
-                    raise InvalidCandidatePayloadError(f"Transfer {sel_tid_str} is not a valid transfer into investment account.")
-                if str(tx.get("to_currency")).strip().upper() != account["currency"].upper():
-                    raise InvalidCandidatePayloadError(f"Transfer {sel_tid_str} currency does not match account currency.")
-                if parse_decimal(tx["to_amount"]) != parse_decimal(target_flow["amount"]):
-                    raise InvalidCandidatePayloadError(f"Transfer {sel_tid_str} amount does not match statement flow amount.")
-            elif expected_dir == "withdrawal":
-                if tx["transaction_type"] != "transfer" or str(tx.get("from_account_id")) != str(account["id"]):
-                    raise InvalidCandidatePayloadError(f"Transfer {sel_tid_str} is not a valid transfer out of investment account.")
-                if str(tx.get("from_currency")).strip().upper() != account["currency"].upper():
-                    raise InvalidCandidatePayloadError(f"Transfer {sel_tid_str} currency does not match account currency.")
-                if parse_decimal(tx["from_amount"]) != parse_decimal(target_flow["amount"]):
-                    raise InvalidCandidatePayloadError(f"Transfer {sel_tid_str} amount does not match statement flow amount.")
+            if not is_flow_compatible_with_transfer(target_flow, tx, account["id"], account["currency"]):
+                raise InvalidCandidatePayloadError(f"Transfer {sel_tid_str} is not compatible with flow index {f_idx}.")
 
             resolved_indices.add(f_idx)
 
         if for_accept:
             for uf in unresolved_flows:
                 uf_idx = uf.get("flow_index")
-                if uf_idx is not None and uf_idx not in resolved_indices:
+                if uf_idx is not None and uf_idx not in resolved_indices and str(uf_idx) not in [str(ri) for ri in resolved_indices]:
                     raise InvalidCandidatePayloadError("Cannot accept investment P&L candidate with unresolved capital-flow evidence.")
 
-        matched_c_ids = list(pnl_data.get("matched_contribution_transfer_ids", []))
-        matched_w_ids = list(pnl_data.get("matched_withdrawal_transfer_ids", []))
-
-        # Add resolved transfers to matched lists if not already present
-        for res in flow_resolutions:
-            f_idx = res.get("flow_index")
-            sel_tid_str = str(res.get("selected_transfer_id"))
-            target_flow = next((uf for uf in unresolved_flows if uf.get("flow_index") == f_idx), None)
-            if target_flow:
-                if target_flow.get("direction") == "contribution" and sel_tid_str not in matched_c_ids:
-                    matched_c_ids.append(sel_tid_str)
-                elif target_flow.get("direction") == "withdrawal" and sel_tid_str not in matched_w_ids:
-                    matched_w_ids.append(sel_tid_str)
-
-        pnl_data["matched_contribution_transfer_ids"] = matched_c_ids
-        pnl_data["matched_withdrawal_transfer_ids"] = matched_w_ids
-
-        c_amt = Decimal("0.00")
-        for tid_str in matched_c_ids:
+        # 2. Derive accounting truth fields from authoritative ledger state (Item 1)
+        opening_snap = None
+        opening_snapshot_id = pnl_data.get("opening_snapshot_id")
+        if opening_snapshot_id:
             try:
-                tid = UUID(str(tid_str))
-                tx = tx_repo.get_transaction(conn, tid)
-            except (ValueError, TypeError):
-                raise InvalidCandidatePayloadError(f"Invalid contribution transfer ID: {tid_str}")
-            if not tx or tx["household_id"] != household_id or tx["status"] != "committed" or tx.get("deleted_at") is not None:
-                raise InvalidCandidatePayloadError(f"Contribution transfer {tid_str} not found or not active.")
-            if tx["transaction_type"] != "transfer" or str(tx.get("to_account_id")) != str(account["id"]):
-                raise InvalidCandidatePayloadError(f"Transaction {tid_str} is not a valid transfer into investment account.")
-            if str(tx.get("to_currency")).strip().upper() != account["currency"].upper():
-                raise InvalidCandidatePayloadError(f"Transfer {tid_str} currency does not match account currency.")
-            c_amt += parse_decimal(tx["to_amount"])
+                opening_snap = snapshots_repo.get_snapshot(conn, UUID(str(opening_snapshot_id)))
+            except Exception:
+                opening_snap = None
+        if not opening_snap:
+            opening_snap = investments_repo.get_latest_authoritative_investment_valuation_snapshot(
+                conn=conn,
+                household_id=household_id,
+                account_id=account["id"]
+            )
 
-        w_amt = Decimal("0.00")
-        for tid_str in matched_w_ids:
-            try:
-                tid = UUID(str(tid_str))
-                tx = tx_repo.get_transaction(conn, tid)
-            except (ValueError, TypeError):
-                raise InvalidCandidatePayloadError(f"Invalid withdrawal transfer ID: {tid_str}")
-            if not tx or tx["household_id"] != household_id or tx["status"] != "committed" or tx.get("deleted_at") is not None:
-                raise InvalidCandidatePayloadError(f"Withdrawal transfer {tid_str} not found or not active.")
-            if tx["transaction_type"] != "transfer" or str(tx.get("from_account_id")) != str(account["id"]):
-                raise InvalidCandidatePayloadError(f"Transaction {tid_str} is not a valid transfer out of investment account.")
-            if str(tx.get("from_currency")).strip().upper() != account["currency"].upper():
-                raise InvalidCandidatePayloadError(f"Transfer {tid_str} currency does not match account currency.")
-            w_amt += parse_decimal(tx["from_amount"])
+        period_end_str = pnl_data.get("period_end")
+        if opening_snap and period_end_str:
+            closing_as_of_dt = datetime.fromisoformat(period_end_str)
+            db_contribs, db_withdrws = investments_repo.get_known_committed_transfers(
+                conn=conn,
+                household_id=household_id,
+                account_id=account["id"],
+                account_currency=account["currency"].upper(),
+                opening_as_of=opening_snap["as_of"],
+                closing_as_of=closing_as_of_dt
+            )
+            canonical_contrib_amt = quantize_money(sum((t["amount"] for t in db_contribs), Decimal("0.00")), account["currency"])
+            canonical_withdrw_amt = quantize_money(sum((t["amount"] for t in db_withdrws), Decimal("0.00")), account["currency"])
 
-        op_val = pnl_data.get("opening_value")
-        cl_val = pnl_data.get("closing_value")
-        if op_val is not None and cl_val is not None:
-            op_d = parse_decimal(op_val)
-            cl_d = parse_decimal(cl_val)
-            from app.domain.investments import calculate_investment_pnl
+            op_d = parse_decimal(opening_snap["balance"])
+            cl_val_raw = pnl_data.get("closing_value")
+            cl_d = parse_decimal(cl_val_raw) if cl_val_raw is not None else op_d
+
             recalculated_pnl = calculate_investment_pnl(
                 opening_value=op_d,
                 closing_value=cl_d,
-                contributions=quantize_money(c_amt, account["currency"]),
-                withdrawals=quantize_money(w_amt, account["currency"]),
+                contributions=canonical_contrib_amt,
+                withdrawals=canonical_withdrw_amt,
                 currency=account["currency"]
             )
-            pnl_data["contributions_amount"] = str(quantize_money(c_amt, account["currency"]))
-            pnl_data["withdrawals_amount"] = str(quantize_money(w_amt, account["currency"]))
+
+            pnl_data["opening_value"] = str(op_d)
+            pnl_data["closing_value"] = str(cl_d)
+            pnl_data["contributions_amount"] = str(canonical_contrib_amt)
+            pnl_data["withdrawals_amount"] = str(canonical_withdrw_amt)
             pnl_data["pnl_amount"] = str(recalculated_pnl)
 
 

@@ -1014,7 +1014,7 @@ class TestInvestmentPhase9Db(BaseDbTestCase):
                         }
                     )
 
-                # 2. Valid resolution with t1_id
+                # 2. Resolving only flow 0 leaves unrepresented ledger transfers unresolved
                 patch_res = statement_service.patch_candidate(
                     conn=conn,
                     candidate_id=pnl_cand["id"],
@@ -1024,6 +1024,40 @@ class TestInvestmentPhase9Db(BaseDbTestCase):
                             "flow_resolutions": [
                                 {"flow_index": 0, "selected_transfer_id": str(t1_id)}
                             ]
+                        }
+                    }
+                )
+                cand_after_partial = next(c for c in reconciliation_repo.list_candidates_for_batch(conn, batch_id) if c["id"] == pnl_cand["id"])
+                p_partial = cand_after_partial["payload"]["investment_pnl"]
+                self.assertEqual(p_partial["contributions_amount"], "130000.00")
+                self.assertEqual(p_partial["pnl_amount"], "-70000.00")
+
+                # Accepting candidate while unresolved evidence exists raises error
+                with self.assertRaises(InvalidCandidatePayloadError):
+                    statement_service.accept_candidate(
+                        conn=conn,
+                        candidate_id=pnl_cand["id"],
+                        household_id=self.household_id,
+                        user_id=self.user_id
+                    )
+
+                # 3. Resolve all unresolved evidence
+                unresolved_flows = p_partial.get("unresolved_flow_evidence", [])
+                resolutions = [{"flow_index": 0, "selected_transfer_id": str(t1_id)}]
+                for uf in unresolved_flows:
+                    if uf.get("flow_index") == 0:
+                        continue
+                    # Match remaining unrepresented transfers
+                    for c_tid in uf.get("candidate_transfer_ids", []):
+                        resolutions.append({"flow_index": uf.get("flow_index"), "selected_transfer_id": c_tid})
+
+                statement_service.patch_candidate(
+                    conn=conn,
+                    candidate_id=pnl_cand["id"],
+                    household_id=self.household_id,
+                    payload={
+                        "investment_pnl": {
+                            "flow_resolutions": resolutions
                         }
                     }
                 )
@@ -1058,6 +1092,9 @@ class TestInvestmentPhase9Db(BaseDbTestCase):
                     user_id=self.user_id
                 )
                 self.assertEqual(commit_res["status"], "committed")
+                pnl_info = commit_res["investment_pnl"]
+                self.assertEqual(pnl_info["contributions"], "130000.00")
+                self.assertEqual(pnl_info["pnl_amount"], "-70000.00")
         finally:
             conn.close()
 
@@ -1230,6 +1267,413 @@ class TestInvestmentPhase9Db(BaseDbTestCase):
                     self.assertEqual(pnl_count, 0)
         finally:
             conn.close()
+
+    def test_16_critical_t1_t2_t3_mid_flight_transfer_regression(self):
+        """
+        Item 6: Critical T1 / T2 / T3 Regression:
+        T1: opening = 100,000. Statement preview: closing = 160,000, no statement flows, ledger flow = 0.
+            Batch preview is generated (ready).
+        T2: Before commit, a new committed transfer is created: Cash -> Investment 50,000.
+        T3: Statement commit obtains lock and fresh-revalidates.
+        Expected:
+        - Batch transitions to needs_review
+        - candidate investment_pnl transitions to needs_review
+        - reason_code = AMBIGUOUS_INVESTMENT_CAPITAL_FLOW
+        - ZERO closing snapshot rows created
+        - ZERO investment_pnl_period rows created
+        - account_state.ledger_balance untouched (remains 100,000)
+        - Ledger transfer remains committed.
+        """
+        conn = get_connection(self.test_schema)
+        try:
+            # T1: Baseline snapshot and statement preview
+            with transaction(conn):
+                investment_service.create_manual_investment_snapshot(
+                    conn=conn,
+                    household_id=self.household_id,
+                    account_id=self.inv_cny_id,
+                    payload={
+                        "idempotency_key": "inv-baseline-t16",
+                        "as_of": "2026-07-31T00:00:00+08:00",
+                        "total_asset_value": "100000.00",
+                        "currency": "CNY"
+                    },
+                    user_id=self.user_id
+                )
+
+                extraction = InvestmentStatementExtractionResult(
+                    total_asset_value=Decimal("160000.00"),
+                    currency="CNY",
+                    valuation_as_of=date(2026, 8, 31),
+                    clear_capital_flows=[],
+                    capital_flow_evidence_complete=True
+                )
+                parser = MockStatementParser(investment_result=extraction)
+                pdf_bytes = make_pdf_bytes(["IBKR Statement", "Account Value: 160000 CNY"])
+
+                res = investment_service.process_investment_statement(
+                    conn=conn,
+                    household_id=self.household_id,
+                    account_id=self.inv_cny_id,
+                    file_bytes=pdf_bytes,
+                    file_name="stmt_t16.pdf",
+                    user_id=self.user_id,
+                    parser=parser
+                )
+                self.assertEqual(res["status"], "ready")
+                batch_id = UUID(res["batch_id"])
+
+            # T2: New committed transfer before commit
+            t2_tx_id = uuid4()
+            with transaction(conn):
+                tx_repo.create_transaction(
+                    conn=conn,
+                    tx_id=t2_tx_id,
+                    household_id=self.household_id,
+                    transaction_type="transfer",
+                    occurred_on=date(2026, 8, 15),
+                    original_amount=Decimal("50000.00"),
+                    original_currency="CNY",
+                    from_account_id=self.chk_cny_id,
+                    to_account_id=self.inv_cny_id,
+                    from_amount=Decimal("50000.00"),
+                    from_currency="CNY",
+                    to_amount=Decimal("50000.00"),
+                    to_currency="CNY",
+                    status="committed"
+                )
+
+            # T3: Commit statement batch
+            with transaction(conn):
+                batch = reconciliation_repo.get_reconciliation_batch(conn, batch_id)
+                candidates = reconciliation_repo.list_candidates_for_batch(conn, batch_id)
+
+                commit_res = investment_service.commit_investment_statement_batch(
+                    conn=conn,
+                    batch_id=batch_id,
+                    batch=batch,
+                    candidates=candidates,
+                    user_id=self.user_id
+                )
+
+                self.assertEqual(commit_res["status"], "needs_review")
+                self.assertEqual(commit_res["reason"], "AMBIGUOUS_INVESTMENT_CAPITAL_FLOW")
+
+                # Verify batch in DB is needs_review
+                batch_db = reconciliation_repo.get_reconciliation_batch(conn, batch_id)
+                self.assertEqual(batch_db["status"], "needs_review")
+
+                # ZERO closing snapshot rows created (only baseline snapshot)
+                with conn.cursor() as cur:
+                    cur.execute("SELECT count(*) FROM account_snapshots WHERE account_id = %s;", (self.inv_cny_id,))
+                    snap_count = cur.fetchone()[0]
+                    self.assertEqual(snap_count, 1)
+
+                    # ZERO investment_pnl_periods created
+                    cur.execute("SELECT count(*) FROM investment_pnl_periods WHERE account_id = %s;", (self.inv_cny_id,))
+                    pnl_count = cur.fetchone()[0]
+                    self.assertEqual(pnl_count, 0)
+
+                # account_state.ledger_balance untouched (remains 100,000)
+                state = accounts_repo.get_account_state(conn, self.inv_cny_id)
+                self.assertEqual(state["ledger_balance"], Decimal("100000.000000"))
+
+                # Ledger transfer remains committed
+                tx_after = tx_repo.get_transaction(conn, t2_tx_id)
+                self.assertIsNotNone(tx_after)
+                self.assertEqual(tx_after["status"], "committed")
+        finally:
+            conn.close()
+
+    def test_17_manual_resolution_canonical_totals_regression(self):
+        """
+        Item 7: Manual Resolution Canonical-Total Invariant:
+        Ledger: A (50,000), B (50,000), C (30,000). Total: 130,000.
+        Statement: one contribution (50,000).
+        User selects statement flow -> A.
+        Assert:
+        - contributions_amount remains 130,000 (NOT 50,000).
+        - pnl_amount remains -70,000 (NOT +10,000).
+        - B and C remain unresolved evidence.
+        - Batch remains needs_review until all evidence is acknowledged/resolved.
+        """
+        conn = get_connection(self.test_schema)
+        try:
+            with transaction(conn):
+                investment_service.create_manual_investment_snapshot(
+                    conn=conn,
+                    household_id=self.household_id,
+                    account_id=self.inv_cny_id,
+                    payload={
+                        "idempotency_key": "inv-baseline-t17",
+                        "as_of": "2026-07-31T00:00:00+08:00",
+                        "total_asset_value": "100000.00",
+                        "currency": "CNY"
+                    },
+                    user_id=self.user_id
+                )
+
+                tx_a_id = uuid4()
+                tx_b_id = uuid4()
+                tx_c_id = uuid4()
+
+                tx_repo.create_transaction(
+                    conn=conn,
+                    tx_id=tx_a_id,
+                    household_id=self.household_id,
+                    transaction_type="transfer",
+                    occurred_on=date(2026, 8, 5),
+                    original_amount=Decimal("50000.00"),
+                    original_currency="CNY",
+                    from_account_id=self.chk_cny_id,
+                    to_account_id=self.inv_cny_id,
+                    from_amount=Decimal("50000.00"),
+                    from_currency="CNY",
+                    to_amount=Decimal("50000.00"),
+                    to_currency="CNY",
+                    status="committed"
+                )
+
+                tx_repo.create_transaction(
+                    conn=conn,
+                    tx_id=tx_b_id,
+                    household_id=self.household_id,
+                    transaction_type="transfer",
+                    occurred_on=date(2026, 8, 15),
+                    original_amount=Decimal("50000.00"),
+                    original_currency="CNY",
+                    from_account_id=self.chk_cny_id,
+                    to_account_id=self.inv_cny_id,
+                    from_amount=Decimal("50000.00"),
+                    from_currency="CNY",
+                    to_amount=Decimal("50000.00"),
+                    to_currency="CNY",
+                    status="committed"
+                )
+
+                tx_repo.create_transaction(
+                    conn=conn,
+                    tx_id=tx_c_id,
+                    household_id=self.household_id,
+                    transaction_type="transfer",
+                    occurred_on=date(2026, 8, 20),
+                    original_amount=Decimal("30000.00"),
+                    original_currency="CNY",
+                    from_account_id=self.chk_cny_id,
+                    to_account_id=self.inv_cny_id,
+                    from_amount=Decimal("30000.00"),
+                    from_currency="CNY",
+                    to_amount=Decimal("30000.00"),
+                    to_currency="CNY",
+                    status="committed"
+                )
+
+                extraction = InvestmentStatementExtractionResult(
+                    total_asset_value=Decimal("160000.00"),
+                    currency="CNY",
+                    valuation_as_of=date(2026, 8, 31),
+                    clear_capital_flows=[
+                        InvestmentCapitalFlow(
+                            direction="contribution",
+                            amount=Decimal("50000.00"),
+                            currency="CNY"
+                        )
+                    ],
+                    capital_flow_evidence_complete=True
+                )
+                parser = MockStatementParser(investment_result=extraction)
+                pdf_bytes = make_pdf_bytes(["IBKR Statement", "Value: 160000 CNY", "Deposit: 50000 CNY"])
+
+                res = investment_service.process_investment_statement(
+                    conn=conn,
+                    household_id=self.household_id,
+                    account_id=self.inv_cny_id,
+                    file_bytes=pdf_bytes,
+                    file_name="stmt_t17.pdf",
+                    user_id=self.user_id,
+                    parser=parser
+                )
+
+                self.assertEqual(res["status"], "needs_review")
+                batch_id = UUID(res["batch_id"])
+
+                candidates = reconciliation_repo.list_candidates_for_batch(conn, batch_id)
+                pnl_cand = next(c for c in candidates if c["candidate_type"] == "investment_pnl")
+                self.assertEqual(pnl_cand["payload"]["investment_pnl"]["contributions_amount"], "130000.00")
+                self.assertEqual(pnl_cand["payload"]["investment_pnl"]["pnl_amount"], "-70000.00")
+
+                # User patches candidate to select statement flow -> A
+                statement_service.patch_candidate(
+                    conn=conn,
+                    candidate_id=pnl_cand["id"],
+                    household_id=self.household_id,
+                    payload={
+                        "investment_pnl": {
+                            "flow_resolutions": [
+                                {"flow_index": 0, "selected_transfer_id": str(tx_a_id)}
+                            ]
+                        }
+                    }
+                )
+
+                cand_after = next(c for c in reconciliation_repo.list_candidates_for_batch(conn, batch_id) if c["id"] == pnl_cand["id"])
+                p_after = cand_after["payload"]["investment_pnl"]
+
+                # Assert canonical total is preserved
+                self.assertEqual(p_after["contributions_amount"], "130000.00")
+                self.assertEqual(p_after["pnl_amount"], "-70000.00")
+
+                # Cannot accept yet
+                with self.assertRaises(InvalidCandidatePayloadError):
+                    statement_service.accept_candidate(
+                        conn=conn,
+                        candidate_id=pnl_cand["id"],
+                        household_id=self.household_id,
+                        user_id=self.user_id
+                    )
+
+                # Resolve remaining unrepresented flows
+                unresolved_flows = p_after.get("unresolved_flow_evidence", [])
+                resolutions = [{"flow_index": 0, "selected_transfer_id": str(tx_a_id)}]
+                for uf in unresolved_flows:
+                    if uf.get("flow_index") == 0:
+                        continue
+                    for c_tid in uf.get("candidate_transfer_ids", []):
+                        resolutions.append({"flow_index": uf.get("flow_index"), "selected_transfer_id": c_tid})
+
+                statement_service.patch_candidate(
+                    conn=conn,
+                    candidate_id=pnl_cand["id"],
+                    household_id=self.household_id,
+                    payload={
+                        "investment_pnl": {
+                            "flow_resolutions": resolutions
+                        }
+                    }
+                )
+
+                statement_service.accept_candidate(
+                    conn=conn,
+                    candidate_id=pnl_cand["id"],
+                    household_id=self.household_id,
+                    user_id=self.user_id
+                )
+
+                snap_cand = next(c for c in candidates if c["candidate_type"] == "snapshot")
+                statement_service.accept_candidate(
+                    conn=conn,
+                    candidate_id=snap_cand["id"],
+                    household_id=self.household_id,
+                    user_id=self.user_id
+                )
+
+                batch = reconciliation_repo.get_reconciliation_batch(conn, batch_id)
+                self.assertEqual(batch["status"], "ready")
+
+                all_cands = reconciliation_repo.list_candidates_for_batch(conn, batch_id)
+                commit_res = investment_service.commit_investment_statement_batch(
+                    conn=conn,
+                    batch_id=batch_id,
+                    batch=batch,
+                    candidates=all_cands,
+                    user_id=self.user_id
+                )
+                self.assertEqual(commit_res["status"], "committed")
+                self.assertEqual(commit_res["investment_pnl"]["contributions"], "130000.00")
+                self.assertEqual(commit_res["investment_pnl"]["pnl_amount"], "-70000.00")
+        finally:
+            conn.close()
+
+    def test_18_fresh_resolution_compatibility_regression(self):
+        """
+        Item 8: Flow and Transfer Compatibility Helper:
+        - Date matching on occurred_on.
+        - posted_on-only matching against transaction dates.
+        - Remarks/external_reference compatibility and contradiction rejection.
+        """
+        from app.domain.investments import is_flow_compatible_with_transfer
+
+        account_id = self.inv_cny_id
+        currency = "CNY"
+
+        flow_ref = InvestmentCapitalFlow(
+            direction="contribution",
+            amount=Decimal("50000.00"),
+            currency="CNY",
+            occurred_on=date(2026, 8, 15),
+            external_reference="WIRE-ABC"
+        )
+
+        # Compatible tx A
+        tx_a = {
+            "id": uuid4(),
+            "transaction_type": "transfer",
+            "status": "committed",
+            "to_account_id": str(account_id),
+            "to_currency": "CNY",
+            "to_amount": Decimal("50000.00"),
+            "occurred_on": date(2026, 8, 15),
+            "remarks": "Transfer deposit WIRE-ABC from ICBC"
+        }
+        self.assertTrue(is_flow_compatible_with_transfer(flow_ref, tx_a, account_id, currency))
+
+        # Incompatible tx B (different date and different ref)
+        tx_b = {
+            "id": uuid4(),
+            "transaction_type": "transfer",
+            "status": "committed",
+            "to_account_id": str(account_id),
+            "to_currency": "CNY",
+            "to_amount": Decimal("50000.00"),
+            "occurred_on": date(2026, 8, 27),
+            "remarks": "DIFF"
+        }
+        self.assertFalse(is_flow_compatible_with_transfer(flow_ref, tx_b, account_id, currency))
+
+        # Incompatible tx C (contradictory remarks on same date)
+        tx_c = {
+            "id": uuid4(),
+            "transaction_type": "transfer",
+            "status": "committed",
+            "to_account_id": str(account_id),
+            "to_currency": "CNY",
+            "to_amount": Decimal("50000.00"),
+            "occurred_on": date(2026, 8, 15),
+            "remarks": "WIRE-XYZ"
+        }
+        self.assertFalse(is_flow_compatible_with_transfer(flow_ref, tx_c, account_id, currency))
+
+        # posted_on-only flow
+        flow_posted = InvestmentCapitalFlow(
+            direction="withdrawal",
+            amount=Decimal("20000.00"),
+            currency="CNY",
+            posted_on=date(2026, 8, 20)
+        )
+
+        tx_posted_match = {
+            "id": uuid4(),
+            "transaction_type": "transfer",
+            "status": "committed",
+            "from_account_id": str(account_id),
+            "from_currency": "CNY",
+            "from_amount": Decimal("20000.00"),
+            "occurred_on": date(2026, 8, 19),
+            "posted_on": date(2026, 8, 20)
+        }
+        self.assertTrue(is_flow_compatible_with_transfer(flow_posted, tx_posted_match, account_id, currency))
+
+        tx_posted_mismatch = {
+            "id": uuid4(),
+            "transaction_type": "transfer",
+            "status": "committed",
+            "from_account_id": str(account_id),
+            "from_currency": "CNY",
+            "from_amount": Decimal("20000.00"),
+            "occurred_on": date(2026, 8, 19),
+            "posted_on": date(2026, 8, 22)
+        }
+        self.assertFalse(is_flow_compatible_with_transfer(flow_posted, tx_posted_mismatch, account_id, currency))
 
 
 if __name__ == "__main__":

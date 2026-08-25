@@ -226,11 +226,16 @@ class TestInvestmentConcurrency(BaseDbTestCase):
         t1.join()
         t2.join()
 
-        # At least one succeeded, and if the other returned or failed retryable, no duplicate snapshots were created
+        # Both callers resolve to compatible committed result with same snapshot_id (or one gets retryable)
         succeeded_results = [r for r in results if r is not None]
         self.assertGreaterEqual(len(succeeded_results), 1)
 
-        # Verify DB has exactly one snapshot for this as_of
+        if len(succeeded_results) == 2:
+            self.assertEqual(results[0]["status"], "committed")
+            self.assertEqual(results[1]["status"], "committed")
+            self.assertEqual(results[0]["snapshot_id"], results[1]["snapshot_id"])
+
+        # Verify DB has exactly ONE business execution (exactly 1 snapshot and 1 P&L period)
         conn = get_connection(self.test_schema)
         try:
             with transaction(conn):
@@ -255,6 +260,9 @@ class TestInvestmentConcurrency(BaseDbTestCase):
                     )
                     pnl_count = cur.fetchone()[0]
                     self.assertEqual(pnl_count, 1)
+
+                state = accounts_repo.get_account_state(conn, self.inv_account_id)
+                self.assertEqual(state["ledger_balance"], Decimal("135000.000000"))
         finally:
             conn.close()
 

@@ -26,6 +26,7 @@ import app.repositories.transactions as tx_repo
 import app.repositories.installments as installments_repo
 import app.repositories.credit_cards as credit_cards_repo
 import app.repositories.audit as audit_repo
+import app.services.statement_service as statement_service
 
 
 class FixedMockFx(ReferenceFxService):
@@ -1190,6 +1191,338 @@ class TestCreditCardPhase8Db(BaseDbTestCase):
                 # Matches existing period 12 expense transaction
                 self.assertEqual(prev_repeat["matched_count"], 1)
                 self.assertEqual(prev_repeat["created_count"], 0)
+        finally:
+            conn.close()
+
+
+    def test_11_cycle_check_without_authoritative_balance_persists_after_candidate_resolution(self):
+        """
+        Regression for Fix 1:
+        Credit account with:
+          statement_balance = 1100.00
+          authoritative_balance = None
+          computed cycle = 1000.00 (800 + 20 - 100 + 280)
+        Plus one manual review candidate (e.g. unknown income line).
+        Initial status: needs_review.
+        Resolve manual candidate (pending_count becomes 0).
+        Call recompute_statement_batch_after_review.
+        Batch MUST remain needs_review (cycle contradiction persists).
+        residual_amount == None, adjustment_amount == None.
+        Matching cycle case: statement_balance 1000.00 -> becomes ready after resolution.
+        """
+        conn = get_connection(self.test_schema)
+        try:
+            # 1. Setup installment plan for 280 portion
+            inst_plan_id = uuid4()
+            p1_id = uuid4()
+            with transaction(conn):
+                installments_repo.create_installment_plan(
+                    conn=conn,
+                    plan_id=inst_plan_id,
+                    household_id=self.household_id,
+                    credit_account_id=self.acc_cny_credit_id,
+                    purchase_occurred_on=date(2026, 6, 15),
+                    original_amount=Decimal("840.00"),
+                    original_currency="CNY",
+                    account_currency="CNY",
+                    total_periods=3,
+                    merchant="Furniture Mall",
+                    status="pending_first_bill"
+                )
+                installments_repo.create_installment_period(conn, p1_id, inst_plan_id, 1, Decimal("280.00"), "CNY", status="scheduled")
+                installments_repo.create_installment_period(conn, uuid4(), inst_plan_id, 2, Decimal("280.00"), "CNY", status="scheduled")
+                installments_repo.create_installment_period(conn, uuid4(), inst_plan_id, 3, Decimal("280.00"), "CNY", status="scheduled")
+
+                # Setup prior expense for refund of 100
+                orig_exp_id = uuid4()
+                tx_repo.create_transaction(
+                    conn=conn,
+                    tx_id=orig_exp_id,
+                    household_id=self.household_id,
+                    transaction_type="expense",
+                    occurred_on=date(2026, 6, 20),
+                    original_amount=Decimal("200.00"),
+                    original_currency="CNY",
+                    from_amount=Decimal("200.00"),
+                    from_currency="CNY",
+                    from_account_id=self.acc_cny_credit_id,
+                    category_id=self.cat_expense_id,
+                    merchant="Shoe Store",
+                    status="committed"
+                )
+
+            # 4 complete cycle lines (800 + 20 - 100 + 280 = 1000.00)
+            lines_cycle = [
+                NormalizedStatementLine(
+                    transaction_on=date(2026, 7, 5),
+                    description_raw="Supermarket purchase",
+                    direction="debit",
+                    line_type="expense",
+                    settlement_amount=Decimal("800.00"),
+                    settlement_currency="CNY"
+                ),
+                NormalizedStatementLine(
+                    transaction_on=date(2026, 7, 6),
+                    description_raw="Late fee",
+                    direction="debit",
+                    line_type="fee",
+                    settlement_amount=Decimal("20.00"),
+                    settlement_currency="CNY"
+                ),
+                NormalizedStatementLine(
+                    transaction_on=date(2026, 7, 10),
+                    description_raw="Shoe Store Refund",
+                    merchant_hint="Shoe Store",
+                    direction="credit",
+                    line_type="refund",
+                    settlement_amount=Decimal("100.00"),
+                    settlement_currency="CNY"
+                ),
+                NormalizedStatementLine(
+                    transaction_on=date(2026, 7, 15),
+                    description_raw="Furniture Mall (1/3)",
+                    direction="debit",
+                    line_type="expense",
+                    settlement_amount=Decimal("280.00"),
+                    settlement_currency="CNY"
+                )
+            ]
+
+            # Case A: statement_balance = 1100.00, authoritative_balance = None (cycle contradiction)
+            # We omit default_expense_category_id so candidates require manual category review
+            with transaction(conn):
+                prev_a = create_statement_reconciliation_batch(
+                    conn=conn,
+                    household_id=self.household_id,
+                    account_id=self.acc_cny_credit_id,
+                    lines=lines_cycle,
+                    statement_balance=Decimal("1100.00"),
+                    authoritative_balance=None,
+                    period_start=date(2026, 7, 1),
+                    period_end=date(2026, 7, 31),
+                    user_id=self.user_id,
+                    default_expense_category_id=None,
+                    fx_service=self.mock_fx
+                )
+                batch_a_id = UUID(prev_a["batch_id"])
+
+            self.assertEqual(prev_a["status"], "needs_review")
+            cands_a = reconciliation_repo.list_candidates_for_batch(conn, batch_a_id)
+            review_cands_a = [c for c in cands_a if c["status"] == "needs_review"]
+            self.assertGreater(len(review_cands_a), 0)
+
+            # User resolves each manual review candidate by patching category and accepting
+            for cand in review_cands_a:
+                with transaction(conn):
+                    c_type = cand["candidate_type"]
+                    if c_type == "create_transaction":
+                        tx_payload = dict(cand.get("payload", {}).get("transaction", {}))
+                        tx_payload["category_id"] = str(self.cat_expense_id)
+                        statement_service.patch_candidate(
+                            conn=conn,
+                            candidate_id=cand["id"],
+                            household_id=self.household_id,
+                            payload={"transaction": tx_payload},
+                            user_id=self.user_id
+                        )
+                    elif c_type == "recognize_installment":
+                        inst_payload = dict(cand.get("payload", {}).get("installment", {}))
+                        inst_payload["category_id"] = str(self.cat_expense_id)
+                        statement_service.patch_candidate(
+                            conn=conn,
+                            candidate_id=cand["id"],
+                            household_id=self.household_id,
+                            payload={"installment": inst_payload},
+                            user_id=self.user_id
+                        )
+                    statement_service.accept_candidate(
+                        conn=conn,
+                        candidate_id=cand["id"],
+                        household_id=self.household_id,
+                        user_id=self.user_id
+                    )
+
+            # Re-fetch batch stats after all manual decisions are resolved
+            batch_a_after = reconciliation_repo.get_reconciliation_batch(conn, batch_a_id)
+            self.assertEqual(batch_a_after["pending_count"], 0)
+            self.assertEqual(batch_a_after["status"], "needs_review") # MUST REMAIN needs_review!
+            self.assertIsNone(batch_a_after.get("residual_amount"))
+            self.assertIsNone(batch_a_after.get("adjustment_amount"))
+
+            # Case B: Matching cycle (statement_balance = 1000.00, authoritative_balance = None)
+            lines_cycle_b = [
+                NormalizedStatementLine(
+                    transaction_on=date(2026, 7, 5),
+                    description_raw="Supermarket purchase",
+                    direction="debit",
+                    line_type="expense",
+                    settlement_amount=Decimal("800.00"),
+                    settlement_currency="CNY"
+                ),
+                NormalizedStatementLine(
+                    transaction_on=date(2026, 7, 6),
+                    description_raw="Late fee",
+                    direction="debit",
+                    line_type="fee",
+                    settlement_amount=Decimal("20.00"),
+                    settlement_currency="CNY"
+                ),
+                NormalizedStatementLine(
+                    transaction_on=date(2026, 7, 10),
+                    description_raw="Shoe Store Refund",
+                    merchant_hint="Shoe Store",
+                    direction="credit",
+                    line_type="refund",
+                    settlement_amount=Decimal("100.00"),
+                    settlement_currency="CNY"
+                ),
+                NormalizedStatementLine(
+                    transaction_on=date(2026, 7, 15),
+                    description_raw="Furniture Mall (1/3)",
+                    direction="debit",
+                    line_type="expense",
+                    settlement_amount=Decimal("280.00"),
+                    settlement_currency="CNY"
+                )
+            ]
+            with transaction(conn):
+                prev_b = create_statement_reconciliation_batch(
+                    conn=conn,
+                    household_id=self.household_id,
+                    account_id=self.acc_cny_credit_id,
+                    lines=lines_cycle_b,
+                    statement_balance=Decimal("1000.00"),
+                    authoritative_balance=None,
+                    period_start=date(2026, 7, 1),
+                    period_end=date(2026, 7, 31),
+                    user_id=self.user_id,
+                    default_expense_category_id=None,
+                    fx_service=self.mock_fx
+                )
+                batch_b_id = UUID(prev_b["batch_id"])
+
+            self.assertEqual(prev_b["status"], "needs_review")
+            cands_b = reconciliation_repo.list_candidates_for_batch(conn, batch_b_id)
+            review_cands_b = [c for c in cands_b if c["status"] == "needs_review"]
+            self.assertGreater(len(review_cands_b), 0)
+
+            for cand in review_cands_b:
+                with transaction(conn):
+                    c_type = cand["candidate_type"]
+                    if c_type == "create_transaction":
+                        tx_payload = dict(cand.get("payload", {}).get("transaction", {}))
+                        tx_payload["category_id"] = str(self.cat_expense_id)
+                        statement_service.patch_candidate(
+                            conn=conn,
+                            candidate_id=cand["id"],
+                            household_id=self.household_id,
+                            payload={"transaction": tx_payload},
+                            user_id=self.user_id
+                        )
+                    elif c_type == "recognize_installment":
+                        inst_payload = dict(cand.get("payload", {}).get("installment", {}))
+                        inst_payload["category_id"] = str(self.cat_expense_id)
+                        statement_service.patch_candidate(
+                            conn=conn,
+                            candidate_id=cand["id"],
+                            household_id=self.household_id,
+                            payload={"installment": inst_payload},
+                            user_id=self.user_id
+                        )
+                    statement_service.accept_candidate(
+                        conn=conn,
+                        candidate_id=cand["id"],
+                        household_id=self.household_id,
+                        user_id=self.user_id
+                    )
+
+            batch_b_after = reconciliation_repo.get_reconciliation_batch(conn, batch_b_id)
+            self.assertEqual(batch_b_after["pending_count"], 0)
+            self.assertEqual(batch_b_after["status"], "ready")
+            self.assertIsNone(batch_b_after.get("residual_amount"))
+            self.assertIsNone(batch_b_after.get("adjustment_amount"))
+        finally:
+            conn.close()
+
+    def test_12_non_positive_fx_rate_fails_closed_in_estimated_settlement_path(self):
+        """
+        Regression for Fix 2:
+        Estimated USD credit card expense (reporting currency CNY).
+        Injected FX service returns Decimal('0.00') (non-positive).
+        Commit must raise ValueError and roll back atomically.
+        """
+        conn = get_connection(self.test_schema)
+        try:
+            tx_usd_id = uuid4()
+            with transaction(conn):
+                tx_repo.create_transaction(
+                    conn=conn,
+                    tx_id=tx_usd_id,
+                    household_id=self.household_id,
+                    transaction_type="expense",
+                    occurred_on=date(2026, 8, 10),
+                    original_amount=Decimal("100.00"),
+                    original_currency="USD",
+                    from_amount=Decimal("100.00"),
+                    from_currency="USD",
+                    from_account_id=self.acc_usd_credit_id,
+                    merchant="US Tech",
+                    account_leg_status="estimated",
+                    source="shortcut",
+                    status="committed"
+                )
+                accounts_repo.update_account_state_projection(
+                    conn, self.acc_usd_credit_id, Decimal("-100.00"), datetime.now(timezone.utc)
+                )
+
+            line_usd = NormalizedStatementLine(
+                transaction_on=date(2026, 8, 10),
+                posted_on=date(2026, 8, 11),
+                description_raw="US Tech",
+                direction="debit",
+                line_type="expense",
+                settlement_amount=Decimal("100.00"),
+                settlement_currency="USD"
+            )
+
+            with transaction(conn):
+                preview = create_statement_reconciliation_batch(
+                    conn=conn,
+                    household_id=self.household_id,
+                    account_id=self.acc_usd_credit_id,
+                    lines=[line_usd],
+                    authoritative_balance=Decimal("-100.00"),
+                    user_id=self.user_id,
+                    fx_service=self.mock_fx
+                )
+                batch_id = UUID(preview["batch_id"])
+
+            # Mock FX returning 0.00
+            class ZeroFx(ReferenceFxService):
+                def get_rate(self, base: str, target: str, as_of: Optional[date] = None) -> Optional[Decimal]:
+                    if base == target:
+                        return Decimal("1.000000000000")
+                    return Decimal("0.000000000000")
+
+            zero_fx = ZeroFx()
+
+            with self.assertRaises(ValueError):
+                with transaction(conn):
+                    commit_statement_batch(conn, batch_id, user_id=self.user_id, fx_service=zero_fx)
+
+            # Assert rollback
+            tx_after = tx_repo.get_transaction(conn, tx_usd_id)
+            self.assertEqual(tx_after.get("account_leg_status"), "estimated")
+            self.assertEqual(tx_after.get("from_amount"), Decimal("100.00"))
+            self.assertIsNone(tx_after.get("reporting_fx_rate"))
+            self.assertIsNone(tx_after.get("reporting_amount"))
+            self.assertIsNone(tx_after.get("reporting_fx_locked_at"))
+
+            acc_state = accounts_repo.get_account_state(conn, self.acc_usd_credit_id)
+            self.assertEqual(acc_state["ledger_balance"], Decimal("-100.00"))
+
+            batch = reconciliation_repo.get_reconciliation_batch(conn, batch_id)
+            self.assertEqual(batch["status"], "ready")
         finally:
             conn.close()
 

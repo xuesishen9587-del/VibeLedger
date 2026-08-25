@@ -971,9 +971,28 @@ def recompute_statement_batch_after_review(
     matched_count = sum(1 for c in candidates if c["candidate_type"] == "match" and c["status"] in ("accepted", "applied"))
     created_count = sum(1 for c in candidates if c["candidate_type"] in ("create_transaction", "create_transfer", "refund", "recognize_installment") and c["status"] in ("accepted", "applied"))
 
+    account = accounts_repo.get_account(conn, batch["account_id"])
+    is_credit = account and account.get("account_type") == "credit"
+    cycle_ok = None
+    if is_credit and batch.get("statement_balance") is not None:
+        db_lines = reconciliation_repo.list_statement_lines_for_batch(conn, batch_id)
+        cycle_ok = evaluate_credit_card_statement_cycle(db_lines, batch["statement_balance"], curr)
+
+    existing_adj = next((c for c in candidates if c["candidate_type"] == "adjustment"), None)
+
     # If authoritative balance is absent, residual remains None and no adjustment candidate is created
     if batch.get("authoritative_balance") is None:
-        batch_status = "needs_review" if pending_count > 0 else "ready"
+        batch_status = "needs_review" if (pending_count > 0 or cycle_ok is False) else "ready"
+        if existing_adj:
+            reconciliation_repo.update_reconciliation_candidate_full(
+                conn=conn,
+                candidate_id=existing_adj["id"],
+                candidate_type="adjustment",
+                status="rejected",
+                payload={"adjustment_amount": "0.00", "currency": curr},
+                reason_code="RESIDUAL_EXPLAINED",
+                reason_detail="Authoritative balance is absent or cycle contradiction exists."
+            )
         reconciliation_repo.update_reconciliation_batch_stats(
             conn=conn,
             batch_id=batch_id,
@@ -1016,14 +1035,9 @@ def recompute_statement_batch_after_review(
         fx_rate_to_cny=fx_rate_cny
     )
 
-    account = accounts_repo.get_account(conn, batch["account_id"])
-    is_credit = account and account.get("account_type") == "credit"
-    if is_credit and batch.get("statement_balance") is not None:
-        db_lines = reconciliation_repo.list_statement_lines_for_batch(conn, batch_id)
-        cycle_ok = evaluate_credit_card_statement_cycle(db_lines, batch["statement_balance"], curr)
-        if cycle_ok is False:
-            batch_status = "needs_review"
-            adj_cand = None
+    if cycle_ok is False:
+        batch_status = "needs_review"
+        adj_cand = None
 
     existing_adj = next((c for c in candidates if c["candidate_type"] == "adjustment"), None)
     if adj_cand is not None:

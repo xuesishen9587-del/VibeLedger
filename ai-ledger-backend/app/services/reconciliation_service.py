@@ -858,7 +858,7 @@ def commit_statement_batch(
                         rep_amt = actual_settlement_amt
                     else:
                         rep_rate = fx_srv.get_rate(settlement_curr, rep_curr_target, as_of=occ_on)
-                        if rep_rate is None:
+                        if rep_rate is None or rep_rate <= Decimal("0.00"):
                             raise ValueError(f"Reference FX rate unavailable for {settlement_curr}->{rep_curr_target} on {occ_on}")
                         rep_amt = quantize_money(actual_settlement_amt * rep_rate, rep_curr_target)
                     rep_locked_at = datetime.now(timezone.utc)

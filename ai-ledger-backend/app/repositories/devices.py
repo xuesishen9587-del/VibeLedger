@@ -3,6 +3,9 @@ import logging
 import secrets
 from typing import Optional, Dict, Any, List, Tuple
 from uuid import UUID, uuid4
+import psycopg2
+
+from app.domain.auth import AuthError
 
 logger = logging.getLogger(__name__)
 
@@ -139,39 +142,60 @@ def create_device_with_token(
     device_name: str,
     platform: str,
     client_version: Optional[str] = None,
+    max_attempts: int = 3,
 ) -> Tuple[Dict[str, Any], str]:
     """
     Generates a high-entropy 256-bit secret token, hashes it using SHA-256,
-    persists the device record, and returns the device record and raw secret token.
+    persists the device record with bounded collision retry, and returns the device record and raw secret token.
     The raw token is returned ONLY ONCE upon creation.
     """
-    raw_token = secrets.token_urlsafe(32)
-    token_hash = hashlib.sha256(raw_token.encode("utf-8")).digest()
-    device_id = uuid4()
+    for attempt in range(max_attempts):
+        raw_token = secrets.token_urlsafe(32)
+        token_hash = hashlib.sha256(raw_token.encode("utf-8")).digest()
+        device_id = uuid4()
 
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            INSERT INTO devices (
-                id, user_id, device_name, platform, token_hash, status, client_version, created_at
-            ) VALUES (%s, %s, %s, %s, %s, 'active', %s, now())
-            RETURNING id, user_id, device_name, platform, status, client_version, created_at, last_seen_at, revoked_at;
-            """,
-            (device_id, user_id, device_name, platform, token_hash, client_version)
-        )
-        row = cur.fetchone()
-        device_dict = {
-            "device_id": row[0],
-            "user_id": row[1],
-            "device_name": row[2],
-            "platform": row[3],
-            "status": row[4],
-            "client_version": row[5],
-            "created_at": row[6],
-            "last_seen_at": row[7],
-            "revoked_at": row[8],
-        }
-        return device_dict, raw_token
+        savepoint_name = f"sp_device_insert_{attempt}_{uuid4().hex[:8]}"
+        with conn.cursor() as cur:
+            cur.execute(f"SAVEPOINT {savepoint_name};")
+            try:
+                cur.execute(
+                    """
+                    INSERT INTO devices (
+                        id, user_id, device_name, platform, token_hash, status, client_version, created_at
+                    ) VALUES (%s, %s, %s, %s, %s, 'active', %s, now())
+                    RETURNING id, user_id, device_name, platform, status, client_version, created_at, last_seen_at, revoked_at;
+                    """,
+                    (device_id, user_id, device_name, platform, token_hash, client_version)
+                )
+                row = cur.fetchone()
+                cur.execute(f"RELEASE SAVEPOINT {savepoint_name};")
+                device_dict = {
+                    "device_id": row[0],
+                    "user_id": row[1],
+                    "device_name": row[2],
+                    "platform": row[3],
+                    "status": row[4],
+                    "client_version": row[5],
+                    "created_at": row[6],
+                    "last_seen_at": row[7],
+                    "revoked_at": row[8],
+                }
+                return device_dict, raw_token
+            except psycopg2.IntegrityError as exc:
+                cur.execute(f"ROLLBACK TO SAVEPOINT {savepoint_name};")
+                err_str = str(exc).lower()
+                diag = getattr(exc, "diag", None)
+                constraint_name = (getattr(diag, "constraint_name", "") or "").lower()
+                if "token_hash" in constraint_name or "token_hash" in err_str or "devices_token_hash" in err_str:
+                    logger.warning(
+                        "Device token hash collision detected; retrying with fresh token (attempt %d/%d)",
+                        attempt + 1,
+                        max_attempts,
+                    )
+                    continue
+                raise
+
+    raise AuthError("Failed to provision device due to repeated credential collisions.")
 
 def revoke_device(conn, device_id: UUID, user_id: Optional[UUID] = None) -> Optional[Dict[str, Any]]:
     """

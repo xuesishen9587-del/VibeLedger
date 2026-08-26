@@ -66,10 +66,14 @@ def create_manual_investment_snapshot(
     if account["account_type"] != "investment":
         raise AccountTypeMismatchError(f"Account {account_id} is not an investment account (type: {account['account_type']}).")
 
-    # 2. Validate Idempotency Key (Required for device auth)
+    # 2. Validate Idempotency Key (Required for device auth, optional for browser auth)
     idempotency_key = payload.get("idempotency_key")
-    if not idempotency_key or not isinstance(idempotency_key, str) or not (8 <= len(idempotency_key) <= 200):
-        raise InvalidSnapshotError("Idempotency key is required and must be between 8 and 200 characters.")
+    if device_id:
+        if not idempotency_key or not isinstance(idempotency_key, str) or not (8 <= len(idempotency_key) <= 200):
+            raise InvalidSnapshotError("Idempotency key is required for device authentication and must be between 8 and 200 characters.")
+    else:
+        if idempotency_key is not None and (not isinstance(idempotency_key, str) or not (8 <= len(idempotency_key) <= 200)):
+            raise InvalidSnapshotError("Idempotency key must be between 8 and 200 characters.")
 
     # 3. Validate as_of, total_asset_value, currency, source
     as_of_str = payload.get("as_of")

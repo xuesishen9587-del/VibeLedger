@@ -52,21 +52,23 @@ class JWTBrowserAuthVerifier:
                 options=options,
             )
         except jwt.ExpiredSignatureError as e:
-            raise InvalidCredentialsError("Token has expired.") from e
+            raise InvalidCredentialsError("Browser token has expired.") from e
         except jwt.InvalidIssuerError as e:
-            raise InvalidCredentialsError("Token issuer is invalid.") from e
+            raise InvalidCredentialsError("Browser token issuer is invalid.") from e
         except jwt.InvalidAudienceError as e:
-            raise InvalidCredentialsError("Token audience is invalid.") from e
-        except (jwt.InvalidSignatureError, jwt.DecodeError) as e:
-            raise InvalidCredentialsError(f"Invalid token signature or encoding: {str(e)}") from e
-        except jwt.PyJWTError as e:
-            raise InvalidCredentialsError(f"Token validation failed: {str(e)}") from e
-        except Exception as e:
-            raise InvalidCredentialsError(f"Unexpected error during token verification: {str(e)}") from e
+            raise InvalidCredentialsError("Browser token audience is invalid.") from e
+        except jwt.ImmatureSignatureError as e:
+            raise InvalidCredentialsError("Browser token is not yet valid.") from e
+        except (jwt.InvalidSignatureError, jwt.DecodeError):
+            raise InvalidCredentialsError("Invalid browser credentials.")
+        except jwt.PyJWTError:
+            raise InvalidCredentialsError("Invalid browser credentials.")
+        except Exception:
+            raise InvalidCredentialsError("Invalid browser credentials.")
 
         sub = claims.get("sub")
         if not sub or not isinstance(sub, str) or not sub.strip():
-            raise InvalidCredentialsError("Token missing valid 'sub' claim.")
+            raise InvalidCredentialsError("Invalid browser credentials.")
 
         return claims
 
@@ -84,11 +86,11 @@ class StaticBrowserAuthVerifier:
 
     def verify(self, token: str) -> Dict[str, Any]:
         if token not in self._token_claims:
-            raise InvalidCredentialsError("Invalid or unregistered static test token.")
+            raise InvalidCredentialsError("Invalid browser credentials.")
         claims = self._token_claims[token]
         sub = claims.get("sub")
         if not sub or not isinstance(sub, str) or not sub.strip():
-            raise InvalidCredentialsError("Static token missing valid 'sub' claim.")
+            raise InvalidCredentialsError("Invalid browser credentials.")
         return dict(claims)
 
 

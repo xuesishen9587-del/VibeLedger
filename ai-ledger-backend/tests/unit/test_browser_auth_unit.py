@@ -98,7 +98,7 @@ class TestBrowserAuthUnit(unittest.TestCase):
 
         with self.assertRaises(InvalidCredentialsError) as ctx:
             verifier.verify(token)
-        self.assertIn("expired", str(ctx.exception).lower())
+        self.assertEqual(str(ctx.exception), "Browser token has expired.")
 
     def test_jwt_verifier_invalid_issuer(self):
         verifier = JWTBrowserAuthVerifier(
@@ -119,7 +119,7 @@ class TestBrowserAuthUnit(unittest.TestCase):
 
         with self.assertRaises(InvalidCredentialsError) as ctx:
             verifier.verify(token)
-        self.assertIn("issuer", str(ctx.exception).lower())
+        self.assertEqual(str(ctx.exception), "Browser token issuer is invalid.")
 
     def test_jwt_verifier_invalid_audience(self):
         verifier = JWTBrowserAuthVerifier(
@@ -140,7 +140,27 @@ class TestBrowserAuthUnit(unittest.TestCase):
 
         with self.assertRaises(InvalidCredentialsError) as ctx:
             verifier.verify(token)
-        self.assertIn("audience", str(ctx.exception).lower())
+        self.assertEqual(str(ctx.exception), "Browser token audience is invalid.")
+
+    def test_jwt_verifier_future_nbf(self):
+        verifier = JWTBrowserAuthVerifier(
+            key=self.hmac_secret,
+            algorithms=["HS256"],
+        )
+        now = int(time.time())
+        token = jwt.encode(
+            {
+                "sub": "auth0|future_user",
+                "exp": now + 3600,
+                "nbf": now + 1000,
+            },
+            self.hmac_secret,
+            algorithm="HS256"
+        )
+
+        with self.assertRaises(InvalidCredentialsError) as ctx:
+            verifier.verify(token)
+        self.assertEqual(str(ctx.exception), "Browser token is not yet valid.")
 
     def test_jwt_verifier_invalid_signature(self):
         verifier = JWTBrowserAuthVerifier(
@@ -159,7 +179,7 @@ class TestBrowserAuthUnit(unittest.TestCase):
 
         with self.assertRaises(InvalidCredentialsError) as ctx:
             verifier.verify(token)
-        self.assertIn("signature", str(ctx.exception).lower())
+        self.assertEqual(str(ctx.exception), "Invalid browser credentials.")
 
     def test_jwt_verifier_missing_sub_claim(self):
         verifier = JWTBrowserAuthVerifier(
@@ -178,7 +198,49 @@ class TestBrowserAuthUnit(unittest.TestCase):
 
         with self.assertRaises(InvalidCredentialsError) as ctx:
             verifier.verify(token)
-        self.assertIn("sub", str(ctx.exception).lower())
+        self.assertEqual(str(ctx.exception), "Invalid browser credentials.")
+
+    def test_jwt_verifier_empty_sub_claim(self):
+        verifier = JWTBrowserAuthVerifier(
+            key=self.hmac_secret,
+            algorithms=["HS256"],
+        )
+        now = int(time.time())
+        token = jwt.encode(
+            {
+                "sub": "   ",
+                "exp": now + 3600,
+            },
+            self.hmac_secret,
+            algorithm="HS256"
+        )
+
+        with self.assertRaises(InvalidCredentialsError) as ctx:
+            verifier.verify(token)
+        self.assertEqual(str(ctx.exception), "Invalid browser credentials.")
+
+    def test_jwt_verifier_alg_none_rejected(self):
+        verifier = JWTBrowserAuthVerifier(
+            key=self.hmac_secret,
+            algorithms=["HS256"],
+        )
+        # Unsigned/alg=none token format: header.payload.
+        token = "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJzdWIiOiJ1c2VyMSIsImV4cCI6OTk5OTk5OTk5OX0."
+        with self.assertRaises(InvalidCredentialsError) as ctx:
+            verifier.verify(token)
+        self.assertEqual(str(ctx.exception), "Invalid browser credentials.")
+
+    def test_jwt_verifier_malformed_3_segment(self):
+        verifier = JWTBrowserAuthVerifier(
+            key=self.hmac_secret,
+            algorithms=["HS256"],
+        )
+        token = "not_base64_header.not_base64_payload.not_base64_sig"
+        with self.assertRaises(InvalidCredentialsError) as ctx:
+            verifier.verify(token)
+        self.assertEqual(str(ctx.exception), "Invalid browser credentials.")
+        # Ensure token content is never reflected in exception message
+        self.assertNotIn("not_base64_header", str(ctx.exception))
 
     def test_jwt_verifier_empty_key(self):
         verifier = JWTBrowserAuthVerifier(key=None)

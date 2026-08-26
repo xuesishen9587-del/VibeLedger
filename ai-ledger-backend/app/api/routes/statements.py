@@ -4,7 +4,7 @@ from datetime import date
 from fastapi import APIRouter, Depends, UploadFile, File, Form, status
 from pydantic import BaseModel, Field
 
-from app.api.deps import get_db_connection, get_authenticated_device
+from app.api.deps import get_db_connection, get_authenticated_actor
 from app.config import get_settings
 from app.db import transaction
 from app.domain.transactions import InvalidRequestError
@@ -23,7 +23,7 @@ async def upload_account_statement_endpoint(
     period_end: Optional[date] = Form(None, description="Optional statement end date override"),
     default_expense_category_id: Optional[UUID] = Form(None, description="Default expense category ID"),
     default_income_category_id: Optional[UUID] = Form(None, description="Default income category ID"),
-    device: Dict[str, Any] = Depends(get_authenticated_device),
+    device: Dict[str, Any] = Depends(get_authenticated_actor),
     conn: Any = Depends(get_db_connection)
 ) -> Dict[str, Any]:
     """

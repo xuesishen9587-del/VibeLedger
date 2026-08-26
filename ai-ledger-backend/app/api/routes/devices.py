@@ -3,7 +3,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, status
 from pydantic import BaseModel, Field
 
-from app.api.deps import get_db_connection, get_auth_context
+from app.api.deps import get_db_connection, get_auth_context, require_browser_auth
 from app.auth.context import AuthContext
 from app.auth.service import AuthService
 from app.db import transaction
@@ -47,7 +47,7 @@ def list_devices(
 @router.post("", status_code=status.HTTP_201_CREATED, summary="Provision Device")
 def create_device(
     payload: CreateDeviceRequest,
-    auth_context: AuthContext = Depends(get_auth_context),
+    auth_context: AuthContext = Depends(require_browser_auth),
     conn: Any = Depends(get_db_connection),
 ) -> Dict[str, Any]:
     """

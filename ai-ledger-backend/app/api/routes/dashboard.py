@@ -2,7 +2,7 @@ from typing import Optional, Dict, Any
 from datetime import date
 from fastapi import APIRouter, Depends, Query
 
-from app.api.deps import get_db_connection, get_authenticated_device
+from app.api.deps import get_db_connection, get_authenticated_actor
 from app.services.reference_fx_service import ReferenceFxService
 import app.services.dashboard_service as dashboard_service
 
@@ -10,7 +10,7 @@ router = APIRouter(prefix="/api/v1/dashboard", tags=["Dashboard"])
 
 @router.get("/overview", summary="Dashboard Balance Sheet Overview")
 def get_overview(
-    device: Dict[str, Any] = Depends(get_authenticated_device),
+    device: Dict[str, Any] = Depends(get_authenticated_actor),
     conn: Any = Depends(get_db_connection)
 ) -> Dict[str, Any]:
     """
@@ -27,7 +27,7 @@ def get_overview(
 def get_cash_flow(
     from_date: date = Query(..., alias="from", description="Start date (YYYY-MM-DD) inclusive"),
     to_date: date = Query(..., alias="to", description="End date (YYYY-MM-DD) inclusive"),
-    device: Dict[str, Any] = Depends(get_authenticated_device),
+    device: Dict[str, Any] = Depends(get_authenticated_actor),
     conn: Any = Depends(get_db_connection)
 ) -> Dict[str, Any]:
     """
@@ -47,7 +47,7 @@ def get_cash_flow(
 def get_investments(
     from_date: Optional[date] = Query(None, alias="from", description="Start date (YYYY-MM-DD)"),
     to_date: Optional[date] = Query(None, alias="to", description="End date (YYYY-MM-DD)"),
-    device: Dict[str, Any] = Depends(get_authenticated_device),
+    device: Dict[str, Any] = Depends(get_authenticated_actor),
     conn: Any = Depends(get_db_connection)
 ) -> Dict[str, Any]:
     """
@@ -65,7 +65,7 @@ def get_investments(
 
 @router.get("/account-freshness", summary="Dashboard Account Freshness")
 def get_account_freshness(
-    device: Dict[str, Any] = Depends(get_authenticated_device),
+    device: Dict[str, Any] = Depends(get_authenticated_actor),
     conn: Any = Depends(get_db_connection)
 ) -> Dict[str, Any]:
     """

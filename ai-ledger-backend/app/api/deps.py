@@ -68,13 +68,34 @@ def require_household_owner(
         raise HouseholdPermissionDeniedError("Household owner role required.")
     return auth_context
 
+def get_authenticated_actor(
+    auth_context: AuthContext = Depends(get_auth_context)
+) -> Dict[str, Any]:
+    """
+    Dependency that returns the authenticated actor dictionary for browser OR device sessions.
+    Carries household_id, user_id, device_id (None for browser), and role information.
+    """
+    return {
+        "user_id": auth_context.user_id,
+        "household_id": auth_context.household_id,
+        "household_role": auth_context.household_role,
+        "device_id": auth_context.device_id,
+        "auth_mode": auth_context.auth_mode,
+        "auth_subject": auth_context.auth_subject,
+        "platform": "device" if auth_context.is_device else "browser",
+        "auth_context": auth_context,
+    }
+
 def get_authenticated_device(
     auth_context: AuthContext = Depends(get_auth_context)
 ) -> Dict[str, Any]:
     """
-    Backward-compatible adapter dependency for existing routes.
-    Returns a dictionary containing resolved identity and household context.
+    STRICT device-authentication only dependency.
+    Rejects browser JWT credentials with 403 HouseholdPermissionDeniedError.
     """
+    if not auth_context.is_device or auth_context.device_id is None:
+        raise HouseholdPermissionDeniedError("Device authentication required for this endpoint.")
+
     return {
         "device_id": auth_context.device_id,
         "user_id": auth_context.user_id,
@@ -82,4 +103,6 @@ def get_authenticated_device(
         "household_role": auth_context.household_role,
         "auth_mode": auth_context.auth_mode,
         "auth_subject": auth_context.auth_subject,
+        "platform": "device",
+        "auth_context": auth_context,
     }

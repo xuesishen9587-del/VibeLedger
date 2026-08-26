@@ -3,7 +3,7 @@ from uuid import UUID, uuid4
 from fastapi import APIRouter, Depends, Query, status
 from pydantic import BaseModel, Field
 
-from app.api.deps import get_db_connection, get_authenticated_device
+from app.api.deps import get_db_connection, get_authenticated_actor
 from app.db import transaction
 from app.domain.money import validate_currency_code, quantize_money
 from app.domain.transactions import (
@@ -74,7 +74,7 @@ def list_accounts(
     status: Optional[str] = Query(None, pattern="^(active|inactive)$"),
     account_type: Optional[str] = Query(None, pattern="^(cash|savings|credit|investment)$"),
     owner_user_id: Optional[UUID] = Query(None),
-    device: Dict[str, Any] = Depends(get_authenticated_device),
+    device: Dict[str, Any] = Depends(get_authenticated_actor),
     conn: Any = Depends(get_db_connection)
 ) -> Dict[str, Any]:
     """
@@ -92,7 +92,7 @@ def list_accounts(
 @router.post("", status_code=status.HTTP_201_CREATED, summary="Create Account")
 def create_account(
     payload: CreateAccountRequest,
-    device: Dict[str, Any] = Depends(get_authenticated_device),
+    device: Dict[str, Any] = Depends(get_authenticated_actor),
     conn: Any = Depends(get_db_connection)
 ) -> Dict[str, Any]:
     """
@@ -163,7 +163,7 @@ def create_account(
 def patch_account(
     account_id: UUID,
     payload: PatchAccountRequest,
-    device: Dict[str, Any] = Depends(get_authenticated_device),
+    device: Dict[str, Any] = Depends(get_authenticated_actor),
     conn: Any = Depends(get_db_connection)
 ) -> Dict[str, Any]:
     """
@@ -310,7 +310,7 @@ def patch_account(
 @router.post("/{account_id}/deactivate", summary="Deactivate Account")
 def deactivate_account(
     account_id: UUID,
-    device: Dict[str, Any] = Depends(get_authenticated_device),
+    device: Dict[str, Any] = Depends(get_authenticated_actor),
     conn: Any = Depends(get_db_connection)
 ) -> Dict[str, Any]:
     """
@@ -347,7 +347,7 @@ def deactivate_account(
 @router.get("/{account_id}/aliases", summary="List Account Aliases")
 def list_account_aliases(
     account_id: UUID,
-    device: Dict[str, Any] = Depends(get_authenticated_device),
+    device: Dict[str, Any] = Depends(get_authenticated_actor),
     conn: Any = Depends(get_db_connection)
 ) -> Dict[str, Any]:
     household_id = device["household_id"]
@@ -373,7 +373,7 @@ def list_account_aliases(
 def create_account_alias(
     account_id: UUID,
     payload: CreateAliasRequest,
-    device: Dict[str, Any] = Depends(get_authenticated_device),
+    device: Dict[str, Any] = Depends(get_authenticated_actor),
     conn: Any = Depends(get_db_connection)
 ) -> Dict[str, Any]:
     household_id = device["household_id"]
@@ -421,7 +421,7 @@ def create_account_alias(
 def delete_account_alias(
     account_id: UUID,
     alias_id: UUID,
-    device: Dict[str, Any] = Depends(get_authenticated_device),
+    device: Dict[str, Any] = Depends(get_authenticated_actor),
     conn: Any = Depends(get_db_connection)
 ) -> Dict[str, Any]:
     household_id = device["household_id"]

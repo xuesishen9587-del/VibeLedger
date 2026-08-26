@@ -3,7 +3,7 @@ from uuid import UUID, uuid4
 from fastapi import APIRouter, Depends, Query, status
 from pydantic import BaseModel, Field
 
-from app.api.deps import get_db_connection, get_authenticated_device
+from app.api.deps import get_db_connection, get_authenticated_actor
 from app.db import transaction
 from app.domain.transactions import (
     CategoryResourceNotFoundError,
@@ -33,7 +33,7 @@ def _format_category(cat: Dict[str, Any]) -> Dict[str, Any]:
 def list_categories(
     type: Optional[str] = Query(None, pattern="^(expense|income)$", description="Filter by category type"),
     status: Optional[str] = Query(None, pattern="^(active|inactive)$", description="Filter by status"),
-    device: Dict[str, Any] = Depends(get_authenticated_device),
+    device: Dict[str, Any] = Depends(get_authenticated_actor),
     conn: Any = Depends(get_db_connection)
 ) -> Dict[str, Any]:
     """
@@ -50,7 +50,7 @@ def list_categories(
 @router.post("", status_code=status.HTTP_201_CREATED, summary="Create Category")
 def create_category(
     payload: CreateCategoryRequest,
-    device: Dict[str, Any] = Depends(get_authenticated_device),
+    device: Dict[str, Any] = Depends(get_authenticated_actor),
     conn: Any = Depends(get_db_connection)
 ) -> Dict[str, Any]:
     """
@@ -90,7 +90,7 @@ def create_category(
 def patch_category(
     category_id: UUID,
     payload: PatchCategoryRequest,
-    device: Dict[str, Any] = Depends(get_authenticated_device),
+    device: Dict[str, Any] = Depends(get_authenticated_actor),
     conn: Any = Depends(get_db_connection)
 ) -> Dict[str, Any]:
     """
@@ -131,7 +131,7 @@ def patch_category(
 @router.post("/{category_id}/deactivate", summary="Deactivate Category")
 def deactivate_category(
     category_id: UUID,
-    device: Dict[str, Any] = Depends(get_authenticated_device),
+    device: Dict[str, Any] = Depends(get_authenticated_actor),
     conn: Any = Depends(get_db_connection)
 ) -> Dict[str, Any]:
     """

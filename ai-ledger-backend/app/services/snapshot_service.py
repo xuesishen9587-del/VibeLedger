@@ -228,10 +228,14 @@ def create_snapshot_workflow(
     if account["account_type"] == "investment":
         raise AccountTypeMismatchError("Generic balance snapshot cannot be applied to investment accounts.")
 
-    # 2. Validate Idempotency Key (Required for device auth, length 8..200)
+    # 2. Validate Idempotency Key (Required for device auth, optional for browser auth)
     idempotency_key = payload.get("idempotency_key")
-    if not idempotency_key or not isinstance(idempotency_key, str) or not (8 <= len(idempotency_key) <= 200):
-        raise InvalidSnapshotError("Idempotency key is required and must be between 8 and 200 characters.")
+    if device_id:
+        if not idempotency_key or not isinstance(idempotency_key, str) or not (8 <= len(idempotency_key) <= 200):
+            raise InvalidSnapshotError("Idempotency key is required for device authentication and must be between 8 and 200 characters.")
+    else:
+        if idempotency_key is not None and (not isinstance(idempotency_key, str) or not (8 <= len(idempotency_key) <= 200)):
+            raise InvalidSnapshotError("Idempotency key must be between 8 and 200 characters.")
 
     # 3. Validate payload fields
     as_of_str = payload.get("as_of")
@@ -278,37 +282,39 @@ def create_snapshot_workflow(
         raise InvalidSnapshotError(f"Invalid snapshot source: '{source}'.")
 
     # 4. Canonical Snapshot Request Hash (MUST include account_id and normalized content)
-    canonical_dict = {
-        "account_id": str(account_id),
-        "as_of": as_of.isoformat(),
-        "balance": str(dec_balance),
-        "currency": curr,
-        "source": source
-    }
-    canonical_raw = json.dumps(canonical_dict, sort_keys=True)
-    request_hash = hashlib.sha256(canonical_raw.encode("utf-8")).digest()
+    request_id = None
+    if device_id:
+        canonical_dict = {
+            "account_id": str(account_id),
+            "as_of": as_of.isoformat(),
+            "balance": str(dec_balance),
+            "currency": curr,
+            "source": source
+        }
+        canonical_raw = json.dumps(canonical_dict, sort_keys=True)
+        request_hash = hashlib.sha256(canonical_raw.encode("utf-8")).digest()
 
-    existing_req = ingestion_repo.get_by_device_and_key(conn, device_id, idempotency_key)
-    if existing_req:
-        if existing_req["request_hash"] != request_hash:
-            raise IdempotencyKeyReuseError("This idempotency key was already used for different snapshot content or account.")
-        if existing_req["response_payload"]:
-            return existing_req["response_payload"]
-        if existing_req["draft_payload"] and existing_req["status"] == "needs_confirmation":
-            return existing_req["draft_payload"]
+        existing_req = ingestion_repo.get_by_device_and_key(conn, device_id, idempotency_key)
+        if existing_req:
+            if existing_req["request_hash"] != request_hash:
+                raise IdempotencyKeyReuseError("This idempotency key was already used for different snapshot content or account.")
+            if existing_req["response_payload"]:
+                return existing_req["response_payload"]
+            if existing_req["draft_payload"] and existing_req["status"] == "needs_confirmation":
+                return existing_req["draft_payload"]
 
-    request_id = uuid4()
-    ingestion_repo.create_ingestion_request(
-        conn=conn,
-        request_id=request_id,
-        device_id=device_id,
-        idempotency_key=idempotency_key,
-        request_kind="snapshot",
-        request_hash=request_hash,
-        status="processing",
-        captured_at=as_of,
-        draft_payload=canonical_dict
-    )
+        request_id = uuid4()
+        ingestion_repo.create_ingestion_request(
+            conn=conn,
+            request_id=request_id,
+            device_id=device_id,
+            idempotency_key=idempotency_key,
+            request_kind="snapshot",
+            request_hash=request_hash,
+            status="processing",
+            captured_at=as_of,
+            draft_payload=canonical_dict
+        )
 
     # 5. Evaluate Reconciliation under lock
     accounts_repo.lock_account_state(conn, account_id)
@@ -464,13 +470,14 @@ def create_snapshot_workflow(
         if opening_tx_id:
             response["opening_balance_transaction_id"] = str(opening_tx_id)
 
-        ingestion_repo.update_ingestion_request_status(
-            conn=conn,
-            request_id=request_id,
-            status="committed",
-            response_payload=response,
-            committed_at=datetime.now(timezone.utc)
-        )
+        if device_id and request_id:
+            ingestion_repo.update_ingestion_request_status(
+                conn=conn,
+                request_id=request_id,
+                status="committed",
+                response_payload=response,
+                committed_at=datetime.now(timezone.utc)
+            )
         return response
 
     else:
@@ -643,13 +650,14 @@ def create_snapshot_workflow(
                 "adjustment_transaction_id": str(adj_tx_id) if adj_tx_id else None
             }
 
-            ingestion_repo.update_ingestion_request_status(
-                conn=conn,
-                request_id=request_id,
-                status="committed",
-                response_payload=response,
-                committed_at=datetime.now(timezone.utc)
-            )
+            if device_id and request_id:
+                ingestion_repo.update_ingestion_request_status(
+                    conn=conn,
+                    request_id=request_id,
+                    status="committed",
+                    response_payload=response,
+                    committed_at=datetime.now(timezone.utc)
+                )
             return response
 
         else:
@@ -705,12 +713,13 @@ def create_snapshot_workflow(
                 "display_summary": display_summary
             }
 
-            ingestion_repo.update_ingestion_request_status(
-                conn=conn,
-                request_id=request_id,
-                status="needs_confirmation",
-                draft_payload=response
-            )
+            if device_id and request_id:
+                ingestion_repo.update_ingestion_request_status(
+                    conn=conn,
+                    request_id=request_id,
+                    status="needs_confirmation",
+                    draft_payload=response
+                )
             return response
 
 def get_reconciliation_batch_summary(conn, batch_id: UUID, household_id: UUID) -> Dict[str, Any]:

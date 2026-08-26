@@ -137,7 +137,7 @@ def record_expense(
     accounts_repo.update_account_state_projection(conn, from_account_id, new_balance, last_transaction_at=tx_time)
 
     # 7. Append audit event
-    actor_type = "user" if created_by_user_id else ("device" if created_by_device_id else "system")
+    actor_type = "device" if created_by_device_id else ("user" if created_by_user_id else "system")
     audit_repo.insert_audit_event(
         conn=conn,
         household_id=household_id,
@@ -266,7 +266,7 @@ def record_cash_income(
     accounts_repo.update_account_state_projection(conn, to_account_id, new_balance, last_transaction_at=tx_time)
 
     # 7. Append audit event
-    actor_type = "user" if created_by_user_id else ("device" if created_by_device_id else "system")
+    actor_type = "device" if created_by_device_id else ("user" if created_by_user_id else "system")
     audit_repo.insert_audit_event(
         conn=conn,
         household_id=household_id,
@@ -395,7 +395,7 @@ def record_fee(
     accounts_repo.update_account_state_projection(conn, from_account_id, new_balance, last_transaction_at=tx_time)
 
     # 7. Append audit event
-    actor_type = "user" if created_by_user_id else ("device" if created_by_device_id else "system")
+    actor_type = "device" if created_by_device_id else ("user" if created_by_user_id else "system")
     audit_repo.insert_audit_event(
         conn=conn,
         household_id=household_id,
@@ -549,7 +549,7 @@ def record_transfer(
     accounts_repo.update_account_state_projection(conn, from_account_id, new_from_balance, last_transaction_at=tx_time)
     accounts_repo.update_account_state_projection(conn, to_account_id, new_to_balance, last_transaction_at=tx_time)
 
-    actor_type = "user" if created_by_user_id else ("device" if created_by_device_id else "system")
+    actor_type = "device" if created_by_device_id else ("user" if created_by_user_id else "system")
     audit_repo.insert_audit_event(
         conn=conn,
         household_id=household_id,
@@ -758,7 +758,7 @@ def record_refund(
     accounts_repo.update_account_state_projection(conn, to_account_id, new_balance, last_transaction_at=tx_time)
 
     # 10. Append audit event
-    actor_type = "user" if created_by_user_id else ("device" if created_by_device_id else "system")
+    actor_type = "device" if created_by_device_id else ("user" if created_by_user_id else "system")
     audit_repo.insert_audit_event(
         conn=conn,
         household_id=household_id,
@@ -885,7 +885,7 @@ def record_opening_balance(
         initialized_at=tx_time
     )
 
-    actor_type = "user" if created_by_user_id else ("device" if created_by_device_id else "system")
+    actor_type = "device" if created_by_device_id else ("user" if created_by_user_id else "system")
     audit_repo.insert_audit_event(
         conn=conn,
         household_id=household_id,
@@ -1004,7 +1004,7 @@ def record_reconciliation_adjustment(
     tx_time = occurred_at or datetime.now(timezone.utc)
     accounts_repo.update_account_state_projection(conn, account_id, new_balance, last_transaction_at=tx_time)
 
-    actor_type = "user" if created_by_user_id else ("device" if created_by_device_id else "system")
+    actor_type = "device" if created_by_device_id else ("user" if created_by_user_id else "system")
     audit_repo.insert_audit_event(
         conn=conn,
         household_id=household_id,

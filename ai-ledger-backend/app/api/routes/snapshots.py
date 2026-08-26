@@ -3,7 +3,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 
-from app.api.deps import get_db_connection, get_authenticated_device
+from app.api.deps import get_db_connection, get_authenticated_actor
 from app.db import transaction
 from app.services.reference_fx_service import ReferenceFxService
 import app.services.snapshot_service as snapshot_service
@@ -15,7 +15,7 @@ class ImagePayload(BaseModel):
     base64: str = Field(..., min_length=1, description="Base64-encoded image data")
 
 class SnapshotCreateRequest(BaseModel):
-    idempotency_key: str = Field(..., min_length=8, max_length=200, description="Required device idempotency key (8-200 chars)")
+    idempotency_key: Optional[str] = Field(None, min_length=8, max_length=200, description="Idempotency key (required for device, optional for browser)")
     as_of: str = Field(..., description="Authoritative observation timestamp with timezone")
     balance: Optional[str] = Field(None, description="Observed account balance as decimal string")
     currency: Optional[str] = Field(None, description="3-letter uppercase currency code")
@@ -26,7 +26,7 @@ class SnapshotCreateRequest(BaseModel):
 def create_account_snapshot_endpoint(
     account_id: UUID,
     payload: SnapshotCreateRequest,
-    device: Dict[str, Any] = Depends(get_authenticated_device),
+    device: Dict[str, Any] = Depends(get_authenticated_actor),
     conn: Any = Depends(get_db_connection)
 ) -> Dict[str, Any]:
     """

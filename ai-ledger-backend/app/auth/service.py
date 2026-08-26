@@ -11,6 +11,7 @@ from app.domain.auth import (
     UserDisabledError,
     UserNotInHouseholdError,
     AmbiguousHouseholdMembershipError,
+    HouseholdPermissionDeniedError,
     DeviceNotFoundError,
 )
 from app.repositories import devices as repo_devices
@@ -97,11 +98,11 @@ class AuthService:
 
         sub = claims.get("sub")
         if not sub or not isinstance(sub, str) or not sub.strip():
-            raise InvalidCredentialsError("Token missing valid 'sub' claim.")
+            raise InvalidCredentialsError("Invalid browser credentials.")
 
         user = repo_users.get_user_by_auth_subject(conn, sub)
         if not user:
-            raise InvalidCredentialsError(f"User for identity '{sub}' is not registered.")
+            raise InvalidCredentialsError("Invalid browser credentials.")
 
         if user.get("status") != "active":
             raise UserDisabledError("User account is disabled.")
@@ -131,6 +132,9 @@ class AuthService:
     def authenticate(conn, token: str, verifier: Optional[BrowserAuthVerifier] = None) -> AuthContext:
         """
         Dual-mode authentication: inspects token format to route to either browser JWT or device bearer auth.
+        Deterministic classification:
+        - 3-segment token (2 dots): browser JWT ONLY (no device fallback).
+        - opaque token (not 2 dots): device token ONLY.
         """
         if not token or not token.strip():
             raise AuthRequiredError("Authorization bearer token is missing.")
@@ -138,11 +142,7 @@ class AuthService:
         clean_token = token.strip()
         # JWTs consist of 3 base64url segments separated by dots
         if clean_token.count(".") == 2:
-            try:
-                return AuthService.authenticate_browser(conn, clean_token, verifier)
-            except InvalidCredentialsError:
-                # If JWT verification fails, check if it's a device token that happened to match pattern
-                return AuthService.authenticate_device(conn, clean_token)
+            return AuthService.authenticate_browser(conn, clean_token, verifier)
         else:
             return AuthService.authenticate_device(conn, clean_token)
 
@@ -161,7 +161,10 @@ class AuthService:
     ) -> Tuple[Dict[str, Any], str]:
         """
         Provisions a new device for the caller's user and returns the device metadata and secret token.
+        Requires browser authentication (device credentials cannot mint new device credentials).
         """
+        if not auth_context.is_browser:
+            raise HouseholdPermissionDeniedError("Browser authentication required to provision devices.")
         device_dict, raw_token = repo_devices.create_device_with_token(
             conn,
             user_id=auth_context.user_id,

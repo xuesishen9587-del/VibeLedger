@@ -2,7 +2,7 @@ from typing import Optional, Dict, Any
 from uuid import UUID
 from fastapi import APIRouter, Depends
 
-from app.api.deps import get_db_connection, get_authenticated_device
+from app.api.deps import get_db_connection, get_authenticated_actor
 from app.domain.money import quantize_money
 from app.domain.transactions import InstallmentPlanResourceNotFoundError
 import app.repositories.installments as installments_repo
@@ -11,7 +11,7 @@ router = APIRouter(prefix="/api/v1/installments", tags=["Installments"])
 
 @router.get("", summary="List Installment Plans")
 def list_installment_plans(
-    device: Dict[str, Any] = Depends(get_authenticated_device),
+    device: Dict[str, Any] = Depends(get_authenticated_actor),
     conn: Any = Depends(get_db_connection)
 ) -> Dict[str, Any]:
     """
@@ -40,7 +40,7 @@ def list_installment_plans(
 @router.get("/{plan_id}", summary="Get Installment Plan Details")
 def get_installment_plan(
     plan_id: UUID,
-    device: Dict[str, Any] = Depends(get_authenticated_device),
+    device: Dict[str, Any] = Depends(get_authenticated_actor),
     conn: Any = Depends(get_db_connection)
 ) -> Dict[str, Any]:
     """

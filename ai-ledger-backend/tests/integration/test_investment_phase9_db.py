@@ -1675,6 +1675,266 @@ class TestInvestmentPhase9Db(BaseDbTestCase):
         }
         self.assertFalse(is_flow_compatible_with_transfer(flow_posted, tx_posted_mismatch, account_id, currency))
 
+    def test_19_auto_matched_flow_evidence_revalidation_on_commit(self):
+        """
+        Item 1 Regression:
+        Preview: Statement contribution 50,000 CNY, 2026-08-15, WIRE-ABC uniquely auto-matches transfer A.
+        Before commit, mutate transfer A (case A: amount 50k -> 60k; case B: date/reference changed).
+        Commit: batch -> needs_review with zero closing snapshot, zero P&L period, untouched account_state.
+        """
+        conn = get_connection(self.test_schema)
+        try:
+            with transaction(conn):
+                investment_service.create_manual_investment_snapshot(
+                    conn=conn,
+                    household_id=self.household_id,
+                    account_id=self.inv_cny_id,
+                    payload={
+                        "idempotency_key": "inv-baseline-t19",
+                        "as_of": "2026-07-31T00:00:00+08:00",
+                        "total_asset_value": "100000.00",
+                        "currency": "CNY"
+                    },
+                    user_id=self.user_id
+                )
+
+                tx_a_id = uuid4()
+                tx_repo.create_transaction(
+                    conn=conn,
+                    tx_id=tx_a_id,
+                    household_id=self.household_id,
+                    transaction_type="transfer",
+                    occurred_on=date(2026, 8, 15),
+                    original_amount=Decimal("50000.00"),
+                    original_currency="CNY",
+                    from_account_id=self.chk_cny_id,
+                    to_account_id=self.inv_cny_id,
+                    from_amount=Decimal("50000.00"),
+                    from_currency="CNY",
+                    to_amount=Decimal("50000.00"),
+                    to_currency="CNY",
+                    status="committed",
+                    remarks="WIRE-ABC"
+                )
+
+                extraction = InvestmentStatementExtractionResult(
+                    total_asset_value=Decimal("160000.00"),
+                    currency="CNY",
+                    valuation_as_of=date(2026, 8, 31),
+                    clear_capital_flows=[
+                        InvestmentCapitalFlow(
+                            direction="contribution",
+                            amount=Decimal("50000.00"),
+                            currency="CNY",
+                            occurred_on=date(2026, 8, 15),
+                            external_reference="WIRE-ABC"
+                        )
+                    ],
+                    capital_flow_evidence_complete=True
+                )
+                parser = MockStatementParser(investment_result=extraction)
+                pdf_bytes = make_pdf_bytes(["IBKR Statement", "Account Value: 160000 CNY", "Deposit: 50000 CNY"])
+
+                res = investment_service.process_investment_statement(
+                    conn=conn,
+                    household_id=self.household_id,
+                    account_id=self.inv_cny_id,
+                    file_bytes=pdf_bytes,
+                    file_name="stmt_t19.pdf",
+                    user_id=self.user_id,
+                    parser=parser
+                )
+                self.assertEqual(res["status"], "ready")
+                batch_id = UUID(res["batch_id"])
+
+                # Verify matched_flow_evidence was persisted
+                cands = reconciliation_repo.list_candidates_for_batch(conn, batch_id)
+                pnl_cand = next(c for c in cands if c["candidate_type"] == "investment_pnl")
+                mfe = pnl_cand["payload"]["investment_pnl"].get("matched_flow_evidence", [])
+                self.assertEqual(len(mfe), 1)
+                self.assertEqual(mfe[0]["selected_transfer_id"], str(tx_a_id))
+
+            # Case A: Before commit, mutate transfer A amount to 60,000 CNY
+            with transaction(conn):
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        UPDATE transactions
+                        SET to_amount = 60000.00,
+                            from_amount = 60000.00,
+                            original_amount = 60000.00
+                        WHERE id = %s;
+                        """,
+                        (tx_a_id,)
+                    )
+
+            # Attempt commit
+            with transaction(conn):
+                batch = reconciliation_repo.get_reconciliation_batch(conn, batch_id)
+                candidates = reconciliation_repo.list_candidates_for_batch(conn, batch_id)
+                commit_res = investment_service.commit_investment_statement_batch(
+                    conn=conn,
+                    batch_id=batch_id,
+                    batch=batch,
+                    candidates=candidates,
+                    user_id=self.user_id
+                )
+                self.assertEqual(commit_res["status"], "needs_review")
+                self.assertEqual(commit_res["reason"], "AMBIGUOUS_INVESTMENT_CAPITAL_FLOW")
+
+                # Verify batch in DB is needs_review
+                batch_db = reconciliation_repo.get_reconciliation_batch(conn, batch_id)
+                self.assertEqual(batch_db["status"], "needs_review")
+
+                # Zero closing snapshot rows created
+                with conn.cursor() as cur:
+                    cur.execute("SELECT count(*) FROM account_snapshots WHERE account_id = %s;", (self.inv_cny_id,))
+                    snap_count = cur.fetchone()[0]
+                    self.assertEqual(snap_count, 1)
+
+                    # Zero investment_pnl_periods created
+                    cur.execute("SELECT count(*) FROM investment_pnl_periods WHERE account_id = %s;", (self.inv_cny_id,))
+                    pnl_count = cur.fetchone()[0]
+                    self.assertEqual(pnl_count, 0)
+
+                # account_state.ledger_balance untouched (remains baseline 100,000)
+                state = accounts_repo.get_account_state(conn, self.inv_cny_id)
+                self.assertEqual(state["ledger_balance"], Decimal("100000.000000"))
+        finally:
+            conn.close()
+
+    def test_20_server_owned_accounting_truth_fields_cannot_be_overridden(self):
+        """
+        Item 2 Regression:
+        Snapshot candidate closing = 160000.
+        User attempts PATCH investment_pnl:
+        closing_value = 999000, pnl_amount = 899000, contributions_amount = 0, opening_snapshot_id = fake_id.
+        Expected:
+        Persisted candidate must still reflect closing = 160000, canonical contributions = 50000,
+        server-computed pnl_amount = 10000, and authoritative opening_snapshot_id.
+        """
+        conn = get_connection(self.test_schema)
+        try:
+            baseline_snap_id = None
+            with transaction(conn):
+                baseline_res = investment_service.create_manual_investment_snapshot(
+                    conn=conn,
+                    household_id=self.household_id,
+                    account_id=self.inv_cny_id,
+                    payload={
+                        "idempotency_key": "inv-baseline-t20",
+                        "as_of": "2026-07-31T00:00:00+08:00",
+                        "total_asset_value": "100000.00",
+                        "currency": "CNY"
+                    },
+                    user_id=self.user_id
+                )
+                baseline_snap_id = baseline_res["snapshot_id"]
+
+                tx_id = uuid4()
+                tx_repo.create_transaction(
+                    conn=conn,
+                    tx_id=tx_id,
+                    household_id=self.household_id,
+                    transaction_type="transfer",
+                    occurred_on=date(2026, 8, 15),
+                    original_amount=Decimal("50000.00"),
+                    original_currency="CNY",
+                    from_account_id=self.chk_cny_id,
+                    to_account_id=self.inv_cny_id,
+                    from_amount=Decimal("50000.00"),
+                    from_currency="CNY",
+                    to_amount=Decimal("50000.00"),
+                    to_currency="CNY",
+                    status="committed"
+                )
+
+                extraction = InvestmentStatementExtractionResult(
+                    total_asset_value=Decimal("160000.00"),
+                    currency="CNY",
+                    valuation_as_of=date(2026, 8, 31),
+                    clear_capital_flows=[
+                        InvestmentCapitalFlow(
+                            direction="contribution",
+                            amount=Decimal("50000.00"),
+                            currency="CNY",
+                            occurred_on=date(2026, 8, 15)
+                        )
+                    ],
+                    capital_flow_evidence_complete=True
+                )
+                parser = MockStatementParser(investment_result=extraction)
+                pdf_bytes = make_pdf_bytes(["IBKR Statement", "Account Value: 160000 CNY", "Deposit: 50000 CNY"])
+
+                res = investment_service.process_investment_statement(
+                    conn=conn,
+                    household_id=self.household_id,
+                    account_id=self.inv_cny_id,
+                    file_bytes=pdf_bytes,
+                    file_name="stmt_t20.pdf",
+                    user_id=self.user_id,
+                    parser=parser
+                )
+                self.assertEqual(res["status"], "ready")
+                batch_id = UUID(res["batch_id"])
+
+                cands = reconciliation_repo.list_candidates_for_batch(conn, batch_id)
+                pnl_cand = next(c for c in cands if c["candidate_type"] == "investment_pnl")
+
+                # User attempts to patch server-owned accounting truth fields with arbitrary values
+                fake_snap_id = str(uuid4())
+                statement_service.patch_candidate(
+                    conn=conn,
+                    candidate_id=pnl_cand["id"],
+                    household_id=self.household_id,
+                    payload={
+                        "investment_pnl": {
+                            "opening_snapshot_id": fake_snap_id,
+                            "opening_value": "1.00",
+                            "closing_value": "999000.00",
+                            "contributions_amount": "0.00",
+                            "withdrawals_amount": "0.00",
+                            "pnl_amount": "899000.00",
+                            "currency": "USD"
+                        }
+                    }
+                )
+
+                # Persisted candidate must preserve true authoritative server values
+                cand_after = next(c for c in reconciliation_repo.list_candidates_for_batch(conn, batch_id) if c["id"] == pnl_cand["id"])
+                p_after = cand_after["payload"]["investment_pnl"]
+                self.assertEqual(p_after["opening_snapshot_id"], str(baseline_snap_id))
+                self.assertEqual(p_after["opening_value"], "100000.00")
+                self.assertEqual(p_after["closing_value"], "160000.00")
+                self.assertEqual(p_after["contributions_amount"], "50000.00")
+                self.assertEqual(p_after["withdrawals_amount"], "0.00")
+                self.assertEqual(p_after["pnl_amount"], "10000.00")
+                self.assertEqual(p_after["currency"], "CNY")
+
+                # Accept candidates and commit
+                snap_cand = next(c for c in cands if c["candidate_type"] == "snapshot")
+                statement_service.accept_candidate(conn, snap_cand["id"], self.household_id, self.user_id)
+                statement_service.accept_candidate(conn, pnl_cand["id"], self.household_id, self.user_id)
+
+                batch = reconciliation_repo.get_reconciliation_batch(conn, batch_id)
+                self.assertEqual(batch["status"], "ready")
+
+                all_cands = reconciliation_repo.list_candidates_for_batch(conn, batch_id)
+                commit_res = investment_service.commit_investment_statement_batch(
+                    conn=conn,
+                    batch_id=batch_id,
+                    batch=batch,
+                    candidates=all_cands,
+                    user_id=self.user_id
+                )
+                self.assertEqual(commit_res["status"], "committed")
+                pnl_res = commit_res["investment_pnl"]
+                self.assertEqual(pnl_res["closing_value"], "160000.00")
+                self.assertEqual(pnl_res["contributions"], "50000.00")
+                self.assertEqual(pnl_res["pnl_amount"], "10000.00")
+        finally:
+            conn.close()
+
 
 if __name__ == "__main__":
     unittest.main()

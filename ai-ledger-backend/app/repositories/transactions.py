@@ -97,7 +97,8 @@ def create_transaction(
     status: str = "committed",
     verification_status: str = "unverified",
     statement_batch_id: Optional[UUID] = None,
-    posted_on: Optional[date] = None
+    posted_on: Optional[date] = None,
+    remarks: Optional[str] = None
 ) -> None:
 
     insert_transaction(conn, {
@@ -116,6 +117,7 @@ def create_transaction(
         "to_account_id": to_account_id,
         "category_id": category_id,
         "merchant": merchant,
+        "remarks": remarks,
         "effective_fx_rate": effective_fx_rate,
         "account_leg_status": account_leg_status,
         "reporting_amount": reporting_amount,

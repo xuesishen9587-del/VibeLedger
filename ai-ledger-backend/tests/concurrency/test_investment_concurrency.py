@@ -12,6 +12,7 @@ from datetime import datetime, date, timezone
 
 from app.db import get_connection, transaction
 from tests.support.db_helper import BaseDbTestCase
+from app.domain.transactions import InvalidRequestStateError
 import app.repositories.accounts as accounts_repo
 import app.repositories.investments as investments_repo
 import app.repositories.devices as devices_repo
@@ -63,7 +64,8 @@ class TestInvestmentConcurrency(BaseDbTestCase):
         investment snapshots on the same account.
         Worker 1 acquires account_state row lock and submits snapshot 1 (2026-08-10).
         Worker 2 enters transaction and blocks on account_state lock for snapshot 2 (2026-08-20).
-        Worker 1 commits.
+        Worker 1 verifies in PostgreSQL lock-state that Worker 2 has reached competing lock contention,
+        then commits.
         Worker 2 acquires the lock, re-reads latest authoritative valuation under the lock,
         and computes P&L against Worker 1's valuation.
         No overlapping periods, no lost updates, no deadlock.
@@ -82,8 +84,16 @@ class TestInvestmentConcurrency(BaseDbTestCase):
                     accounts_repo.lock_account_states(conn, [self.inv_account_id])
                     w1_locked.set()
 
-                    # Wait until worker 2 has launched and reached its attempt to lock
-                    w2_started.wait()
+                    # Wait until worker 2 has launched
+                    w2_started.wait(timeout=10)
+
+                    # Verify in PostgreSQL lock table that Worker 2 is competing / waiting for the lock
+                    for _ in range(500):
+                        with conn.cursor() as cur:
+                            cur.execute("SELECT count(*) FROM pg_locks WHERE NOT granted;")
+                            if cur.fetchone()[0] > 0:
+                                break
+                        threading.Event().wait(0.01)
 
                     res = investment_service.create_manual_investment_snapshot(
                         conn=conn,
@@ -107,7 +117,7 @@ class TestInvestmentConcurrency(BaseDbTestCase):
             conn = get_connection(self.test_schema)
             try:
                 # Wait for Worker 1 to hold the lock
-                w1_locked.wait()
+                w1_locked.wait(timeout=10)
                 w2_started.set()
 
                 with transaction(conn):
@@ -135,8 +145,8 @@ class TestInvestmentConcurrency(BaseDbTestCase):
         t1.start()
         t2.start()
 
-        t1.join()
-        t2.join()
+        t1.join(timeout=15)
+        t2.join(timeout=15)
 
         self.assertIsNone(errors[0], f"Worker 1 failed: {errors[0]}")
         self.assertIsNone(errors[1], f"Worker 2 failed: {errors[1]}")
@@ -201,7 +211,7 @@ class TestInvestmentConcurrency(BaseDbTestCase):
         def worker(idx):
             conn = get_connection(self.test_schema)
             try:
-                barrier.wait()
+                barrier.wait(timeout=10)
                 with transaction(conn):
                     res = investment_service.create_manual_investment_snapshot(
                         conn=conn,
@@ -223,8 +233,18 @@ class TestInvestmentConcurrency(BaseDbTestCase):
         t1.start()
         t2.start()
 
-        t1.join()
-        t2.join()
+        t1.join(timeout=15)
+        t2.join(timeout=15)
+
+        # Assert any error is the explicitly allowed retryable InvalidRequestStateError
+        for err in errors:
+            if err is not None:
+                self.assertIsInstance(
+                    err,
+                    InvalidRequestStateError,
+                    f"Unexpected exception in idempotency test: {type(err)}: {err}"
+                )
+                self.assertTrue(getattr(err, "retryable", False), "Error must be retryable")
 
         # Both callers resolve to compatible committed result with same snapshot_id (or one gets retryable)
         succeeded_results = [r for r in results if r is not None]

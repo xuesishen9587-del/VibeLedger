@@ -436,7 +436,8 @@ def validate_candidate_payload_for_type(
     account: Dict[str, Any],
     household_id: UUID,
     for_accept: bool = False,
-    statement_line: Optional[Dict[str, Any]] = None
+    statement_line: Optional[Dict[str, Any]] = None,
+    batch_id: Optional[UUID] = None
 ) -> None:
     """
     Validates complete merged candidate payload according to candidate type invariants.
@@ -660,7 +661,7 @@ def validate_candidate_payload_for_type(
             raise InvalidCandidatePayloadError("Installment candidate requires plan_id.")
 
     elif candidate_type == "snapshot":
-        snap_data = merged_payload.get("investment_snapshot", merged_payload)
+        snap_data = merged_payload.get("investment_snapshot", merged_payload.get("snapshot", merged_payload))
         as_of_val = snap_data.get("as_of")
         if not as_of_val:
             raise InvalidCandidatePayloadError("Snapshot candidate requires 'as_of' timestamp.")
@@ -669,7 +670,7 @@ def validate_candidate_payload_for_type(
         except Exception:
             raise InvalidCandidatePayloadError("Invalid ISO timestamp for snapshot as_of.")
 
-        tot_val = snap_data.get("total_asset_value")
+        tot_val = snap_data.get("total_asset_value") or snap_data.get("balance")
         if tot_val is None:
             raise InvalidCandidatePayloadError("Snapshot candidate requires 'total_asset_value'.")
         if parse_decimal(tot_val) < Decimal("0.00"):
@@ -721,24 +722,47 @@ def validate_candidate_payload_for_type(
                 if uf_idx is not None and uf_idx not in resolved_indices and str(uf_idx) not in [str(ri) for ri in resolved_indices]:
                     raise InvalidCandidatePayloadError("Cannot accept investment P&L candidate with unresolved capital-flow evidence.")
 
-        # 2. Derive accounting truth fields from authoritative ledger state (Item 1)
-        opening_snap = None
-        opening_snapshot_id = pnl_data.get("opening_snapshot_id")
-        if opening_snapshot_id:
-            try:
-                opening_snap = snapshots_repo.get_snapshot(conn, UUID(str(opening_snapshot_id)))
-            except Exception:
-                opening_snap = None
-        if not opening_snap:
-            opening_snap = investments_repo.get_latest_authoritative_investment_valuation_snapshot(
-                conn=conn,
-                household_id=household_id,
-                account_id=account["id"]
-            )
+        # 2. Derive accounting truth fields strictly from server-owned authoritative sources
+        opening_snap = investments_repo.get_latest_authoritative_investment_valuation_snapshot(
+            conn=conn,
+            household_id=household_id,
+            account_id=account["id"]
+        )
 
-        period_end_str = pnl_data.get("period_end")
-        if opening_snap and period_end_str:
-            closing_as_of_dt = datetime.fromisoformat(period_end_str)
+        closing_val = None
+        closing_as_of_dt = None
+        if batch_id:
+            batch_rec = reconciliation_repo.get_reconciliation_batch(conn, batch_id)
+            if batch_rec and batch_rec.get("authoritative_balance") is not None:
+                closing_val = parse_decimal(batch_rec["authoritative_balance"])
+            
+            cands = reconciliation_repo.list_candidates_for_batch(conn, batch_id)
+            snap_cand = next((c for c in cands if c["candidate_type"] == "snapshot"), None)
+            if snap_cand:
+                snap_p = snap_cand.get("payload", {}).get("investment_snapshot", {})
+                if snap_p.get("total_asset_value") is not None:
+                    closing_val = parse_decimal(snap_p["total_asset_value"])
+                if snap_p.get("as_of"):
+                    try:
+                        closing_as_of_dt = datetime.fromisoformat(snap_p["as_of"])
+                    except Exception:
+                        pass
+
+        if closing_as_of_dt is None:
+            period_end_str = pnl_data.get("period_end")
+            if period_end_str:
+                try:
+                    closing_as_of_dt = datetime.fromisoformat(period_end_str)
+                except Exception:
+                    pass
+
+        if closing_val is None:
+            if opening_snap:
+                closing_val = parse_decimal(opening_snap["balance"])
+            else:
+                closing_val = Decimal("0.00")
+
+        if opening_snap and closing_as_of_dt:
             db_contribs, db_withdrws = investments_repo.get_known_committed_transfers(
                 conn=conn,
                 household_id=household_id,
@@ -749,24 +773,29 @@ def validate_candidate_payload_for_type(
             )
             canonical_contrib_amt = quantize_money(sum((t["amount"] for t in db_contribs), Decimal("0.00")), account["currency"])
             canonical_withdrw_amt = quantize_money(sum((t["amount"] for t in db_withdrws), Decimal("0.00")), account["currency"])
+        else:
+            canonical_contrib_amt = Decimal("0.00")
+            canonical_withdrw_amt = Decimal("0.00")
 
-            op_d = parse_decimal(opening_snap["balance"])
-            cl_val_raw = pnl_data.get("closing_value")
-            cl_d = parse_decimal(cl_val_raw) if cl_val_raw is not None else op_d
+        op_d = quantize_money(parse_decimal(opening_snap["balance"]), account["currency"]) if opening_snap else None
+        closing_val = quantize_money(closing_val, account["currency"]) if closing_val is not None else Decimal("0.00")
 
-            recalculated_pnl = calculate_investment_pnl(
-                opening_value=op_d,
-                closing_value=cl_d,
-                contributions=canonical_contrib_amt,
-                withdrawals=canonical_withdrw_amt,
-                currency=account["currency"]
-            )
+        recalculated_pnl = calculate_investment_pnl(
+            opening_value=op_d if op_d is not None else Decimal("0.00"),
+            closing_value=closing_val,
+            contributions=canonical_contrib_amt,
+            withdrawals=canonical_withdrw_amt,
+            currency=account["currency"]
+        )
 
-            pnl_data["opening_value"] = str(op_d)
-            pnl_data["closing_value"] = str(cl_d)
-            pnl_data["contributions_amount"] = str(canonical_contrib_amt)
-            pnl_data["withdrawals_amount"] = str(canonical_withdrw_amt)
-            pnl_data["pnl_amount"] = str(recalculated_pnl)
+        pnl_data["opening_snapshot_id"] = str(opening_snap["id"]) if opening_snap else None
+        pnl_data["opening_value"] = str(op_d) if op_d is not None else None
+        pnl_data["period_start"] = opening_snap["as_of"].isoformat() if opening_snap else None
+        pnl_data["closing_value"] = str(closing_val)
+        pnl_data["contributions_amount"] = str(canonical_contrib_amt)
+        pnl_data["withdrawals_amount"] = str(canonical_withdrw_amt)
+        pnl_data["pnl_amount"] = str(recalculated_pnl)
+        pnl_data["currency"] = account["currency"].upper()
 
 
 
@@ -839,7 +868,8 @@ def accept_candidate(
             account=account,
             household_id=household_id,
             for_accept=True,
-            statement_line=st_line_row
+            statement_line=st_line_row,
+            batch_id=b_id
         )
 
     # 4. Update candidate status to 'accepted'
@@ -954,7 +984,8 @@ def patch_candidate(
         account=account,
         household_id=household_id,
         for_accept=False,
-        statement_line=st_line_row
+        statement_line=st_line_row,
+        batch_id=b_id
     )
 
     with conn.cursor() as cur:

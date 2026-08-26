@@ -230,10 +230,10 @@ def get_investments_summary(
     params: Dict[str, Any] = {"household_id": household_id}
 
     if from_date is not None:
-        query += " AND period_start >= %(from_date)s"
+        query += " AND period_end >= %(from_date)s"
         params["from_date"] = from_date
     if to_date is not None:
-        query += " AND period_end <= %(to_date)s"
+        query += " AND period_start <= %(to_date)s"
         params["to_date"] = to_date
 
     query += " ORDER BY period_end DESC;"

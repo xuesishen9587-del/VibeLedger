@@ -45,6 +45,7 @@ import app.repositories.accounts as accounts_repo
 import app.repositories.transactions as tx_repo
 import app.repositories.reconciliation as reconciliation_repo
 import app.repositories.installments as installments_repo
+import app.repositories.investments as investments_repo
 import app.repositories.audit as audit_repo
 
 logger = logging.getLogger(__name__)
@@ -80,7 +81,21 @@ def upload_and_process_statement(
         raise AccountInactiveError(account_id)
 
     if account["account_type"] == "investment":
-        raise AccountTypeMismatchError("Investment statements are not supported in Phase 7.")
+        import app.services.investment_service as investment_service
+        return investment_service.process_investment_statement(
+            conn=conn,
+            household_id=household_id,
+            account=account,
+            file_bytes=file_bytes,
+            filename=filename,
+            password=password,
+            period_start=period_start,
+            period_end=period_end,
+            user_id=user_id,
+            device_id=device_id,
+            parser=parser,
+            fx_service=fx_service
+        )
 
     # 2. Validate PDF file format
     if not file_bytes or not (file_bytes.startswith(b"%PDF-") or (len(file_bytes) > 4 and b"%PDF" in file_bytes[:1024])):
@@ -421,7 +436,8 @@ def validate_candidate_payload_for_type(
     account: Dict[str, Any],
     household_id: UUID,
     for_accept: bool = False,
-    statement_line: Optional[Dict[str, Any]] = None
+    statement_line: Optional[Dict[str, Any]] = None,
+    batch_id: Optional[UUID] = None
 ) -> None:
     """
     Validates complete merged candidate payload according to candidate type invariants.
@@ -644,6 +660,144 @@ def validate_candidate_payload_for_type(
         elif for_accept:
             raise InvalidCandidatePayloadError("Installment candidate requires plan_id.")
 
+    elif candidate_type == "snapshot":
+        snap_data = merged_payload.get("investment_snapshot", merged_payload.get("snapshot", merged_payload))
+        as_of_val = snap_data.get("as_of")
+        if not as_of_val:
+            raise InvalidCandidatePayloadError("Snapshot candidate requires 'as_of' timestamp.")
+        try:
+            datetime.fromisoformat(str(as_of_val))
+        except Exception:
+            raise InvalidCandidatePayloadError("Invalid ISO timestamp for snapshot as_of.")
+
+        tot_val = snap_data.get("total_asset_value") or snap_data.get("balance")
+        if tot_val is None:
+            raise InvalidCandidatePayloadError("Snapshot candidate requires 'total_asset_value'.")
+        if parse_decimal(tot_val) < Decimal("0.00"):
+            raise InvalidCandidatePayloadError("Snapshot total_asset_value must be non-negative.")
+
+        curr_val = snap_data.get("currency")
+        if curr_val and str(curr_val).strip().upper() != account["currency"].upper():
+            raise InvalidCandidatePayloadError(f"Snapshot currency '{curr_val}' must match account currency '{account['currency']}'.")
+
+    elif candidate_type == "investment_pnl":
+        pnl_data = merged_payload.get("investment_pnl", merged_payload)
+        unresolved_flows = pnl_data.get("unresolved_flow_evidence", [])
+        flow_resolutions = pnl_data.get("flow_resolutions", [])
+
+        from app.domain.investments import is_flow_compatible_with_transfer, calculate_investment_pnl
+
+        # 1. Validate flow_resolutions if provided
+        resolved_indices = set()
+        for res in flow_resolutions:
+            f_idx = res.get("flow_index")
+            sel_tid_str = res.get("selected_transfer_id")
+            if f_idx is None or sel_tid_str is None:
+                raise InvalidCandidatePayloadError("Flow resolution requires 'flow_index' and 'selected_transfer_id'.")
+
+            target_flow = next((uf for uf in unresolved_flows if str(uf.get("flow_index")) == str(f_idx)), None)
+            if not target_flow:
+                raise InvalidCandidatePayloadError(f"Flow index {f_idx} not found in unresolved flow evidence.")
+
+            cand_tids = target_flow.get("candidate_transfer_ids", [])
+            if str(sel_tid_str) not in [str(ctid) for ctid in cand_tids]:
+                raise InvalidCandidatePayloadError(f"Selected transfer {sel_tid_str} is not a valid candidate for flow index {f_idx}.")
+
+            try:
+                sel_tid = UUID(str(sel_tid_str))
+                tx = tx_repo.get_transaction(conn, sel_tid)
+            except (ValueError, TypeError):
+                raise InvalidCandidatePayloadError(f"Invalid transfer ID in flow resolution: {sel_tid_str}")
+            if not tx or tx["household_id"] != household_id or tx["status"] != "committed" or tx.get("deleted_at") is not None:
+                raise InvalidCandidatePayloadError(f"Selected transfer {sel_tid_str} not found or not active.")
+
+            if not is_flow_compatible_with_transfer(target_flow, tx, account["id"], account["currency"]):
+                raise InvalidCandidatePayloadError(f"Transfer {sel_tid_str} is not compatible with flow index {f_idx}.")
+
+            resolved_indices.add(f_idx)
+
+        if for_accept:
+            for uf in unresolved_flows:
+                uf_idx = uf.get("flow_index")
+                if uf_idx is not None and uf_idx not in resolved_indices and str(uf_idx) not in [str(ri) for ri in resolved_indices]:
+                    raise InvalidCandidatePayloadError("Cannot accept investment P&L candidate with unresolved capital-flow evidence.")
+
+        # 2. Derive accounting truth fields strictly from server-owned authoritative sources
+        opening_snap = investments_repo.get_latest_authoritative_investment_valuation_snapshot(
+            conn=conn,
+            household_id=household_id,
+            account_id=account["id"]
+        )
+
+        closing_val = None
+        closing_as_of_dt = None
+        if batch_id:
+            batch_rec = reconciliation_repo.get_reconciliation_batch(conn, batch_id)
+            if batch_rec and batch_rec.get("authoritative_balance") is not None:
+                closing_val = parse_decimal(batch_rec["authoritative_balance"])
+            
+            cands = reconciliation_repo.list_candidates_for_batch(conn, batch_id)
+            snap_cand = next((c for c in cands if c["candidate_type"] == "snapshot"), None)
+            if snap_cand:
+                snap_p = snap_cand.get("payload", {}).get("investment_snapshot", {})
+                if snap_p.get("total_asset_value") is not None:
+                    closing_val = parse_decimal(snap_p["total_asset_value"])
+                if snap_p.get("as_of"):
+                    try:
+                        closing_as_of_dt = datetime.fromisoformat(snap_p["as_of"])
+                    except Exception:
+                        pass
+
+        if closing_as_of_dt is None:
+            period_end_str = pnl_data.get("period_end")
+            if period_end_str:
+                try:
+                    closing_as_of_dt = datetime.fromisoformat(period_end_str)
+                except Exception:
+                    pass
+
+        if closing_val is None:
+            if opening_snap:
+                closing_val = parse_decimal(opening_snap["balance"])
+            else:
+                closing_val = Decimal("0.00")
+
+        if opening_snap and closing_as_of_dt:
+            db_contribs, db_withdrws = investments_repo.get_known_committed_transfers(
+                conn=conn,
+                household_id=household_id,
+                account_id=account["id"],
+                account_currency=account["currency"].upper(),
+                opening_as_of=opening_snap["as_of"],
+                closing_as_of=closing_as_of_dt
+            )
+            canonical_contrib_amt = quantize_money(sum((t["amount"] for t in db_contribs), Decimal("0.00")), account["currency"])
+            canonical_withdrw_amt = quantize_money(sum((t["amount"] for t in db_withdrws), Decimal("0.00")), account["currency"])
+        else:
+            canonical_contrib_amt = Decimal("0.00")
+            canonical_withdrw_amt = Decimal("0.00")
+
+        op_d = quantize_money(parse_decimal(opening_snap["balance"]), account["currency"]) if opening_snap else None
+        closing_val = quantize_money(closing_val, account["currency"]) if closing_val is not None else Decimal("0.00")
+
+        recalculated_pnl = calculate_investment_pnl(
+            opening_value=op_d if op_d is not None else Decimal("0.00"),
+            closing_value=closing_val,
+            contributions=canonical_contrib_amt,
+            withdrawals=canonical_withdrw_amt,
+            currency=account["currency"]
+        )
+
+        pnl_data["opening_snapshot_id"] = str(opening_snap["id"]) if opening_snap else None
+        pnl_data["opening_value"] = str(op_d) if op_d is not None else None
+        pnl_data["period_start"] = opening_snap["as_of"].isoformat() if opening_snap else None
+        pnl_data["closing_value"] = str(closing_val)
+        pnl_data["contributions_amount"] = str(canonical_contrib_amt)
+        pnl_data["withdrawals_amount"] = str(canonical_withdrw_amt)
+        pnl_data["pnl_amount"] = str(recalculated_pnl)
+        pnl_data["currency"] = account["currency"].upper()
+
+
 
 def accept_candidate(
     conn,
@@ -714,7 +868,8 @@ def accept_candidate(
             account=account,
             household_id=household_id,
             for_accept=True,
-            statement_line=st_line_row
+            statement_line=st_line_row,
+            batch_id=b_id
         )
 
     # 4. Update candidate status to 'accepted'
@@ -829,7 +984,8 @@ def patch_candidate(
         account=account,
         household_id=household_id,
         for_accept=False,
-        statement_line=st_line_row
+        statement_line=st_line_row,
+        batch_id=b_id
     )
 
     with conn.cursor() as cur:
@@ -971,14 +1127,66 @@ def recompute_statement_batch_after_review(
     matched_count = sum(1 for c in candidates if c["candidate_type"] == "match" and c["status"] in ("accepted", "applied"))
     created_count = sum(1 for c in candidates if c["candidate_type"] in ("create_transaction", "create_transfer", "refund", "recognize_installment") and c["status"] in ("accepted", "applied"))
 
+    existing_adj = next((c for c in candidates if c["candidate_type"] == "adjustment"), None)
+
     account = accounts_repo.get_account(conn, batch["account_id"])
+    if account and account.get("account_type") == "investment":
+        snap_cand = next((c for c in candidates if c["candidate_type"] == "snapshot"), None)
+        pnl_cand = next((c for c in candidates if c["candidate_type"] == "investment_pnl"), None)
+
+        opening_snap = investments_repo.get_latest_authoritative_investment_valuation_snapshot(
+            conn=conn,
+            household_id=household_id,
+            account_id=batch["account_id"]
+        )
+
+        has_unresolved_flows = False
+        if pnl_cand:
+            p_data = pnl_cand.get("payload", {}).get("investment_pnl", {})
+            unresolved = p_data.get("unresolved_flow_evidence", [])
+            resolutions = p_data.get("flow_resolutions", [])
+            res_indices = {r.get("flow_index") for r in resolutions if r.get("flow_index") is not None and r.get("selected_transfer_id")}
+            has_unresolved = any(uf.get("flow_index", idx) not in res_indices for idx, uf in enumerate(unresolved))
+            if has_unresolved:
+                has_unresolved_flows = True
+
+        snap_ok = snap_cand is not None and snap_cand["status"] == "accepted"
+        pnl_ok = True
+        if opening_snap is not None:
+            pnl_ok = pnl_cand is not None and pnl_cand["status"] == "accepted" and not has_unresolved_flows
+
+        if pending_count == 0 and snap_ok and pnl_ok:
+            batch_status = "ready"
+        else:
+            batch_status = "needs_review"
+
+        if existing_adj:
+            reconciliation_repo.update_reconciliation_candidate_full(
+                conn=conn,
+                candidate_id=existing_adj["id"],
+                candidate_type="adjustment",
+                status="rejected",
+                payload={"adjustment_amount": "0.00", "currency": curr},
+                reason_code="RESIDUAL_EXPLAINED",
+                reason_detail="Investment accounts do not use reconciliation adjustments."
+            )
+        reconciliation_repo.update_reconciliation_batch_stats(
+            conn=conn,
+            batch_id=batch_id,
+            status=batch_status,
+            matched_count=matched_count,
+            created_count=0,
+            pending_count=pending_count,
+            residual_amount=None,
+            adjustment_amount=None
+        )
+        return
+
     is_credit = account and account.get("account_type") == "credit"
     cycle_ok = None
     if is_credit and batch.get("statement_balance") is not None:
         db_lines = reconciliation_repo.list_statement_lines_for_batch(conn, batch_id)
         cycle_ok = evaluate_credit_card_statement_cycle(db_lines, batch["statement_balance"], curr)
-
-    existing_adj = next((c for c in candidates if c["candidate_type"] == "adjustment"), None)
 
     # If authoritative balance is absent, residual remains None and no adjustment candidate is created
     if batch.get("authoritative_balance") is None:

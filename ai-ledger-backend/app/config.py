@@ -52,6 +52,26 @@ class Settings(BaseSettings):
         5.0,
         description="HTTP request timeout for external reference FX provider in seconds."
     )
+    AUTH_ISSUER: Optional[str] = Field(
+        None,
+        description="Expected JWT issuer (iss claim)."
+    )
+    AUTH_AUDIENCE: Optional[str] = Field(
+        None,
+        description="Expected JWT audience (aud claim)."
+    )
+    AUTH_PUBLIC_KEY: Optional[str] = Field(
+        None,
+        description="Static PEM public key or secret for JWT verification."
+    )
+    AUTH_ALGORITHMS: list[str] = Field(
+        default_factory=lambda: ["RS256", "HS256"],
+        description="Permitted JWT signature algorithms."
+    )
+    AUTH_JWKS_URL: Optional[str] = Field(
+        None,
+        description="Optional JWKS URL for external identity provider (disabled/mocked in tests)."
+    )
 
     # Use SettingsConfigDict for Pydantic v2 Settings configuration
     model_config = SettingsConfigDict(

@@ -1,8 +1,12 @@
-import hashlib
 from typing import Optional, Dict, Any, Generator
-from fastapi import Header, HTTPException, Depends
+from fastapi import Header, Depends
 from app.db import get_connection
-import app.repositories.devices as devices_repo
+from app.auth.context import AuthContext
+from app.auth.service import AuthService
+from app.domain.auth import (
+    AuthRequiredError,
+    HouseholdPermissionDeniedError,
+)
 
 def get_db_connection() -> Generator[Any, None, None]:
     """
@@ -15,76 +19,67 @@ def get_db_connection() -> Generator[Any, None, None]:
         if conn and not conn.closed:
             conn.close()
 
-def get_authenticated_device(
+def get_auth_context(
     authorization: Optional[str] = Header(None),
     conn: Any = Depends(get_db_connection)
-) -> Dict[str, Any]:
+) -> AuthContext:
     """
-    FastAPI dependency that authenticates incoming iOS Shortcut / Device requests via Bearer token.
-    Hashes the raw token with SHA-256 and validates active status.
-    Raw tokens are never logged or stored.
+    FastAPI dependency that authenticates incoming requests via Bearer token (Device or Browser JWT).
+    Derives trusted household_id and user_id.
     """
     if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(
-            status_code=401,
-            detail={
-                "error": {
-                    "code": "UNAUTHORIZED",
-                    "message": "Missing or invalid Authorization Bearer header.",
-                    "retryable": false if False else False,
-                    "details": {}
-                }
-            }
-        )
+        raise AuthRequiredError("Missing or invalid Authorization Bearer header.")
 
     raw_token = authorization[7:].strip()
     if not raw_token:
-        raise HTTPException(
-            status_code=401,
-            detail={
-                "error": {
-                    "code": "UNAUTHORIZED",
-                    "message": "Empty device bearer token.",
-                    "retryable": False,
-                    "details": {}
-                }
-            }
-        )
+        raise AuthRequiredError("Empty bearer token.")
 
-    token_hash = hashlib.sha256(raw_token.encode("utf-8")).digest()
-    device = devices_repo.get_active_device_by_token_hash(conn, token_hash)
-    if not device:
-        revoked_dev = devices_repo.get_device_by_token_hash(conn, token_hash)
-        if revoked_dev and (revoked_dev["status"] != "active" or revoked_dev["revoked_at"] is not None):
-            raise HTTPException(
-                status_code=401,
-                detail={
-                    "error": {
-                        "code": "DEVICE_REVOKED",
-                        "message": "Device token is revoked or inactive.",
-                        "retryable": False,
-                        "details": {}
-                    }
-                }
-            )
+    return AuthService.authenticate(conn, raw_token)
 
-        raise HTTPException(
-            status_code=401,
-            detail={
-                "error": {
-                    "code": "UNAUTHORIZED",
-                    "message": "Invalid or unknown device token.",
-                    "retryable": False,
-                    "details": {}
-                }
-            }
-        )
+def require_device_auth(
+    auth_context: AuthContext = Depends(get_auth_context)
+) -> AuthContext:
+    """Requires that the caller is authenticated via a registered device."""
+    if not auth_context.is_device:
+        raise HouseholdPermissionDeniedError("Device authentication required for this endpoint.")
+    return auth_context
 
-    # Update last_seen_at
-    try:
-        devices_repo.update_device_last_seen(conn, device["device_id"])
-        conn.commit()
-    except Exception:
-        conn.rollback()
+def require_browser_auth(
+    auth_context: AuthContext = Depends(get_auth_context)
+) -> AuthContext:
+    """Requires that the caller is authenticated via a browser JWT session."""
+    if not auth_context.is_browser:
+        raise HouseholdPermissionDeniedError("Browser authentication required for this endpoint.")
+    return auth_context
 
-    return device
+def require_household_member(
+    auth_context: AuthContext = Depends(get_auth_context)
+) -> AuthContext:
+    """Requires that the caller has active member or owner role in the household."""
+    if not auth_context.can_write:
+        raise HouseholdPermissionDeniedError("Insufficient household permissions.")
+    return auth_context
+
+def require_household_owner(
+    auth_context: AuthContext = Depends(get_auth_context)
+) -> AuthContext:
+    """Requires that the caller is an owner of the household."""
+    if not auth_context.is_owner:
+        raise HouseholdPermissionDeniedError("Household owner role required.")
+    return auth_context
+
+def get_authenticated_device(
+    auth_context: AuthContext = Depends(get_auth_context)
+) -> Dict[str, Any]:
+    """
+    Backward-compatible adapter dependency for existing routes.
+    Returns a dictionary containing resolved identity and household context.
+    """
+    return {
+        "device_id": auth_context.device_id,
+        "user_id": auth_context.user_id,
+        "household_id": auth_context.household_id,
+        "household_role": auth_context.household_role,
+        "auth_mode": auth_context.auth_mode,
+        "auth_subject": auth_context.auth_subject,
+    }

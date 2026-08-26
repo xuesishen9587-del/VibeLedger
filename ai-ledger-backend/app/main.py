@@ -1,8 +1,10 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.exceptions import RequestValidationError
 from app.domain.transactions import LedgerDomainError
+from app.domain.auth import AuthError
 from app.api.errors import (
     ledger_domain_exception_handler,
+    auth_domain_exception_handler,
     validation_exception_handler,
     http_exception_handler,
     global_exception_handler
@@ -19,6 +21,7 @@ from app.api.routes.snapshots import router as snapshots_router
 from app.api.routes.reconciliation import router as reconciliation_router, candidates_router as reconciliation_candidates_router
 from app.api.routes.statements import router as statements_router
 from app.api.routes.investments import router as investments_router
+from app.api.routes.devices import router as devices_router
 
 def create_app() -> FastAPI:
     """
@@ -33,6 +36,7 @@ def create_app() -> FastAPI:
     # Register Exception Handlers
     app.add_exception_handler(RequestValidationError, validation_exception_handler)
     app.add_exception_handler(LedgerDomainError, ledger_domain_exception_handler)
+    app.add_exception_handler(AuthError, auth_domain_exception_handler)
     app.add_exception_handler(HTTPException, http_exception_handler)
     app.add_exception_handler(Exception, global_exception_handler)
 
@@ -50,6 +54,7 @@ def create_app() -> FastAPI:
     app.include_router(reconciliation_candidates_router)
     app.include_router(statements_router)
     app.include_router(investments_router)
+    app.include_router(devices_router)
 
 
     @app.get("/api/v1/health", tags=["Health"])

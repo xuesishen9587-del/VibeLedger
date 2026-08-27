@@ -609,7 +609,7 @@ def validate_candidate_payload_for_type(
                     raise InvalidCandidatePayloadError(f"Refund currency '{rf_curr}' must match original expense currency '{orig_tx['from_currency']}'.")
 
                 existing_refunds = tx_repo.get_active_refunds_for_expense(conn, orig_tx["id"])
-                total_refunded = sum(parse_decimal(r.get("from_amount") or r.get("to_amount") or r.get("original_amount")) for r in active_refunds)
+                total_refunded = sum(parse_decimal(r.get("from_amount") or r.get("to_amount") or r.get("original_amount")) for r in existing_refunds)
                 remaining = parse_decimal(orig_tx["from_amount"]) - total_refunded
                 if rf_amt > remaining:
                     raise InvalidCandidatePayloadError(f"Refund amount {rf_amt} exceeds remaining refundable amount {remaining}.")
@@ -1279,7 +1279,7 @@ def patch_candidate(
     if batch["status"] in ("committed", "rejected", "failed"):
         raise InvalidCandidateStateError(f"Cannot edit candidate on '{batch['status']}' batch.")
 
-    if c_status not in ("proposed", "needs_review"):
+    if c_status not in ("proposed", "needs_review", "accepted"):
         raise InvalidCandidateStateError(f"Cannot edit candidate in '{c_status}' status.")
 
     # Semantic ambiguity candidates must use /resolve instead of generic PATCH

@@ -52,6 +52,15 @@ class TestWorkQueueAndReadinessDb(BaseDbTestCase):
 
     def setUp(self):
         super().setUp()
+        os.environ["DB_SCHEMA"] = self.test_schema
+        try:
+            from app.config import get_settings
+            s = get_settings()
+            if s:
+                s.DB_SCHEMA = self.test_schema
+                s.db_schema = self.test_schema
+        except Exception:
+            pass
         self.household_id = uuid4()
         members_repo.create_household(
             self.conn,

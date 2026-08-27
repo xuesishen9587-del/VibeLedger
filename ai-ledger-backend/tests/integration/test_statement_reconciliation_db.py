@@ -2600,7 +2600,7 @@ class TestStatementReconciliationDb(BaseDbTestCase):
                 )
                 self.assertEqual(res_cny["status"], "ready")
 
-            # D. Valid USD -> CNY explicit two-leg transfer -> accepted
+            # D. Valid CNY -> USD explicit two-leg transfer -> accepted
             with transaction(conn):
                 statement_service.patch_candidate(
                     conn=conn,
@@ -2608,12 +2608,12 @@ class TestStatementReconciliationDb(BaseDbTestCase):
                     household_id=self.household_id,
                     payload={
                         "transfer": {
-                            "from_account_id": str(self.acc_usd_id),
-                            "to_account_id": str(self.acc_cny_id),
-                            "from_amount": "69.44",
-                            "to_amount": "500.00",
-                            "from_currency": "USD",
-                            "to_currency": "CNY"
+                            "from_account_id": str(self.acc_cny_id),
+                            "to_account_id": str(self.acc_usd_id),
+                            "from_amount": "500.00",
+                            "to_amount": "69.44",
+                            "from_currency": "CNY",
+                            "to_currency": "USD"
                         }
                     }
                 )

@@ -11,6 +11,7 @@ from app.main import create_app
 from app.db import get_connection, transaction
 from app.api.deps import get_db_connection
 from app.services.reference_fx_service import ReferenceFxService
+from app.domain.money import parse_decimal
 from app.domain.statements import ParsedStatementLine, StatementExtractionResult
 from app.services.statement_parser import MockStatementParser
 from app.api.routes.statements import router as statements_router
@@ -947,6 +948,7 @@ class TestStatementApiDb(BaseDbTestCase):
         self.assertEqual(res_over_ref.status_code, 422)
 
         # Upload valid partial refund line of 50.00 CNY
+        # Upload valid partial refund line of 50.00 CNY (ambiguous without refund keyword to test /resolve refund)
         mock_refund_valid_ext = StatementExtractionResult(
             period_start=date(2026, 8, 1),
             period_end=date(2026, 8, 31),
@@ -957,7 +959,7 @@ class TestStatementApiDb(BaseDbTestCase):
                     source_page_no=1,
                     source_row_no=1,
                     transaction_on=date(2026, 8, 7),
-                    description_raw="Merchant Refund 50.00",
+                    description_raw="Merchant Credit Inflow 50.00",
                     amount=Decimal("50.00"),
                     currency="CNY",
                     direction="credit",
@@ -1000,7 +1002,7 @@ class TestStatementApiDb(BaseDbTestCase):
                     source_page_no=1,
                     source_row_no=1,
                     transaction_on=date(2026, 8, 8),
-                    description_raw="Transfer from other bank 300.00",
+                    description_raw="Deposit from other bank 300.00",
                     amount=Decimal("300.00"),
                     currency="CNY",
                     direction="credit",
@@ -1077,11 +1079,24 @@ class TestStatementApiDb(BaseDbTestCase):
         import app.repositories.accounts as accounts_repo
         from app.db import transaction
 
+        def _find_cand_by_amount(cands, amount_val):
+            target = Decimal(str(amount_val))
+            for c in cands:
+                amt_str = (
+                    c.get("payload", {}).get("line", {}).get("amount")
+                    or c.get("payload", {}).get("transaction", {}).get("amount")
+                    or c.get("payload", {}).get("transfer", {}).get("from_amount")
+                    or c.get("payload", {}).get("transfer", {}).get("to_amount")
+                    or c.get("amount")
+                )
+                if amt_str is not None and parse_decimal(amt_str) == target:
+                    return c
+            raise ValueError(f"Candidate with amount {amount_val} not found in {[c.get('payload') for c in cands]}")
+
         # 1. Setup accounts and seed transactions
         acc_checking_id = uuid4()
         acc_counter_id = uuid4()
         orig_expense_id = uuid4()
-        match_tx_id = uuid4()
 
         conn = get_connection(self.test_schema)
         try:
@@ -1121,29 +1136,12 @@ class TestStatementApiDb(BaseDbTestCase):
                     reporting_amount=Decimal("150.00"),
                     reporting_currency="CNY"
                 )
-                # Seed committed target match transaction (80.00 CNY)
-                tx_repo.create_transaction(
-                    conn=conn,
-                    tx_id=match_tx_id,
-                    household_id=self.household_id,
-                    transaction_type="expense",
-                    occurred_on=date(2026, 8, 10),
-                    original_amount=Decimal("80.00"),
-                    original_currency="CNY",
-                    from_amount=Decimal("80.00"),
-                    from_currency="CNY",
-                    from_account_id=acc_checking_id,
-                    category_id=self.cat_dining_id,
-                    merchant="Target Match Expense",
-                    reporting_amount=Decimal("80.00"),
-                    reporting_currency="CNY"
-                )
         finally:
             conn.close()
 
         pdf_bytes = make_pdf_bytes(["Direction Enforcement Test"])
 
-        # 2. Upload debit statement (TYPE_AMBIGUOUS)
+        # 2. Upload debit statement (TYPE_AMBIGUOUS lines)
         mock_debit_ext = StatementExtractionResult(
             period_start=date(2026, 8, 1),
             period_end=date(2026, 8, 31),
@@ -1153,9 +1151,9 @@ class TestStatementApiDb(BaseDbTestCase):
                 ParsedStatementLine(
                     source_page_no=1,
                     source_row_no=1,
-                    transaction_on=date(2026, 8, 10),
-                    description_raw="Target Match Expense",
-                    amount=Decimal("80.00"),
+                    transaction_on=date(2026, 8, 25),
+                    description_raw="Ambiguous Debit Line 1",
+                    amount=Decimal("95.00"),
                     currency="CNY",
                     direction="debit",
                     line_type="unknown"
@@ -1163,9 +1161,19 @@ class TestStatementApiDb(BaseDbTestCase):
                 ParsedStatementLine(
                     source_page_no=1,
                     source_row_no=2,
-                    transaction_on=date(2026, 8, 12),
-                    description_raw="Debit Transfer Out",
+                    transaction_on=date(2026, 8, 26),
+                    description_raw="Ambiguous Debit Line 2",
                     amount=Decimal("50.00"),
+                    currency="CNY",
+                    direction="debit",
+                    line_type="unknown"
+                ),
+                ParsedStatementLine(
+                    source_page_no=1,
+                    source_row_no=3,
+                    transaction_on=date(2026, 8, 27),
+                    description_raw="Ambiguous Debit Line 3",
+                    amount=Decimal("80.00"),
                     currency="CNY",
                     direction="debit",
                     line_type="unknown"
@@ -1183,11 +1191,14 @@ class TestStatementApiDb(BaseDbTestCase):
 
         prev_debit = self.client.get(f"/api/v1/reconciliation-batches/{batch_debit_id}/preview", headers=self.headers)
         debit_cands = prev_debit.json()["candidates"]
-        cand_debit_1 = debit_cands[0]
-        cand_debit_2 = debit_cands[1]
+        cand_debit_1 = _find_cand_by_amount(debit_cands, "95.00")
+        cand_debit_2 = _find_cand_by_amount(debit_cands, "50.00")
+        cand_debit_3 = _find_cand_by_amount(debit_cands, "80.00")
         self.assertEqual(cand_debit_1.get("reason_code"), "TYPE_AMBIGUOUS")
+        self.assertEqual(cand_debit_2.get("reason_code"), "TYPE_AMBIGUOUS")
+        self.assertEqual(cand_debit_3.get("reason_code"), "TYPE_AMBIGUOUS")
 
-        # 3. Upload credit statement (INCOME_TRANSFER_REFUND_AMBIGUOUS)
+        # 3. Upload credit statement (INCOME_TRANSFER_REFUND_AMBIGUOUS lines)
         mock_credit_ext = StatementExtractionResult(
             period_start=date(2026, 8, 1),
             period_end=date(2026, 8, 31),
@@ -1197,8 +1208,8 @@ class TestStatementApiDb(BaseDbTestCase):
                 ParsedStatementLine(
                     source_page_no=1,
                     source_row_no=1,
-                    transaction_on=date(2026, 8, 15),
-                    description_raw="Credit Ambiguous Inflow",
+                    transaction_on=date(2026, 8, 25),
+                    description_raw="Ambiguous Credit Inflow 1",
                     amount=Decimal("120.00"),
                     currency="CNY",
                     direction="credit",
@@ -1207,8 +1218,8 @@ class TestStatementApiDb(BaseDbTestCase):
                 ParsedStatementLine(
                     source_page_no=1,
                     source_row_no=2,
-                    transaction_on=date(2026, 8, 16),
-                    description_raw="Credit Transfer In",
+                    transaction_on=date(2026, 8, 26),
+                    description_raw="Ambiguous Credit Inflow 2",
                     amount=Decimal("70.00"),
                     currency="CNY",
                     direction="credit",
@@ -1227,9 +1238,10 @@ class TestStatementApiDb(BaseDbTestCase):
 
         prev_credit = self.client.get(f"/api/v1/reconciliation-batches/{batch_credit_id}/preview", headers=self.headers)
         credit_cands = prev_credit.json()["candidates"]
-        cand_credit_1 = credit_cands[0]
-        cand_credit_2 = credit_cands[1]
+        cand_credit_1 = _find_cand_by_amount(credit_cands, "120.00")
+        cand_credit_2 = _find_cand_by_amount(credit_cands, "70.00")
         self.assertEqual(cand_credit_1.get("reason_code"), "INCOME_TRANSFER_REFUND_AMBIGUOUS")
+        self.assertEqual(cand_credit_2.get("reason_code"), "INCOME_TRANSFER_REFUND_AMBIGUOUS")
 
         # 1. TYPE_AMBIGUOUS debit -> cash_income => 422
         res_1 = self.client.post(
@@ -1297,8 +1309,31 @@ class TestStatementApiDb(BaseDbTestCase):
         self.assertEqual(res_7_credit.status_code, 200)
 
         # 8. compatible explicit match still succeeds
+        match_tx_id = uuid4()
+        conn = get_connection(self.test_schema)
+        try:
+            with transaction(conn):
+                tx_repo.create_transaction(
+                    conn=conn,
+                    tx_id=match_tx_id,
+                    household_id=self.household_id,
+                    transaction_type="expense",
+                    occurred_on=date(2026, 8, 27),
+                    original_amount=Decimal("80.00"),
+                    original_currency="CNY",
+                    from_amount=Decimal("80.00"),
+                    from_currency="CNY",
+                    from_account_id=acc_checking_id,
+                    category_id=self.cat_dining_id,
+                    merchant="Corporate Expense Alpha",
+                    reporting_amount=Decimal("80.00"),
+                    reporting_currency="CNY"
+                )
+        finally:
+            conn.close()
+
         res_8 = self.client.post(
-            f"/api/v1/reconciliation-candidates/{cand_debit_1['id']}/resolve",
+            f"/api/v1/reconciliation-candidates/{cand_debit_3['id']}/resolve",
             headers=self.headers,
             json={"resolution_type": "match", "target_transaction_id": str(match_tx_id)}
         )
@@ -1315,11 +1350,25 @@ class TestStatementApiDb(BaseDbTestCase):
         F. CATEGORY_REQUIRED -> /resolve cash_income/expense semantic rewrite => 422 (normal category PATCH must still succeed)
         G. accepted candidate -> /resolve again => 422
         H. valid TYPE_AMBIGUOUS debit -> /resolve expense => still succeeds
-        I. valid credit ambiguity -> /resolve cash_income/refund/transfer/match => still succeeds
+        I. valid credit ambiguity -> /resolve cash_income/refund/transfer/match => all 4 succeed (including refund resolve + accept and over-refund rejection)
         J. existing CATEGORY_REQUIRED safe category PATCH => still succeeds
         """
         import app.repositories.accounts as accounts_repo
         from app.db import transaction
+
+        def _find_cand_by_amount(cands, amount_val):
+            target = Decimal(str(amount_val))
+            for c in cands:
+                amt_str = (
+                    c.get("payload", {}).get("line", {}).get("amount")
+                    or c.get("payload", {}).get("transaction", {}).get("amount")
+                    or c.get("payload", {}).get("transfer", {}).get("from_amount")
+                    or c.get("payload", {}).get("transfer", {}).get("to_amount")
+                    or c.get("amount")
+                )
+                if amt_str is not None and parse_decimal(amt_str) == target:
+                    return c
+            raise ValueError(f"Candidate with amount {amount_val} not found in {[c.get('payload') for c in cands]}")
 
         # 1. Setup accounts and seed transactions
         acc_checking_id = uuid4()
@@ -1349,7 +1398,7 @@ class TestStatementApiDb(BaseDbTestCase):
                     currency="CNY",
                     owner_user_id=self.user_id
                 )
-                # Seed original expense for refund test
+                # Seed original expense for refund test (200.00 CNY on 2026-08-01)
                 tx_repo.create_transaction(
                     conn=conn,
                     tx_id=orig_expense_id,
@@ -1366,13 +1415,13 @@ class TestStatementApiDb(BaseDbTestCase):
                     reporting_amount=Decimal("200.00"),
                     reporting_currency="CNY"
                 )
-                # Seed 2 transactions for MULTIPLE_TRANSACTION_MATCHES
+                # Seed 2 transactions for MULTIPLE_TRANSACTION_MATCHES (30.00 CNY on 2026-08-05)
                 tx_repo.create_transaction(
                     conn=conn,
                     tx_id=match_tx_1,
                     household_id=self.household_id,
                     transaction_type="expense",
-                    occurred_on=date(2026, 8, 20),
+                    occurred_on=date(2026, 8, 5),
                     original_amount=Decimal("30.00"),
                     original_currency="CNY",
                     from_amount=Decimal("30.00"),
@@ -1388,7 +1437,7 @@ class TestStatementApiDb(BaseDbTestCase):
                     tx_id=match_tx_2,
                     household_id=self.household_id,
                     transaction_type="expense",
-                    occurred_on=date(2026, 8, 20),
+                    occurred_on=date(2026, 8, 5),
                     original_amount=Decimal("30.00"),
                     original_currency="CNY",
                     from_amount=Decimal("30.00"),
@@ -1404,10 +1453,12 @@ class TestStatementApiDb(BaseDbTestCase):
 
         pdf_bytes = make_pdf_bytes(["Bypass Regression Test"])
 
-        # Upload debit statement:
-        # Row 1: TYPE_AMBIGUOUS (debit)
-        # Row 2: MULTIPLE_TRANSACTION_MATCHES (30.00 CNY)
-        # Row 3: CATEGORY_REQUIRED (debit expense without default category)
+        # Upload debit statement with dedicated independent lines:
+        # Row 1 (55.00): TYPE_AMBIGUOUS for Scenario A
+        # Row 2 (30.00): MULTIPLE_TRANSACTION_MATCHES for Scenarios E & G
+        # Row 3 (45.00): CATEGORY_REQUIRED for Scenarios F & J
+        # Row 4 (70.00): TYPE_AMBIGUOUS for Scenario C (transfer mutation bypass)
+        # Row 5 (85.00): TYPE_AMBIGUOUS for Scenario H (valid expense resolution)
         mock_debit_ext = StatementExtractionResult(
             period_start=date(2026, 8, 1),
             period_end=date(2026, 8, 31),
@@ -1417,8 +1468,8 @@ class TestStatementApiDb(BaseDbTestCase):
                 ParsedStatementLine(
                     source_page_no=1,
                     source_row_no=1,
-                    transaction_on=date(2026, 8, 5),
-                    description_raw="Ambiguous Debit Line",
+                    transaction_on=date(2026, 8, 22),
+                    description_raw="Debit Line A Bypass",
                     amount=Decimal("55.00"),
                     currency="CNY",
                     direction="debit",
@@ -1427,7 +1478,7 @@ class TestStatementApiDb(BaseDbTestCase):
                 ParsedStatementLine(
                     source_page_no=1,
                     source_row_no=2,
-                    transaction_on=date(2026, 8, 20),
+                    transaction_on=date(2026, 8, 5),
                     description_raw="Coffee Shop",
                     amount=Decimal("30.00"),
                     currency="CNY",
@@ -1437,12 +1488,32 @@ class TestStatementApiDb(BaseDbTestCase):
                 ParsedStatementLine(
                     source_page_no=1,
                     source_row_no=3,
-                    transaction_on=date(2026, 8, 25),
+                    transaction_on=date(2026, 8, 23),
                     description_raw="Supermarket Grocery",
                     amount=Decimal("45.00"),
                     currency="CNY",
                     direction="debit",
                     line_type="expense"
+                ),
+                ParsedStatementLine(
+                    source_page_no=1,
+                    source_row_no=4,
+                    transaction_on=date(2026, 8, 24),
+                    description_raw="Debit Line C Leg",
+                    amount=Decimal("70.00"),
+                    currency="CNY",
+                    direction="debit",
+                    line_type="unknown"
+                ),
+                ParsedStatementLine(
+                    source_page_no=1,
+                    source_row_no=5,
+                    transaction_on=date(2026, 8, 25),
+                    description_raw="Debit Line H Leg",
+                    amount=Decimal("85.00"),
+                    currency="CNY",
+                    direction="debit",
+                    line_type="unknown"
                 )
             ]
         )
@@ -1458,12 +1529,20 @@ class TestStatementApiDb(BaseDbTestCase):
 
         prev_debit = self.client.get(f"/api/v1/reconciliation-batches/{batch_debit_id}/preview", headers=self.headers)
         debit_cands = prev_debit.json()["candidates"]
-        cand_debit_ambig = next(c for c in debit_cands if c.get("reason_code") == "TYPE_AMBIGUOUS")
+        cand_debit_a = _find_cand_by_amount(debit_cands, "55.00")
         cand_debit_multi = next(c for c in debit_cands if c.get("reason_code") == "MULTIPLE_TRANSACTION_MATCHES")
         cand_debit_cat_req = next(c for c in debit_cands if c.get("reason_code") == "CATEGORY_REQUIRED")
+        cand_debit_transfer_c = _find_cand_by_amount(debit_cands, "70.00")
+        cand_debit_expense_h = _find_cand_by_amount(debit_cands, "85.00")
 
-        # Upload credit statement:
-        # Row 1: INCOME_TRANSFER_REFUND_AMBIGUOUS (credit)
+        # Upload credit statement with dedicated independent lines:
+        # Row 1 (100.00): INCOME_TRANSFER_REFUND_AMBIGUOUS for Scenario B
+        # Row 2 (90.00): INCOME_TRANSFER_REFUND_AMBIGUOUS for Scenario D (transfer mutation bypass)
+        # Row 3 (110.00): INCOME_TRANSFER_REFUND_AMBIGUOUS for Scenario I.1 (valid cash_income)
+        # Row 4 (50.00): INCOME_TRANSFER_REFUND_AMBIGUOUS for Scenario I.2 (valid refund)
+        # Row 5 (300.00): INCOME_TRANSFER_REFUND_AMBIGUOUS for Scenario I.2 (over-refund)
+        # Row 6 (40.00): INCOME_TRANSFER_REFUND_AMBIGUOUS for Scenario I.3 (valid transfer)
+        # Row 7 (60.00): INCOME_TRANSFER_REFUND_AMBIGUOUS for Scenario I.4 (valid match)
         mock_credit_ext = StatementExtractionResult(
             period_start=date(2026, 8, 1),
             period_end=date(2026, 8, 31),
@@ -1473,9 +1552,69 @@ class TestStatementApiDb(BaseDbTestCase):
                 ParsedStatementLine(
                     source_page_no=1,
                     source_row_no=1,
-                    transaction_on=date(2026, 8, 15),
-                    description_raw="Ambiguous Inflow Line",
+                    transaction_on=date(2026, 8, 22),
+                    description_raw="Credit Line B Bypass",
                     amount=Decimal("100.00"),
+                    currency="CNY",
+                    direction="credit",
+                    line_type="unknown"
+                ),
+                ParsedStatementLine(
+                    source_page_no=1,
+                    source_row_no=2,
+                    transaction_on=date(2026, 8, 23),
+                    description_raw="Credit Line D Leg",
+                    amount=Decimal("90.00"),
+                    currency="CNY",
+                    direction="credit",
+                    line_type="unknown"
+                ),
+                ParsedStatementLine(
+                    source_page_no=1,
+                    source_row_no=3,
+                    transaction_on=date(2026, 8, 24),
+                    description_raw="Credit Line I1 Inflow",
+                    amount=Decimal("110.00"),
+                    currency="CNY",
+                    direction="credit",
+                    line_type="unknown"
+                ),
+                ParsedStatementLine(
+                    source_page_no=1,
+                    source_row_no=4,
+                    transaction_on=date(2026, 8, 25),
+                    description_raw="Credit Line I2 Inflow",
+                    amount=Decimal("50.00"),
+                    currency="CNY",
+                    direction="credit",
+                    line_type="unknown"
+                ),
+                ParsedStatementLine(
+                    source_page_no=1,
+                    source_row_no=5,
+                    transaction_on=date(2026, 8, 26),
+                    description_raw="Credit Line Over Inflow",
+                    amount=Decimal("300.00"),
+                    currency="CNY",
+                    direction="credit",
+                    line_type="unknown"
+                ),
+                ParsedStatementLine(
+                    source_page_no=1,
+                    source_row_no=6,
+                    transaction_on=date(2026, 8, 27),
+                    description_raw="Credit Line I3 Inflow",
+                    amount=Decimal("40.00"),
+                    currency="CNY",
+                    direction="credit",
+                    line_type="unknown"
+                ),
+                ParsedStatementLine(
+                    source_page_no=1,
+                    source_row_no=7,
+                    transaction_on=date(2026, 8, 28),
+                    description_raw="Credit Line I4 Inflow",
+                    amount=Decimal("60.00"),
                     currency="CNY",
                     direction="credit",
                     line_type="unknown"
@@ -1493,27 +1632,23 @@ class TestStatementApiDb(BaseDbTestCase):
 
         prev_credit = self.client.get(f"/api/v1/reconciliation-batches/{batch_credit_id}/preview", headers=self.headers)
         credit_cands = prev_credit.json()["candidates"]
-        cand_credit_ambig = credit_cands[0]
-        self.assertEqual(cand_credit_ambig.get("reason_code"), "INCOME_TRANSFER_REFUND_AMBIGUOUS")
+        cand_credit_b = _find_cand_by_amount(credit_cands, "100.00")
+        cand_credit_transfer_d = _find_cand_by_amount(credit_cands, "90.00")
+        cand_credit_income_i1 = _find_cand_by_amount(credit_cands, "110.00")
+        cand_credit_refund_i2 = _find_cand_by_amount(credit_cands, "50.00")
+        cand_credit_over_refund = _find_cand_by_amount(credit_cands, "300.00")
+        cand_credit_transfer_i3 = _find_cand_by_amount(credit_cands, "40.00")
+        cand_credit_match_i4 = _find_cand_by_amount(credit_cands, "60.00")
 
         # A. debit TYPE_AMBIGUOUS -> generic PATCH transaction_type=cash_income + income category => 422
         res_a_patch = self.client.patch(
-            f"/api/v1/reconciliation-candidates/{cand_debit_ambig['id']}",
+            f"/api/v1/reconciliation-candidates/{cand_debit_a['id']}",
             headers=self.headers,
-            json={
-                "payload": {
-                    "transaction": {
-                        "transaction_type": "cash_income",
-                        "category_id": str(self.cat_income_id)
-                    }
-                }
-            }
+            json={"payload": {"transaction": {"transaction_type": "cash_income", "category_id": str(self.cat_income_id)}}}
         )
         self.assertEqual(res_a_patch.status_code, 422)
-
-        # Reason remains unresolved and cannot be accepted
         res_a_accept = self.client.post(
-            f"/api/v1/reconciliation-candidates/{cand_debit_ambig['id']}/accept",
+            f"/api/v1/reconciliation-candidates/{cand_debit_a['id']}/accept",
             headers=self.headers,
             json={}
         )
@@ -1521,110 +1656,180 @@ class TestStatementApiDb(BaseDbTestCase):
 
         # B. credit INCOME_TRANSFER_REFUND_AMBIGUOUS -> generic PATCH transaction_type=expense + expense category => 422
         res_b_patch = self.client.patch(
-            f"/api/v1/reconciliation-candidates/{cand_credit_ambig['id']}",
+            f"/api/v1/reconciliation-candidates/{cand_credit_b['id']}",
             headers=self.headers,
-            json={
-                "payload": {
-                    "transaction": {
-                        "transaction_type": "expense",
-                        "category_id": str(self.cat_dining_id)
-                    }
-                }
-            }
+            json={"payload": {"transaction": {"transaction_type": "expense", "category_id": str(self.cat_dining_id)}}}
         )
         self.assertEqual(res_b_patch.status_code, 422)
+        res_b_accept = self.client.post(
+            f"/api/v1/reconciliation-candidates/{cand_credit_b['id']}/accept",
+            headers=self.headers,
+            json={}
+        )
+        self.assertEqual(res_b_accept.status_code, 422)
 
         # C. debit create_transfer PATCH with reconciled account on to_account side => 422
-        # First resolve as transfer
-        self.client.post(
-            f"/api/v1/reconciliation-candidates/{cand_debit_ambig['id']}/resolve",
+        res_c_patch = self.client.patch(
+            f"/api/v1/reconciliation-candidates/{cand_debit_transfer_c['id']}",
             headers=self.headers,
-            json={"resolution_type": "transfer", "counter_account_id": str(acc_counter_id)}
+            json={"payload": {"transfer": {
+                "from_account_id": str(acc_counter_id),
+                "to_account_id": str(acc_checking_id),
+                "from_amount": "70.00",
+                "from_currency": "CNY",
+                "to_amount": "70.00",
+                "to_currency": "CNY"
+            }}}
         )
-        # Attempt PATCH that puts reconciled account on to_account_id for a debit line
-        res_c = self.client.patch(
-            f"/api/v1/reconciliation-candidates/{cand_debit_ambig['id']}",
-            headers=self.headers,
-            json={
-                "payload": {
-                    "transfer": {
-                        "from_account_id": str(acc_counter_id),
-                        "to_account_id": str(acc_checking_id)
-                    }
-                }
-            }
-        )
-        self.assertEqual(res_c.status_code, 422)
+        self.assertEqual(res_c_patch.status_code, 422)
 
         # D. credit create_transfer PATCH with reconciled account on from_account side => 422
-        # First resolve as transfer
-        self.client.post(
-            f"/api/v1/reconciliation-candidates/{cand_credit_ambig['id']}/resolve",
+        res_d_patch = self.client.patch(
+            f"/api/v1/reconciliation-candidates/{cand_credit_transfer_d['id']}",
             headers=self.headers,
-            json={"resolution_type": "transfer", "counter_account_id": str(acc_counter_id)}
+            json={"payload": {"transfer": {
+                "from_account_id": str(acc_checking_id),
+                "to_account_id": str(acc_counter_id),
+                "from_amount": "90.00",
+                "from_currency": "CNY",
+                "to_amount": "90.00",
+                "to_currency": "CNY"
+            }}}
         )
-        # Attempt PATCH that puts reconciled account on from_account_id for a credit line
-        res_d = self.client.patch(
-            f"/api/v1/reconciliation-candidates/{cand_credit_ambig['id']}",
-            headers=self.headers,
-            json={
-                "payload": {
-                    "transfer": {
-                        "from_account_id": str(acc_checking_id),
-                        "to_account_id": str(acc_counter_id)
-                    }
-                }
-            }
-        )
-        self.assertEqual(res_d.status_code, 422)
+        self.assertEqual(res_d_patch.status_code, 422)
 
-        # E. MULTIPLE_TRANSACTION_MATCHES -> /resolve expense => 422
-        res_e = self.client.post(
+        # E. MULTIPLE_TRANSACTION_MATCHES candidate -> /resolve expense => 422
+        res_e_res = self.client.post(
             f"/api/v1/reconciliation-candidates/{cand_debit_multi['id']}/resolve",
             headers=self.headers,
             json={"resolution_type": "expense", "category_id": str(self.cat_dining_id)}
         )
-        self.assertEqual(res_e.status_code, 422)
+        self.assertEqual(res_e_res.status_code, 422)
 
-        # F. CATEGORY_REQUIRED -> /resolve cash_income/expense semantic rewrite => 422
-        res_f_rewrite = self.client.post(
+        # F. CATEGORY_REQUIRED candidate -> /resolve cash_income semantic rewrite => 422
+        res_f_res = self.client.post(
             f"/api/v1/reconciliation-candidates/{cand_debit_cat_req['id']}/resolve",
             headers=self.headers,
             json={"resolution_type": "cash_income", "category_id": str(self.cat_income_id)}
         )
-        self.assertEqual(res_f_rewrite.status_code, 422)
+        self.assertEqual(res_f_res.status_code, 422)
 
-        # G. accepted candidate -> /resolve again => 422
-        # Accept the multi candidate with explicit target match
-        res_accept_multi = self.client.post(
+        # G. Resolve multiple match candidate via accept, then /resolve => 422
+        res_g_accept = self.client.post(
             f"/api/v1/reconciliation-candidates/{cand_debit_multi['id']}/accept",
             headers=self.headers,
             json={"target_transaction_id": str(match_tx_1)}
         )
-        self.assertEqual(res_accept_multi.status_code, 200)
-        # Attempting /resolve on accepted candidate must fail with 422
-        res_g = self.client.post(
+        self.assertEqual(res_g_accept.status_code, 200)
+
+        res_g_resolve_again = self.client.post(
             f"/api/v1/reconciliation-candidates/{cand_debit_multi['id']}/resolve",
             headers=self.headers,
             json={"resolution_type": "expense", "category_id": str(self.cat_dining_id)}
         )
-        self.assertEqual(res_g.status_code, 422)
+        self.assertEqual(res_g_resolve_again.status_code, 422)
 
-        # H. valid TYPE_AMBIGUOUS debit -> /resolve expense => still succeeds
-        res_h = self.client.post(
-            f"/api/v1/reconciliation-candidates/{cand_debit_ambig['id']}/resolve",
+        # H. valid TYPE_AMBIGUOUS debit -> /resolve expense => 200, accept => 200
+        res_h_res = self.client.post(
+            f"/api/v1/reconciliation-candidates/{cand_debit_expense_h['id']}/resolve",
             headers=self.headers,
             json={"resolution_type": "expense", "category_id": str(self.cat_dining_id)}
         )
-        self.assertEqual(res_h.status_code, 200)
+        self.assertEqual(res_h_res.status_code, 200)
+        res_h_accept = self.client.post(
+            f"/api/v1/reconciliation-candidates/{cand_debit_expense_h['id']}/accept",
+            headers=self.headers,
+            json={}
+        )
+        self.assertEqual(res_h_accept.status_code, 200)
 
-        # I. valid credit ambiguity -> /resolve cash_income/refund/transfer/match => still succeeds
-        res_i = self.client.post(
-            f"/api/v1/reconciliation-candidates/{cand_credit_ambig['id']}/resolve",
+        # I. valid credit ambiguity -> all 4 resolution types succeed
+        # I.1: cash_income
+        res_i1_res = self.client.post(
+            f"/api/v1/reconciliation-candidates/{cand_credit_income_i1['id']}/resolve",
             headers=self.headers,
             json={"resolution_type": "cash_income", "category_id": str(self.cat_income_id)}
         )
-        self.assertEqual(res_i.status_code, 200)
+        self.assertEqual(res_i1_res.status_code, 200)
+        res_i1_accept = self.client.post(
+            f"/api/v1/reconciliation-candidates/{cand_credit_income_i1['id']}/accept",
+            headers=self.headers,
+            json={}
+        )
+        self.assertEqual(res_i1_accept.status_code, 200)
+
+        # I.2: refund (resolve + accept)
+        res_i2_res = self.client.post(
+            f"/api/v1/reconciliation-candidates/{cand_credit_refund_i2['id']}/resolve",
+            headers=self.headers,
+            json={"resolution_type": "refund", "original_expense_id": str(orig_expense_id)}
+        )
+        self.assertEqual(res_i2_res.status_code, 200)
+        res_i2_accept = self.client.post(
+            f"/api/v1/reconciliation-candidates/{cand_credit_refund_i2['id']}/accept",
+            headers=self.headers,
+            json={}
+        )
+        self.assertEqual(res_i2_accept.status_code, 200)
+
+        # I.2 over-refund: amount (300.00) exceeds original expense (200.00) => 422
+        res_over_refund = self.client.post(
+            f"/api/v1/reconciliation-candidates/{cand_credit_over_refund['id']}/resolve",
+            headers=self.headers,
+            json={"resolution_type": "refund", "original_expense_id": str(orig_expense_id)}
+        )
+        self.assertEqual(res_over_refund.status_code, 422)
+
+        # I.3: transfer
+        res_i3_res = self.client.post(
+            f"/api/v1/reconciliation-candidates/{cand_credit_transfer_i3['id']}/resolve",
+            headers=self.headers,
+            json={"resolution_type": "transfer", "counter_account_id": str(acc_counter_id)}
+        )
+        self.assertEqual(res_i3_res.status_code, 200)
+        res_i3_accept = self.client.post(
+            f"/api/v1/reconciliation-candidates/{cand_credit_transfer_i3['id']}/accept",
+            headers=self.headers,
+            json={}
+        )
+        self.assertEqual(res_i3_accept.status_code, 200)
+
+        # I.4: match
+        match_credit_tx_id = uuid4()
+        conn = get_connection(self.test_schema)
+        try:
+            with transaction(conn):
+                tx_repo.create_transaction(
+                    conn=conn,
+                    tx_id=match_credit_tx_id,
+                    household_id=self.household_id,
+                    transaction_type="cash_income",
+                    occurred_on=date(2026, 8, 28),
+                    original_amount=Decimal("60.00"),
+                    original_currency="CNY",
+                    to_amount=Decimal("60.00"),
+                    to_currency="CNY",
+                    to_account_id=acc_checking_id,
+                    category_id=self.cat_income_id,
+                    merchant="Direct Inflow Client",
+                    reporting_amount=Decimal("60.00"),
+                    reporting_currency="CNY"
+                )
+        finally:
+            conn.close()
+
+        res_i4_res = self.client.post(
+            f"/api/v1/reconciliation-candidates/{cand_credit_match_i4['id']}/resolve",
+            headers=self.headers,
+            json={"resolution_type": "match", "target_transaction_id": str(match_credit_tx_id)}
+        )
+        self.assertEqual(res_i4_res.status_code, 200)
+        res_i4_accept = self.client.post(
+            f"/api/v1/reconciliation-candidates/{cand_credit_match_i4['id']}/accept",
+            headers=self.headers,
+            json={}
+        )
+        self.assertEqual(res_i4_accept.status_code, 200)
 
         # J. existing CATEGORY_REQUIRED safe category PATCH => still succeeds
         res_j_patch = self.client.patch(

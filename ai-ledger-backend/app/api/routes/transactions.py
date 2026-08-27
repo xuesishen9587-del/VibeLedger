@@ -100,6 +100,7 @@ def _format_transaction(tx: Dict[str, Any]) -> Dict[str, Any]:
         "row_version": tx.get("row_version", 0),
         "reporting_amount": f"{quantize_money(rep_amt, rep_curr):.2f}" if rep_amt is not None and rep_curr else (f"{rep_amt:.2f}" if rep_amt is not None else None),
         "reporting_currency": rep_curr,
+        "reporting_fx_rate": f"{tx['reporting_fx_rate']:.12f}" if tx.get("reporting_fx_rate") is not None else None,
         "created_at": tx["created_at"].isoformat() if tx.get("created_at") else None,
         "deleted_at": tx["deleted_at"].isoformat() if tx.get("deleted_at") else None,
         "delete_reason": tx.get("delete_reason")

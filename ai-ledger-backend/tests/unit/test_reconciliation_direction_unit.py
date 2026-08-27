@@ -441,6 +441,98 @@ class TestReconciliationDirectionUnit(unittest.TestCase):
                 statement_line={"direction": "debit"}
             )
 
+        # 6. Refund with valid original expense executes without NameError
+        mock_conn = MagicMock()
+        with patch("app.repositories.transactions.get_transaction") as mock_get_tx, \
+             patch("app.repositories.transactions.get_active_refunds_for_expense") as mock_get_refunds:
+            mock_get_tx.return_value = {
+                "id": self.orig_expense_id,
+                "household_id": self.household_id,
+                "status": "committed",
+                "transaction_type": "expense",
+                "from_account_id": self.account_id,
+                "from_amount": Decimal("100.00"),
+                "from_currency": "CNY"
+            }
+            mock_get_refunds.return_value = []
+
+            # Valid amount (50.00 <= 100.00)
+            statement_service.validate_candidate_payload_for_type(
+                conn=mock_conn,
+                candidate_type="refund",
+                merged_payload={"refund": {"original_expense_id": str(self.orig_expense_id), "amount": "50.00", "currency": "CNY"}},
+                account=self.account_row,
+                household_id=self.household_id,
+                statement_line={"direction": "credit", "settlement_amount": Decimal("50.00"), "settlement_currency": "CNY"}
+            )
+
+            # Over-refund amount (150.00 > 100.00) raises InvalidCandidatePayloadError
+            with self.assertRaises(InvalidCandidatePayloadError) as ctx:
+                statement_service.validate_candidate_payload_for_type(
+                    conn=mock_conn,
+                    candidate_type="refund",
+                    merged_payload={"refund": {"original_expense_id": str(self.orig_expense_id), "amount": "150.00", "currency": "CNY"}},
+                    account=self.account_row,
+                    household_id=self.household_id,
+                    statement_line={"direction": "credit", "settlement_amount": Decimal("150.00"), "settlement_currency": "CNY"}
+                )
+            self.assertIn("exceeds", str(ctx.exception).lower())
+
+    @patch("app.services.statement_service.recompute_statement_batch_after_review")
+    @patch("app.services.statement_service.get_statement_batch_summary")
+    @patch("app.repositories.audit.insert_audit_event")
+    @patch("app.repositories.transactions.get_active_refunds_for_expense")
+    @patch("app.repositories.transactions.get_transaction")
+    @patch("app.repositories.accounts.get_account")
+    @patch("app.repositories.reconciliation.get_statement_line")
+    @patch("app.repositories.reconciliation.lock_reconciliation_batch")
+    def test_resolve_candidate_refund_workflow_and_over_refund(
+        self, mock_lock_batch, mock_get_line, mock_get_acc, mock_get_tx, mock_get_refunds,
+        mock_audit, mock_summary, mock_recompute
+    ):
+        mock_lock_batch.return_value = self.batch_row
+        mock_get_acc.return_value = self.account_row
+        mock_summary.return_value = {"status": "ready"}
+
+        mock_get_tx.return_value = {
+            "id": self.orig_expense_id,
+            "household_id": self.household_id,
+            "status": "committed",
+            "transaction_type": "expense",
+            "from_account_id": self.account_id,
+            "from_amount": Decimal("100.00"),
+            "from_currency": "CNY"
+        }
+        mock_get_refunds.return_value = []
+
+        mock_conn = MagicMock()
+        mock_cur = MagicMock()
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cur
+        mock_cur.fetchone.return_value = self._make_candidate_row(reason_code="INCOME_TRANSFER_REFUND_AMBIGUOUS")
+
+        # 1. Valid credit refund (50.00 <= 100.00) succeeds
+        mock_get_line.return_value = self._make_line_row(direction="credit", amount="50.00")
+        res = statement_service.resolve_candidate(
+            conn=mock_conn,
+            candidate_id=self.candidate_id,
+            household_id=self.household_id,
+            resolution_type="refund",
+            original_expense_id=self.orig_expense_id
+        )
+        self.assertEqual(res["status"], "ready")
+
+        # 2. Over-refund (150.00 > 100.00) raises RefundExceedsOriginalError
+        from app.domain.transactions import RefundExceedsOriginalError
+        mock_get_line.return_value = self._make_line_row(direction="credit", amount="150.00")
+        with self.assertRaises(RefundExceedsOriginalError):
+            statement_service.resolve_candidate(
+                conn=mock_conn,
+                candidate_id=self.candidate_id,
+                household_id=self.household_id,
+                resolution_type="refund",
+                original_expense_id=self.orig_expense_id
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

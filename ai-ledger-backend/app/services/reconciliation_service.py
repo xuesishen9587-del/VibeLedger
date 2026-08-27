@@ -992,7 +992,9 @@ def commit_statement_batch(
             amt_raw = tx_data.get("amount") or (stmt_line.get("amount") if stmt_line else "0")
             amt = parse_decimal(amt_raw)
             c_curr = tx_data.get("currency") or (stmt_line.get("currency") if stmt_line else curr)
-            ttype = tx_data.get("transaction_type") or ("income" if (stmt_line and stmt_line.get("direction") == "credit") else "expense")
+            ttype = tx_data.get("transaction_type") or ("cash_income" if (stmt_line and stmt_line.get("direction") == "credit") else "expense")
+            if ttype == "income":
+                ttype = "cash_income"
             occ_on_val = tx_data.get("occurred_on") or (stmt_line.get("transaction_on") if stmt_line else None)
             occ_on = date.fromisoformat(str(occ_on_val)) if occ_on_val else (stmt_line.get("transaction_on") if stmt_line else date.today())
             merchant = tx_data.get("merchant") or (stmt_line.get("description_raw") if stmt_line else "Merchant")

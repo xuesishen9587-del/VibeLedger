@@ -1,7 +1,7 @@
 import unittest
 from uuid import uuid4
 from decimal import Decimal
-from datetime import date
+from datetime import date, datetime, timezone
 from fastapi.testclient import TestClient
 
 from app.db import get_connection
@@ -13,6 +13,7 @@ from app.repositories import household_members as members_repo
 from app.repositories import accounts as accounts_repo
 from app.repositories import categories as categories_repo
 from app.repositories import transactions as transactions_repo
+import app.repositories.transactions as tx_repo
 import app.services.ledger_service as ledger_service
 from tests.support.db_helper import BaseDbTestCase
 

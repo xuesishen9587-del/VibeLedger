@@ -492,7 +492,7 @@ def get_transaction_detail(conn, transaction_id: UUID, household_id: Optional[UU
                t.merchant, t.remarks,
                t.source, t.status, t.verification_status, t.confidence,
                t.source_request_id, t.statement_batch_id,
-               t.created_at, t.updated_at, t.deleted_at
+               t.created_at, t.updated_at, t.deleted_at, t.row_version
         FROM transactions t
         LEFT JOIN accounts fa ON fa.id = t.from_account_id
         LEFT JOIN accounts ta ON ta.id = t.to_account_id
@@ -564,6 +564,57 @@ def get_transaction_detail(conn, transaction_id: UUID, household_id: Optional[UU
             "created_at": r[31],
             "updated_at": r[32],
             "deleted_at": r[33],
+            "row_version": r[34],
             "links": links
         }
+
+def update_transaction_fields(
+    conn,
+    transaction_id: UUID,
+    occurred_on: Optional[date] = None,
+    category_id: Optional[UUID] = None,
+    merchant: Optional[str] = None,
+    merchant_normalized: Optional[str] = None,
+    remarks: Optional[str] = None,
+    from_amount: Optional[Decimal] = None,
+    to_amount: Optional[Decimal] = None,
+    original_amount: Optional[Decimal] = None,
+    reporting_amount: Optional[Decimal] = None,
+    effective_fx_rate: Optional[Decimal] = None
+) -> None:
+    """
+    Updates the specified fields on a transaction and increments row_version.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE transactions
+            SET occurred_on = COALESCE(%(occurred_on)s, occurred_on),
+                category_id = COALESCE(%(category_id)s, category_id),
+                merchant = COALESCE(%(merchant)s, merchant),
+                merchant_normalized = COALESCE(%(merchant_normalized)s, merchant_normalized),
+                remarks = COALESCE(%(remarks)s, remarks),
+                from_amount = COALESCE(%(from_amount)s, from_amount),
+                to_amount = COALESCE(%(to_amount)s, to_amount),
+                original_amount = COALESCE(%(original_amount)s, original_amount),
+                reporting_amount = COALESCE(%(reporting_amount)s, reporting_amount),
+                effective_fx_rate = COALESCE(%(effective_fx_rate)s, effective_fx_rate),
+                row_version = row_version + 1,
+                updated_at = now()
+            WHERE id = %(transaction_id)s;
+            """,
+            {
+                "occurred_on": occurred_on,
+                "category_id": category_id,
+                "merchant": merchant,
+                "merchant_normalized": merchant_normalized,
+                "remarks": remarks,
+                "from_amount": from_amount,
+                "to_amount": to_amount,
+                "original_amount": original_amount,
+                "reporting_amount": reporting_amount,
+                "effective_fx_rate": effective_fx_rate,
+                "transaction_id": transaction_id
+            }
+        )
 

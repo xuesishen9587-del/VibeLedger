@@ -10,6 +10,7 @@ from decimal import Decimal
 from app.domain.money import parse_decimal, quantize_money, validate_currency_code
 from app.domain.transactions import (
     AccountResourceNotFoundError,
+    AccountNotFoundError,
     AccountInactiveError,
     AccountTypeMismatchError,
     BatchNotFoundError,
@@ -19,8 +20,10 @@ from app.domain.transactions import (
     InvalidCandidatePayloadError,
     IncompatibleTargetTransactionError,
     StatementParseFailedError,
+    CategoryNotFoundError,
     CategoryResourceNotFoundError,
     CategoryMismatchError,
+    RefundExceedsOriginalError,
     SameAccountTransferError
 )
 from app.domain.reconciliation.models import NormalizedStatementLine, CandidateProposal
@@ -324,7 +327,8 @@ def get_statement_batch_preview(
             "confidence": str(c["confidence"]) if c.get("confidence") is not None else None,
             "reason_code": c.get("reason_code"),
             "reason_detail": c.get("reason_detail"),
-            "payload": c.get("payload")
+            "payload": c.get("payload"),
+            "options": c.get("payload", {}).get("options", []) if isinstance(c.get("payload"), dict) else []
         }
         if c.get("statement_line_id") and c["statement_line_id"] in line_map:
             sl = line_map[c["statement_line_id"]]
@@ -454,13 +458,16 @@ def validate_candidate_payload_for_type(
         if tx_type:
             if tx_type not in ("expense", "fee", "cash_income"):
                 raise InvalidCandidatePayloadError(f"Unsupported transaction type '{tx_type}' for create_transaction candidate.")
-        elif for_accept:
             if line_dir == "debit":
-                tx_type = "expense"
+                if tx_type not in ("expense", "fee"):
+                    raise InvalidCandidatePayloadError(f"Statement debit line cannot have transaction_type '{tx_type}'.")
             elif line_dir == "credit":
-                tx_type = "cash_income"
-            else:
-                raise InvalidCandidatePayloadError("Cannot accept candidate with unknown transaction semantics. Please specify transaction_type.")
+                if tx_type not in ("cash_income",):
+                    raise InvalidCandidatePayloadError(f"Statement credit line cannot have transaction_type '{tx_type}'.")
+            elif line_dir == "unknown":
+                raise InvalidCandidatePayloadError("Cannot set direction-dependent transaction_type on statement line with unknown direction.")
+        elif for_accept:
+            raise InvalidCandidatePayloadError("Cannot accept candidate with unknown transaction semantics. Explicit transaction_type is required.")
 
         amt_val = tx_data.get("amount") or (statement_line.get("settlement_amount") or statement_line.get("amount") if statement_line else None)
         if amt_val is not None:
@@ -490,7 +497,7 @@ def validate_candidate_payload_for_type(
                 cat_id = UUID(str(cat_id_str))
                 cat = accounts_repo.get_category(conn, cat_id)
                 if not cat or cat["household_id"] != household_id or cat["status"] != "active":
-                    raise CategoryResourceNotFoundError(cat_id)
+                    raise CategoryNotFoundError(cat_id)
                 if tx_type in ("expense", "fee") and cat["category_type"] != "expense":
                     raise InvalidCandidatePayloadError(f"Category type '{cat['category_type']}' is not valid for {tx_type} transaction.")
                 if tx_type == "cash_income" and cat["category_type"] != "income":
@@ -508,6 +515,20 @@ def validate_candidate_payload_for_type(
         to_amt_val = tf_data.get("to_amount")
         from_curr_val = tf_data.get("from_currency")
         to_curr_val = tf_data.get("to_currency")
+
+        line_dir = statement_line.get("direction") if statement_line else None
+        if line_dir == "debit":
+            if from_acc_str and str(from_acc_str) != str(account["id"]):
+                raise InvalidCandidatePayloadError("Debit statement line transfer from_account_id must match the reconciled account.")
+            if to_acc_str and str(to_acc_str) == str(account["id"]):
+                raise InvalidCandidatePayloadError("Debit statement line transfer to_account_id cannot be the reconciled account.")
+        elif line_dir == "credit":
+            if to_acc_str and str(to_acc_str) != str(account["id"]):
+                raise InvalidCandidatePayloadError("Credit statement line transfer to_account_id must match the reconciled account.")
+            if from_acc_str and str(from_acc_str) == str(account["id"]):
+                raise InvalidCandidatePayloadError("Credit statement line transfer from_account_id cannot be the reconciled account.")
+        elif line_dir == "unknown":
+            raise InvalidCandidatePayloadError("Transfer candidate on statement line with unknown direction is not allowed without explicit directional contract.")
 
         if for_accept:
             if not from_acc_str or not to_acc_str:
@@ -556,6 +577,10 @@ def validate_candidate_payload_for_type(
                 raise InvalidCandidatePayloadError(f"to_currency '{to_curr_val}' must match to_account currency '{to_acc['currency']}'.")
 
     elif candidate_type == "refund":
+        line_dir = statement_line.get("direction") if statement_line else None
+        if line_dir and line_dir != "credit":
+            raise InvalidCandidatePayloadError(f"Refund candidate requires credit statement line, found '{line_dir}'.")
+
         rf_data = merged_payload.get("refund", merged_payload)
         orig_expense_id_str = rf_data.get("original_expense_id") or rf_data.get("original_transaction_id") or rf_data.get("target_transaction_id")
         if orig_expense_id_str:
@@ -650,7 +675,7 @@ def validate_candidate_payload_for_type(
                     cat_id = UUID(str(cat_id_str))
                     cat = accounts_repo.get_category(conn, cat_id)
                     if not cat or cat["household_id"] != household_id or cat["status"] != "active":
-                        raise CategoryResourceNotFoundError(cat_id)
+                        raise CategoryNotFoundError(cat_id)
                     if cat["category_type"] != "expense":
                         raise InvalidCandidatePayloadError("Installment category must be an expense category.")
                 except (ValueError, TypeError):
@@ -842,8 +867,16 @@ def accept_candidate(
     st_line_row = reconciliation_repo.get_statement_line(conn, sl_id) if sl_id else None
     account = accounts_repo.get_account(conn, batch["account_id"])
 
+    # If candidate is MULTIPLE_TRANSACTION_MATCHES, explicit target_transaction_id is strictly required
+    if r_code == "MULTIPLE_TRANSACTION_MATCHES" and not target_transaction_id:
+        raise InvalidCandidatePayloadError("Explicit target_transaction_id is required to accept candidate with MULTIPLE_TRANSACTION_MATCHES.")
+
+    # Unresolved semantic ambiguity cannot be directly accepted without explicit resolution
+    if r_code in ("TYPE_AMBIGUOUS", "INCOME_TRANSFER_REFUND_AMBIGUOUS") and not target_transaction_id:
+        raise InvalidCandidatePayloadError(f"Candidate with ambiguous semantics ({r_code}) requires explicit resolution before acceptance.")
+
     selected_target_tx = None
-    if target_transaction_id or (c_type == "match" and current_target_tx):
+    if target_transaction_id or (c_type == "match" and current_target_tx and r_code != "MULTIPLE_TRANSACTION_MATCHES"):
         selected_target_tx = target_transaction_id or current_target_tx
         target_tx = tx_repo.get_transaction(conn, selected_target_tx)
         if not target_tx or target_tx["household_id"] != household_id:
@@ -921,6 +954,275 @@ def accept_candidate(
     return get_statement_batch_summary(conn, b_id, household_id)
 
 
+def resolve_candidate(
+    conn,
+    candidate_id: UUID,
+    household_id: UUID,
+    resolution_type: str,
+    category_id: Optional[UUID] = None,
+    original_expense_id: Optional[UUID] = None,
+    counter_account_id: Optional[UUID] = None,
+    counter_amount: Optional[Decimal] = None,
+    target_transaction_id: Optional[UUID] = None,
+    user_id: Optional[UUID] = None,
+    device_id: Optional[UUID] = None,
+    fx_service: Optional[ReferenceFxService] = None
+) -> Dict[str, Any]:
+    """
+    Explicitly resolves a semantically ambiguous candidate:
+    - debit lines: 'expense' (requires active expense category) or 'fee' (active expense category)
+    - credit lines: 'cash_income' (active income category), 'refund' (valid original expense), 'transfer' (counter-account & legs), 'match' (target tx)
+    Transitions candidate_type, updates payload, clears reason_code, increments row_version, and recalculates batch.
+    """
+    # 1. Look up candidate
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT id, batch_id, statement_line_id, candidate_type, status,
+                   target_transaction_id, payload, confidence, reason_code, reason_detail
+            FROM reconciliation_candidates
+            WHERE id = %s
+            FOR UPDATE;
+            """,
+            (candidate_id,)
+        )
+        cand_row = cur.fetchone()
+        if not cand_row:
+            raise CandidateResourceNotFoundError(candidate_id)
+
+    c_id, b_id, sl_id, c_type, c_status, current_target_tx, old_payload, conf, r_code, r_detail = cand_row
+
+    if c_status not in ("proposed", "needs_review"):
+        raise InvalidCandidateStateError(f"Candidate in status '{c_status}' cannot be resolved via semantic resolver.")
+
+    if r_code not in ("TYPE_AMBIGUOUS", "INCOME_TRANSFER_REFUND_AMBIGUOUS"):
+        raise InvalidCandidatePayloadError(f"Candidate with reason_code '{r_code}' cannot be resolved via semantic resolver.")
+
+    # 2. Lock batch
+    batch = reconciliation_repo.lock_reconciliation_batch(conn, b_id)
+    if not batch or batch["household_id"] != household_id:
+        raise BatchNotFoundError(b_id)
+
+    if batch["status"] in ("committed", "rejected", "failed"):
+        raise InvalidCandidateStateError(f"Cannot resolve candidate on '{batch['status']}' batch.")
+
+    account = accounts_repo.get_account(conn, batch["account_id"])
+    st_line_row = reconciliation_repo.get_statement_line(conn, sl_id) if sl_id else None
+    if not st_line_row:
+        raise InvalidCandidatePayloadError("Cannot resolve candidate without statement line.")
+
+    line_amt = parse_decimal(st_line_row["settlement_amount"] if st_line_row.get("settlement_amount") is not None else st_line_row["amount"])
+    line_curr = st_line_row["settlement_currency"] if st_line_row.get("settlement_currency") is not None else st_line_row["currency"]
+    line_dir = st_line_row.get("direction")
+    line_date = st_line_row.get("transaction_on")
+    line_merchant = st_line_row.get("merchant_hint") or st_line_row.get("description_normalized") or st_line_row.get("description_raw")
+
+    evidence = old_payload.get("evidence", {}) if isinstance(old_payload, dict) else {}
+
+    new_candidate_type = "create_transaction"
+    new_target_tx = None
+    new_payload: Dict[str, Any] = {"evidence": evidence}
+
+    # Directional semantics enforcement
+    if line_dir == "debit":
+        if resolution_type in ("cash_income", "refund"):
+            raise InvalidCandidatePayloadError(f"Statement debit line cannot be resolved as '{resolution_type}'.")
+        if resolution_type not in ("expense", "fee", "transfer", "create_transfer", "match"):
+            raise InvalidCandidatePayloadError(f"Unsupported resolution type '{resolution_type}'.")
+    elif line_dir == "credit":
+        if resolution_type in ("expense", "fee"):
+            raise InvalidCandidatePayloadError(f"Statement credit line cannot be resolved as '{resolution_type}'.")
+        if resolution_type not in ("cash_income", "refund", "transfer", "create_transfer", "match"):
+            raise InvalidCandidatePayloadError(f"Unsupported resolution type '{resolution_type}'.")
+    elif line_dir == "unknown":
+        if resolution_type != "match":
+            raise InvalidCandidatePayloadError(
+                f"Cannot resolve statement line with unknown direction as '{resolution_type}' without explicit directional facts."
+            )
+    else:
+        raise InvalidCandidatePayloadError(f"Unsupported statement line direction '{line_dir}'.")
+
+    if resolution_type in ("expense", "fee"):
+        if not category_id:
+            raise InvalidCandidatePayloadError(f"Active category is required to resolve as {resolution_type}.")
+        cat = accounts_repo.get_category(conn, category_id)
+        if not cat or cat["household_id"] != household_id or cat["status"] != "active":
+            raise CategoryNotFoundError(category_id)
+        if cat["category_type"] != "expense":
+            raise CategoryMismatchError(f"Category '{cat['name']}' is not an expense category.")
+
+        new_candidate_type = "create_transaction"
+        new_payload["transaction"] = {
+            "transaction_type": resolution_type,
+            "from_account_id": str(account["id"]),
+            "category_id": str(category_id),
+            "amount": f"{line_amt:.2f}",
+            "currency": line_curr,
+            "occurred_on": line_date.isoformat() if isinstance(line_date, date) else str(line_date),
+            "merchant": line_merchant
+        }
+
+    elif resolution_type == "cash_income":
+        if not category_id:
+            raise InvalidCandidatePayloadError("Active income category is required to resolve as cash_income.")
+        cat = accounts_repo.get_category(conn, category_id)
+        if not cat or cat["household_id"] != household_id or cat["status"] != "active":
+            raise CategoryNotFoundError(category_id)
+        if cat["category_type"] != "income":
+            raise CategoryMismatchError(f"Category '{cat['name']}' is not an income category.")
+
+        new_candidate_type = "create_transaction"
+        new_payload["transaction"] = {
+            "transaction_type": "cash_income",
+            "to_account_id": str(account["id"]),
+            "category_id": str(category_id),
+            "amount": f"{line_amt:.2f}",
+            "currency": line_curr,
+            "occurred_on": line_date.isoformat() if isinstance(line_date, date) else str(line_date),
+            "merchant": line_merchant
+        }
+
+    elif resolution_type == "refund":
+        if not original_expense_id:
+            raise InvalidCandidatePayloadError("original_expense_id is required to resolve as refund.")
+        orig_tx = tx_repo.get_transaction(conn, original_expense_id)
+        if not orig_tx or orig_tx["household_id"] != household_id:
+            raise IncompatibleTargetTransactionError("Original expense transaction not found in household.")
+        if orig_tx["status"] != "committed" or orig_tx.get("deleted_at") is not None:
+            raise IncompatibleTargetTransactionError("Original expense transaction is not active.")
+        if orig_tx["transaction_type"] != "expense":
+            raise IncompatibleTargetTransactionError("Refund target must be an expense transaction.")
+        if orig_tx.get("from_account_id") and str(orig_tx["from_account_id"]) != str(account["id"]):
+            raise IncompatibleTargetTransactionError("Original expense does not belong to the reconciled account.")
+
+        if orig_tx.get("from_currency") and orig_tx["from_currency"].upper() != line_curr.upper():
+            raise InvalidCandidatePayloadError(f"Refund currency '{line_curr}' must match original expense currency '{orig_tx['from_currency']}'.")
+
+        orig_total = parse_decimal(orig_tx.get("from_amount") or orig_tx["original_amount"])
+        active_refunds = tx_repo.get_active_refunds_for_expense(conn, orig_tx["id"])
+        already_refunded = sum(parse_decimal(r.get("from_amount") or r.get("to_amount") or r.get("original_amount")) for r in active_refunds)
+        remaining = orig_total - already_refunded
+        if line_amt > remaining:
+            raise RefundExceedsOriginalError(f"Refund amount {line_amt} exceeds remaining refundable amount {remaining}.")
+
+        new_candidate_type = "refund"
+        new_target_tx = original_expense_id
+        new_payload["refund"] = {
+            "original_expense_id": str(original_expense_id),
+            "amount": f"{line_amt:.2f}",
+            "currency": line_curr,
+            "occurred_on": line_date.isoformat() if isinstance(line_date, date) else str(line_date)
+        }
+
+    elif resolution_type in ("transfer", "create_transfer"):
+        if not counter_account_id:
+            raise InvalidCandidatePayloadError("counter_account_id is required to resolve as transfer.")
+        counter_acc = accounts_repo.get_account(conn, counter_account_id)
+        if not counter_acc or counter_acc["household_id"] != household_id:
+            raise AccountNotFoundError(counter_account_id)
+        if counter_acc["status"] != "active":
+            raise AccountInactiveError(counter_account_id)
+        if str(counter_account_id) == str(account["id"]):
+            raise SameAccountTransferError()
+
+        if line_dir == "credit":
+            from_acc_id = counter_account_id
+            to_acc_id = account["id"]
+            to_amt = line_amt
+            to_curr = account["currency"]
+            from_curr = counter_acc["currency"]
+            if from_curr == to_curr:
+                from_amt = to_amt
+            else:
+                if counter_amount is None or parse_decimal(counter_amount) <= Decimal("0.00"):
+                    raise InvalidCandidatePayloadError("Cross-currency transfer requires explicit strictly positive counter_amount.")
+                from_amt = parse_decimal(counter_amount)
+        elif line_dir == "debit":
+            from_acc_id = account["id"]
+            to_acc_id = counter_account_id
+            from_amt = line_amt
+            from_curr = account["currency"]
+            to_curr = counter_acc["currency"]
+            if from_curr == to_curr:
+                to_amt = from_amt
+            else:
+                if counter_amount is None or parse_decimal(counter_amount) <= Decimal("0.00"):
+                    raise InvalidCandidatePayloadError("Cross-currency transfer requires explicit strictly positive counter_amount.")
+                to_amt = parse_decimal(counter_amount)
+        else:
+            raise InvalidCandidatePayloadError("Cannot resolve transfer on statement line with unknown direction without explicit directional facts.")
+
+        new_candidate_type = "create_transfer"
+        new_payload["transfer"] = {
+            "from_account_id": str(from_acc_id),
+            "to_account_id": str(to_acc_id),
+            "from_amount": f"{from_amt:.2f}",
+            "from_currency": from_curr,
+            "to_amount": f"{to_amt:.2f}",
+            "to_currency": to_curr,
+            "occurred_on": line_date.isoformat() if isinstance(line_date, date) else str(line_date)
+        }
+
+    elif resolution_type == "match":
+        if not target_transaction_id:
+            raise InvalidCandidatePayloadError("target_transaction_id is required to resolve as match.")
+        target_tx = tx_repo.get_transaction(conn, target_transaction_id)
+        if not target_tx or target_tx["household_id"] != household_id:
+            raise IncompatibleTargetTransactionError("Target transaction does not exist or does not belong to household.")
+        if target_tx.get("deleted_at") is not None or target_tx["status"] != "committed":
+            raise IncompatibleTargetTransactionError("Target transaction is not active or not committed.")
+
+        norm_line = _row_to_normalized_line(st_line_row)
+        validate_target_match_compatibility(norm_line, target_tx, account["id"])
+
+        new_candidate_type = "match"
+        new_target_tx = target_transaction_id
+
+    else:
+        raise InvalidCandidatePayloadError(f"Unsupported resolution type '{resolution_type}'.")
+
+    # 3. Update candidate row in DB
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE reconciliation_candidates
+            SET candidate_type = %s,
+                target_transaction_id = %s,
+                payload = %s::jsonb,
+                reason_code = NULL,
+                reason_detail = NULL,
+                status = 'needs_review',
+                updated_at = now()
+            WHERE id = %s;
+            """,
+            (new_candidate_type, new_target_tx, json.dumps(new_payload), candidate_id)
+        )
+
+    # 4. Audit resolution
+    audit_repo.insert_audit_event(
+        conn=conn,
+        household_id=household_id,
+        actor_type="device" if device_id else "user",
+        actor_user_id=user_id,
+        actor_device_id=device_id,
+        reconciliation_batch_id=b_id,
+        entity_type="reconciliation_candidate",
+        entity_id=candidate_id,
+        action="update",
+        after_data={
+            "resolution_type": resolution_type,
+            "candidate_type": new_candidate_type,
+            "target_transaction_id": str(new_target_tx) if new_target_tx else None,
+            "payload": new_payload
+        }
+    )
+
+    # 5. Recompute batch summary & readiness
+    recompute_statement_batch_after_review(conn, b_id, household_id, fx_service=fx_service)
+
+    return get_statement_batch_summary(conn, b_id, household_id)
+
+
 def patch_candidate(
     conn,
     candidate_id: UUID,
@@ -934,6 +1236,23 @@ def patch_candidate(
     Edits a candidate payload (e.g. assigning category, counter-account, or adjusting amounts).
     Revalidates domain constraints and recomputes batch state.
     """
+    if "resolution_type" in payload or "resolution" in payload:
+        res_data = payload.get("resolution", payload)
+        return resolve_candidate(
+            conn=conn,
+            candidate_id=candidate_id,
+            household_id=household_id,
+            resolution_type=res_data.get("resolution_type"),
+            category_id=UUID(str(res_data["category_id"])) if res_data.get("category_id") else None,
+            original_expense_id=UUID(str(res_data["original_expense_id"])) if res_data.get("original_expense_id") else None,
+            counter_account_id=UUID(str(res_data["counter_account_id"])) if res_data.get("counter_account_id") else None,
+            counter_amount=parse_decimal(res_data["counter_amount"]) if res_data.get("counter_amount") is not None else None,
+            target_transaction_id=UUID(str(res_data["target_transaction_id"])) if res_data.get("target_transaction_id") else None,
+            user_id=user_id,
+            device_id=device_id,
+            fx_service=fx_service
+        )
+
     # 1. Look up candidate
     with conn.cursor() as cur:
         cur.execute(
@@ -960,12 +1279,29 @@ def patch_candidate(
     if batch["status"] in ("committed", "rejected", "failed"):
         raise InvalidCandidateStateError(f"Cannot edit candidate on '{batch['status']}' batch.")
 
+    if c_status not in ("proposed", "needs_review"):
+        raise InvalidCandidateStateError(f"Cannot edit candidate in '{c_status}' status.")
+
+    # Semantic ambiguity candidates must use /resolve instead of generic PATCH
+    if r_code in ("TYPE_AMBIGUOUS", "INCOME_TRANSFER_REFUND_AMBIGUOUS"):
+        raise InvalidCandidatePayloadError(
+            f"Candidate with semantic ambiguity ({r_code}) must be resolved via /resolve endpoint, not generic PATCH."
+        )
+
     # 3. Validate new payload based on candidate_type
     if not isinstance(payload, dict):
         raise InvalidCandidatePayloadError("Payload must be a JSON object.")
 
     account = accounts_repo.get_account(conn, batch["account_id"])
     st_line_row = reconciliation_repo.get_statement_line(conn, sl_id) if sl_id else None
+
+    # Disallow mutating transaction_type through generic PATCH
+    old_tx_data = old_payload.get("transaction", {}) if isinstance(old_payload, dict) else {}
+    old_tx_type = old_tx_data.get("transaction_type")
+    new_tx_data = payload.get("payload", {}).get("transaction", {}) if isinstance(payload.get("payload"), dict) else payload.get("transaction", {})
+    new_tx_type = new_tx_data.get("transaction_type") if isinstance(new_tx_data, dict) else None
+    if old_tx_type and new_tx_type and new_tx_type != old_tx_type:
+        raise InvalidCandidatePayloadError("Cannot mutate transaction_type via generic PATCH.")
 
     # 4. Merge payload preserving evidence and sub-dictionaries
     merged_payload = dict(old_payload if isinstance(old_payload, dict) else {})
@@ -988,15 +1324,20 @@ def patch_candidate(
         batch_id=b_id
     )
 
+    if c_type == "create_transaction" and merged_payload.get("transaction", {}).get("category_id"):
+        if r_code == "CATEGORY_REQUIRED":
+            r_code = None
+
     with conn.cursor() as cur:
         cur.execute(
             """
             UPDATE reconciliation_candidates
             SET payload = %s::jsonb,
+                reason_code = %s,
                 updated_at = now()
             WHERE id = %s;
             """,
-            (json.dumps(merged_payload), candidate_id)
+            (json.dumps(merged_payload), r_code, candidate_id)
         )
 
     # 5. Audit candidate edit
@@ -1010,10 +1351,14 @@ def patch_candidate(
         entity_type="reconciliation_candidate",
         entity_id=candidate_id,
         action="update",
-        after_data={"payload": merged_payload}
+        after_data={
+            "candidate_type": c_type,
+            "status": c_status,
+            "payload": merged_payload
+        }
     )
 
-    # 6. Recompute batch
+    # 6. Recompute batch summary & readiness
     recompute_statement_batch_after_review(conn, b_id, household_id, fx_service=fx_service)
 
     return get_statement_batch_summary(conn, b_id, household_id)

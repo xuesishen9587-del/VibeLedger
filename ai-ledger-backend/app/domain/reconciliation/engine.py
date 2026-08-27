@@ -188,8 +188,14 @@ def run_deterministic_reconciliation(
             ))
             continue
 
-        # Invariant 2: line_type == "unknown" -> needs_review TYPE_AMBIGUOUS, never automatic expense!
+        # Invariant 2: line_type == "unknown" -> needs_review TYPE_AMBIGUOUS (debit) or INCOME_TRANSFER_REFUND_AMBIGUOUS (credit)
         if line.line_type == "unknown":
+            r_code = INCOME_TRANSFER_REFUND_AMBIGUOUS if line.direction == "credit" else TYPE_AMBIGUOUS
+            r_detail = (
+                "Statement credit could be income, refund, or internal transfer; manual confirmation required"
+                if line.direction == "credit"
+                else "Statement line type is unknown; cannot auto-create transaction"
+            )
             all_candidates.append(CandidateProposal(
                 candidate_type="create_transaction",
                 status="needs_review",
@@ -204,8 +210,8 @@ def run_deterministic_reconciliation(
                         "description": line.description_raw
                     }
                 },
-                reason_code=TYPE_AMBIGUOUS,
-                reason_detail="Statement line type is unknown; cannot auto-create transaction"
+                reason_code=r_code,
+                reason_detail=r_detail
             ))
             continue
 

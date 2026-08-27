@@ -1,7 +1,12 @@
-from fastapi import FastAPI, HTTPException
+import os
+from typing import Any
+from fastapi import FastAPI, HTTPException, Depends
 from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+
 from app.domain.transactions import LedgerDomainError
 from app.domain.auth import AuthError
+from app.api.deps import get_db_connection
 from app.api.errors import (
     ledger_domain_exception_handler,
     auth_domain_exception_handler,
@@ -22,6 +27,8 @@ from app.api.routes.reconciliation import router as reconciliation_router, candi
 from app.api.routes.statements import router as statements_router
 from app.api.routes.investments import router as investments_router
 from app.api.routes.devices import router as devices_router
+from app.api.routes.work_queue import router as work_queue_router
+from app.api.routes.audit import router as audit_router
 
 def create_app() -> FastAPI:
     """
@@ -55,11 +62,128 @@ def create_app() -> FastAPI:
     app.include_router(statements_router)
     app.include_router(investments_router)
     app.include_router(devices_router)
+    app.include_router(work_queue_router)
+    app.include_router(audit_router)
 
-
+    @app.get("/health", tags=["Health"])
     @app.get("/api/v1/health", tags=["Health"])
     def health_check():
-        return {"status": "healthy", "service": "vibeledger-api", "version": "1.0.0"}
+        return {"status": "ok", "service": "vibeledger-api", "version": "1.0.0"}
+
+    @app.get("/ready", tags=["Health"])
+    def readiness_check():
+        import logging
+        from app.db import get_connection
+        from migrations.runner import get_migration_files
+
+        gemini_api_key = os.environ.get("GEMINI_API_KEY")
+        gemini_status = "ok" if (gemini_api_key and gemini_api_key.strip()) else "unavailable"
+
+        conn = None
+        try:
+            target_schema = os.environ.get("DB_SCHEMA")
+            try:
+                from app.config import get_settings
+                s = get_settings()
+                if s and hasattr(s, "DB_SCHEMA") and s.DB_SCHEMA:
+                    target_schema = s.DB_SCHEMA
+                elif s and hasattr(s, "db_schema") and s.db_schema:
+                    target_schema = s.db_schema
+            except Exception:
+                pass
+            conn = get_connection(schema=target_schema)
+        except Exception as e:
+            logging.getLogger("app.readiness").error(f"Readiness DB connection acquisition failed: {e}")
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "status": "unavailable",
+                    "database": "unavailable",
+                    "gemini": gemini_status
+                }
+            )
+
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1;")
+                cur.execute(
+                    """
+                    SELECT EXISTS (
+                        SELECT 1 FROM information_schema.tables 
+                        WHERE table_schema = current_schema() AND table_name = 'schema_migrations'
+                    );
+                    """
+                )
+                has_migrations = cur.fetchone()[0]
+                if not has_migrations:
+                    return JSONResponse(
+                        status_code=503,
+                        content={
+                            "status": "unavailable",
+                            "database": "schema_not_ready",
+                            "gemini": gemini_status
+                        }
+                    )
+
+                from migrations.runner import MIGRATIONS_DIR, get_migration_files
+                import hashlib
+
+                expected_files = get_migration_files()
+                cur.execute("SELECT migration_name, checksum_sha256 FROM schema_migrations;")
+                applied_migrations = {row[0]: row[1] for row in cur.fetchall()}
+
+                for filename in expected_files:
+                    if filename not in applied_migrations:
+                        return JSONResponse(
+                            status_code=503,
+                            content={
+                                "status": "unavailable",
+                                "database": "schema_not_ready",
+                                "gemini": gemini_status
+                            }
+                        )
+                    filepath = os.path.join(MIGRATIONS_DIR, filename)
+                    try:
+                        with open(filepath, "rb") as f:
+                            file_checksum = hashlib.sha256(f.read()).hexdigest()
+                    except Exception:
+                        return JSONResponse(
+                            status_code=503,
+                            content={
+                                "status": "unavailable",
+                                "database": "schema_not_ready",
+                                "gemini": gemini_status
+                            }
+                        )
+                    if applied_migrations[filename] != file_checksum:
+                        return JSONResponse(
+                            status_code=503,
+                            content={
+                                "status": "unavailable",
+                                "database": "schema_not_ready",
+                                "gemini": gemini_status
+                            }
+                        )
+        except Exception as e:
+            logging.getLogger("app.readiness").error(f"Readiness check execution failed: {e}")
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "status": "unavailable",
+                    "database": "unavailable",
+                    "gemini": gemini_status
+                }
+            )
+        finally:
+            if conn and not conn.closed:
+                conn.close()
+
+        overall_status = "ok" if gemini_status == "ok" else "degraded"
+        return {
+            "status": overall_status,
+            "database": "ok",
+            "gemini": gemini_status
+        }
 
     return app
 

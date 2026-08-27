@@ -2,6 +2,7 @@ from typing import Optional, Dict, Any, List
 from uuid import UUID
 from decimal import Decimal, ROUND_HALF_UP
 from datetime import date, datetime, timezone
+from collections import defaultdict
 
 from app.domain.money import quantize_money, parse_decimal, validate_currency_code
 from app.domain.transactions import FxRateUnavailableError, HouseholdMismatchError
@@ -16,7 +17,7 @@ def get_overview(
 ) -> Dict[str, Any]:
     """
     Computes household balance sheet overview, total assets, total liabilities,
-    net worth, and data freshness metrics in the household's reporting currency.
+    net worth, data freshness metrics, and authoritative asset allocation in reporting currency.
     """
     household = get_household(conn, household_id)
     if not household:
@@ -35,6 +36,13 @@ def get_overview(
     confirmed_90d_count = 0
     total_active_accounts = len(active_accounts)
 
+    allocation_dict = {
+        "cash": Decimal("0"),
+        "savings": Decimal("0"),
+        "investment": Decimal("0"),
+        "credit": Decimal("0")
+    }
+
     for acc in active_accounts:
         curr = acc["currency"]
         bal = parse_decimal(acc["ledger_balance"])
@@ -43,7 +51,6 @@ def get_overview(
 
         # 1. Freshness attribution
         if last_snap is not None:
-            # Timezone-aware date difference
             age_days = (as_of.date() - last_snap.date()).days
             if age_days < 0:
                 age_days = 0
@@ -66,12 +73,13 @@ def get_overview(
             if converted_bal < 0:
                 total_liabilities += abs(converted_bal)
             elif converted_bal > 0:
-                # Credit-card overpayment treated as asset
                 total_assets += converted_bal
+                allocation_dict["credit"] += converted_bal
         else:
-            # cash, savings, investment
             if converted_bal >= 0:
                 total_assets += converted_bal
+                if acc_type in allocation_dict:
+                    allocation_dict[acc_type] += converted_bal
             else:
                 total_liabilities += abs(converted_bal)
 
@@ -84,12 +92,40 @@ def get_overview(
         ratio_30d = Decimal("1.0000")
         ratio_90d = Decimal("1.0000")
 
+    asset_allocation = [
+        {
+            "account_type": "cash",
+            "account_type_label": "活期资产",
+            "amount": f"{quantize_money(allocation_dict['cash'], reporting_currency):.2f}",
+            "currency": reporting_currency
+        },
+        {
+            "account_type": "savings",
+            "account_type_label": "储蓄资产",
+            "amount": f"{quantize_money(allocation_dict['savings'], reporting_currency):.2f}",
+            "currency": reporting_currency
+        },
+        {
+            "account_type": "investment",
+            "account_type_label": "投资资产",
+            "amount": f"{quantize_money(allocation_dict['investment'], reporting_currency):.2f}",
+            "currency": reporting_currency
+        },
+        {
+            "account_type": "credit",
+            "account_type_label": "信用溢缴款",
+            "amount": f"{quantize_money(allocation_dict['credit'], reporting_currency):.2f}",
+            "currency": reporting_currency
+        }
+    ]
+
     return {
         "as_of": as_of.isoformat(),
         "reporting_currency": reporting_currency,
         "total_assets": f"{quantize_money(total_assets, reporting_currency):.2f}",
         "total_liabilities": f"{quantize_money(total_liabilities, reporting_currency):.2f}",
         "net_worth": f"{quantize_money(net_worth, reporting_currency):.2f}",
+        "asset_allocation": asset_allocation,
         "data_freshness": {
             "confirmed_within_30d_ratio": f"{ratio_30d:.4f}",
             "confirmed_within_90d_ratio": f"{ratio_90d:.4f}"
@@ -104,7 +140,7 @@ def get_cash_flow(
     fx_service: Optional[ReferenceFxService] = None
 ) -> Dict[str, Any]:
     """
-    Computes household cash flow summary over the given period.
+    Computes household cash flow summary and category breakdown over the given period.
     Household Expense = ordinary expense + fee - refunds.
     Net Cash Flow = cash_income - Household Expense.
     Excludes: transfer, opening_balance, reconciliation_adjustment, investment_pnl.
@@ -119,17 +155,23 @@ def get_cash_flow(
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT id, transaction_type, occurred_on,
-                   from_amount, from_currency,
-                   to_amount, to_currency,
-                   original_amount, original_currency,
-                   reporting_amount, reporting_currency
-            FROM transactions
-            WHERE household_id = %s
-              AND occurred_on >= %s
-              AND occurred_on <= %s
-              AND status = 'committed'
-              AND deleted_at IS NULL;
+            SELECT t.id, t.transaction_type, t.occurred_on,
+                   t.from_amount, t.from_currency,
+                   t.to_amount, t.to_currency,
+                   t.original_amount, t.original_currency,
+                   t.reporting_amount, t.reporting_currency,
+                   COALESCE(t.category_id, orig_t.category_id) AS category_id,
+                   COALESCE(c.name, orig_c.name) AS category_name
+            FROM transactions t
+            LEFT JOIN categories c ON c.id = t.category_id
+            LEFT JOIN transaction_links tl ON tl.target_transaction_id = t.id AND tl.relation_type = 'refund'
+            LEFT JOIN transactions orig_t ON orig_t.id = tl.source_transaction_id
+            LEFT JOIN categories orig_c ON orig_c.id = orig_t.category_id
+            WHERE t.household_id = %s
+              AND t.occurred_on >= %s
+              AND t.occurred_on <= %s
+              AND t.status = 'committed'
+              AND t.deleted_at IS NULL;
             """,
             (household_id, from_date, to_date)
         )
@@ -139,6 +181,7 @@ def get_cash_flow(
     ordinary_expense_total = Decimal("0")
     fee_total = Decimal("0")
     refund_total = Decimal("0")
+    category_totals = defaultdict(Decimal)
 
     for r in rows:
         tx_type = r[1]
@@ -147,6 +190,7 @@ def get_cash_flow(
         to_amt, to_curr = r[5], r[6]
         orig_amt, orig_curr = r[7], r[8]
         rep_amt, rep_curr = r[9], r[10]
+        cat_id, cat_name = r[11], r[12]
 
         # Strictly exclude transfers, opening balances, adjustments
         if tx_type in ("transfer", "opening_balance", "reconciliation_adjustment"):
@@ -183,20 +227,34 @@ def get_cash_flow(
             cash_income_total += converted
         elif tx_type == "expense":
             ordinary_expense_total += converted
+            category_totals[(cat_id, cat_name)] += converted
         elif tx_type == "fee":
             fee_total += converted
+            category_totals[(cat_id, cat_name)] += converted
         elif tx_type == "refund":
             refund_total += converted
+            category_totals[(cat_id, cat_name)] -= converted
 
-    # Household Expense = ordinary expense + fee - refund
+    # Household Expense = ordinary expense + fee - refund (net expense)
     household_expense = ordinary_expense_total + fee_total - refund_total
     net_cash_flow = cash_income_total - household_expense
+
+    expense_by_category = [
+        {
+            "category_id": str(cid) if cid else None,
+            "category_name": cname or "未分类",
+            "amount": f"{quantize_money(amt, reporting_currency):.2f}",
+            "currency": reporting_currency
+        }
+        for (cid, cname), amt in sorted(category_totals.items(), key=lambda x: x[1], reverse=True)
+    ]
 
     return {
         "cash_income": f"{quantize_money(cash_income_total, reporting_currency):.2f}",
         "expense": f"{quantize_money(household_expense, reporting_currency):.2f}",
         "refund": f"{quantize_money(refund_total, reporting_currency):.2f}",
         "net_cash_flow": f"{quantize_money(net_cash_flow, reporting_currency):.2f}",
+        "expense_by_category": expense_by_category,
         "reporting_currency": reporting_currency
     }
 
@@ -208,9 +266,9 @@ def get_investments_summary(
     fx_service: Optional[ReferenceFxService] = None
 ) -> Dict[str, Any]:
     """
-    Reads and aggregates confirmed investment P&L for the household.
+    Reads and aggregates confirmed investment P&L for the household and computes total valuation.
     Investment P&L remains strictly separate from cash income.
-    Converts multi-currency P&L items to the household reporting currency using Decimal FX.
+    Converts multi-currency items to the household reporting currency using Decimal FX.
     """
     household = get_household(conn, household_id)
     if not household:
@@ -219,6 +277,24 @@ def get_investments_summary(
     reporting_currency = household["reporting_currency"]
     fx = fx_service or ReferenceFxService()
 
+    # 1. Authoritative Total Valuation across active investment accounts
+    inv_accounts = list_accounts(conn, household_id, status='active', account_type='investment')
+    total_valuation = Decimal("0")
+    as_of_date = to_date or date.today()
+
+    for acc in inv_accounts:
+        bal = parse_decimal(acc["ledger_balance"])
+        curr = acc["currency"]
+        if curr == reporting_currency:
+            conv = bal
+        else:
+            rate = fx.get_rate(curr, reporting_currency, as_of=as_of_date)
+            if rate is None or rate <= 0:
+                raise FxRateUnavailableError(f"Reference FX rate unavailable for {curr} -> {reporting_currency}")
+            conv = quantize_money(bal * rate, reporting_currency)
+        total_valuation += conv
+
+    # 2. Confirmed P&L Periods
     query = """
         SELECT id, account_id, period_start, period_end,
                contributions_amount, withdrawals_amount, pnl_amount,
@@ -273,6 +349,7 @@ def get_investments_summary(
 
     return {
         "reporting_currency": reporting_currency,
+        "total_valuation": f"{quantize_money(total_valuation, reporting_currency):.2f}",
         "total_pnl": f"{quantize_money(total_pnl, reporting_currency):.2f}",
         "items": items
     }

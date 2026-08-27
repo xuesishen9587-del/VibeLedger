@@ -285,6 +285,12 @@ class TestDashboardApiDb(BaseDbTestCase):
         self.assertEqual(data["total_liabilities"], "8000.00")
         self.assertEqual(data["net_worth"], "56400.00")
 
+        # Authoritative Asset Allocation in Reporting Currency
+        self.assertIn("asset_allocation", data)
+        alloc_map = {item["account_type"]: item for item in data["asset_allocation"]}
+        self.assertEqual(alloc_map["cash"]["amount"], "50000.00")
+        self.assertEqual(alloc_map["savings"]["amount"], "14400.00")
+
         # Freshness:
         # Accounts: 4 total (ICBC Checking, CMB Credit, BOC Credit No Snap, Chase USD)
         # <= 30d: ICBC Checking (5d) -> 1/4 = 0.2500
@@ -308,6 +314,17 @@ class TestDashboardApiDb(BaseDbTestCase):
         self.assertEqual(data["net_cash_flow"], "4080.00")
         self.assertEqual(data["reporting_currency"], "CNY")
 
+        # expense_by_category (net expense by category: 1000.00 Shopping - 100.00 Shopping refund = 900.00 Shopping)
+        self.assertIn("expense_by_category", data)
+        exp_by_cat = data["expense_by_category"]
+        self.assertGreaterEqual(len(exp_by_cat), 1)
+        cat_map = {item["category_name"]: Decimal(item["amount"]) for item in exp_by_cat}
+        self.assertEqual(cat_map["Shopping"], Decimal("900.00"))
+        if "未分类" in cat_map:
+            self.assertEqual(cat_map["未分类"], Decimal("20.00"))
+        # Sum of category expenses equals net household expense
+        self.assertEqual(sum(cat_map.values()), Decimal("920.00"))
+
     def test_dashboard_investments_endpoint(self):
         res = self.client.get("/api/v1/dashboard/investments?from=2026-08-01&to=2026-08-31", headers=self.headers)
         self.assertEqual(res.status_code, 200)
@@ -315,6 +332,7 @@ class TestDashboardApiDb(BaseDbTestCase):
         self.assertEqual(data["reporting_currency"], "CNY")
         # 100.00 CNY + 100.00 USD * 7.20 = 820.00 CNY
         self.assertEqual(data["total_pnl"], "820.00")
+        self.assertIn("total_valuation", data)
         self.assertEqual(len(data["items"]), 2)
 
         items_by_curr = {it["currency"]: it for it in data["items"]}

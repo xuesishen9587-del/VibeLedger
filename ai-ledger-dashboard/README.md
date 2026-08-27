@@ -12,30 +12,33 @@ license: mit
 app_file: app.py
 ---
 
-# VibeLedger Dashboard
+# VibeLedger Dashboard (Phase 11)
+
+VibeLedger Dashboard is a presentation-layer Streamlit frontend that communicates exclusively with the backend service via authenticated `/api/v1/*` REST APIs.
 
 ---
 
-## Current Status & Legacy Implementation
+## Key Characteristics
 
-> **NOTICE**: The code currently in this directory represents the **legacy prototype implementation**.
-> 
-> **Important Architectural Note**:
-> - Current Dashboard directly accesses PostgreSQL via psycopg2. **This is legacy behavior.**
-> - In the target architecture, Dashboard will consume Backend REST APIs exclusively (`/api/v1/*`) and hold no direct database credentials.
-> 
-> **Do not use this README or legacy codebase as the target business specification.**
+1. **Zero Database Access**: The Dashboard maintains no direct PostgreSQL connections, holds no database credentials, and executes no SQL queries.
+2. **REST API Client**: All business operations, domain calculations, reconciliation flows, and asset/liability aggregations are performed by the backend service.
+3. **Browser Authentication**: Uses JWT-based Browser Authentication (`Authorization: Bearer <JWT>`) aligned with Phase 10 specifications.
+4. **Optimistic Concurrency**: Supports full preview and commit workflows for transaction corrections and reconciliation batches with row version conflict detection.
 
 ---
 
-## Target Architecture References
+## Configuration
 
-For target business rules, schemas, API contracts, and implementation sequencing, refer to:
-- [`TARGET_DOMAIN_MODEL.md`](../TARGET_DOMAIN_MODEL.md) — Approved business & domain truth
-- [`docs/architecture/PHYSICAL_SCHEMA.md`](../docs/architecture/PHYSICAL_SCHEMA.md) — Target PostgreSQL persistence contract
-- [`docs/architecture/API_CONTRACT.md`](../docs/architecture/API_CONTRACT.md) — Target `/api/v1` REST API contract
-- [`docs/architecture/RECONCILIATION_ENGINE.md`](../docs/architecture/RECONCILIATION_ENGINE.md) — Target reconciliation and matching engine
-- [`docs/architecture/IMPLEMENTATION_PLAN.md`](../docs/architecture/IMPLEMENTATION_PLAN.md) — Implementation roadmap
-- [`docs/architecture/TEST_PLAN.md`](../docs/architecture/TEST_PLAN.md) — Target verification & test plan
+Set the following environment variables:
+- `BACKEND_URL`: URL of the VibeLedger Backend service (defaults to `http://localhost:8000`).
+- `AUTH_TOKEN`: Optional default Browser JWT Token for authentication.
+- `DASHBOARD_TIMEZONE`: IANA timezone used for local date/time display and snapshot timestamp generation (defaults to `Asia/Singapore`).
 
-For historical prototype documentation, see [`docs/legacy/`](../docs/legacy/README.md).
+---
+
+## Running the Dashboard
+
+```bash
+pip install -r requirements.txt
+streamlit run app.py
+```

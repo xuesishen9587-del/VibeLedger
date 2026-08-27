@@ -97,7 +97,7 @@ async def ledger_domain_exception_handler(request: Request, exc: LedgerDomainErr
     if isinstance(exc, BatchVersionConflictError):
         return build_error_response(409, exc.code, exc.message, retryable=True)
 
-    if isinstance(exc, (IdempotencyKeyReuseError, RowVersionConflictError)):
+    if isinstance(exc, (IdempotencyKeyReuseError, RowVersionConflictError, TransactionAlreadyVoidedError)):
         return build_error_response(409, exc.code, exc.message, retryable=False)
 
     if isinstance(exc, (RequestNotFoundError, ResourceNotFoundError)):

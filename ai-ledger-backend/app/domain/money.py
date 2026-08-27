@@ -41,6 +41,22 @@ def quantize_money(amount: Decimal, currency: str) -> Decimal:
         
     return dec_amount.quantize(target, rounding=ROUND_HALF_UP)
 
+def validate_minor_units(amount: Decimal, currency: str) -> None:
+    """
+    Validates that amount respects the currency minor-unit precision.
+    For JPY (0 minor units): must be integer without fractional cents.
+    For others (2 minor units): must not have fractional sub-cents.
+    """
+    dec_amount = parse_decimal(amount)
+    curr = validate_currency_code(currency)
+    
+    if curr == "JPY":
+        if dec_amount != dec_amount.quantize(Decimal("1")):
+            raise ValueError(f"Currency JPY does not support fractional decimal amounts. Given: {amount}")
+    else:
+        if dec_amount != dec_amount.quantize(Decimal("0.01")):
+            raise ValueError(f"Currency {curr} supports maximum 2 decimal places. Given: {amount}")
+
 def validate_fx_rate(rate: Decimal) -> Decimal:
     """
     Validates that the FX rate is positive and conforms to NUMERIC(24,12) bounds.

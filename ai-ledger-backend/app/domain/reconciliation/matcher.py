@@ -237,6 +237,29 @@ def match_statement_lines_to_transactions(
 
         # Check score margin
         if (best_score - second_best_score) < AUTO_MATCH_MARGIN:
+            options_list = []
+            for rc in candidates[:5]:
+                tx_obj = rc.transaction
+                tx_amt = tx_obj.get("from_amount") or tx_obj.get("to_amount") or tx_obj.get("original_amount")
+                tx_curr = tx_obj.get("from_currency") or tx_obj.get("to_currency") or tx_obj.get("original_currency")
+                occ_on = tx_obj.get("occurred_on").isoformat() if isinstance(tx_obj.get("occurred_on"), date) else str(tx_obj.get("occurred_on")) if tx_obj.get("occurred_on") else None
+                options_list.append({
+                    "transaction_id": str(tx_obj["id"]),
+                    "occurred_on": occ_on,
+                    "merchant": tx_obj.get("merchant"),
+                    "amount": str(tx_amt) if tx_amt is not None else None,
+                    "currency": str(tx_curr) if tx_curr is not None else None,
+                    "match_score": int(rc.score.total_score),
+                    "score_breakdown": {
+                        "amount": rc.score.amount_score,
+                        "date": rc.score.date_score,
+                        "merchant": rc.score.merchant_score,
+                        "type": rc.score.type_score,
+                        "extra": rc.score.extra_score,
+                        "total": rc.score.total_score
+                    }
+                })
+
             match_candidates.append(CandidateProposal(
                 candidate_type="match",
                 status="needs_review",
@@ -253,7 +276,8 @@ def match_statement_lines_to_transactions(
                             "total": best_cand.score.total_score
                         },
                         "second_best_score": second_best_score
-                    }
+                    },
+                    "options": options_list
                 },
                 confidence=Decimal(best_score) / Decimal("100.00"),
                 reason_code=MULTIPLE_TRANSACTION_MATCHES,
@@ -274,6 +298,29 @@ def match_statement_lines_to_transactions(
                 is_tx_unique_best = True
 
         if not is_tx_unique_best:
+            options_list = []
+            for rc in candidates[:5]:
+                tx_obj = rc.transaction
+                tx_amt = tx_obj.get("from_amount") or tx_obj.get("to_amount") or tx_obj.get("original_amount")
+                tx_curr = tx_obj.get("from_currency") or tx_obj.get("to_currency") or tx_obj.get("original_currency")
+                occ_on = tx_obj.get("occurred_on").isoformat() if isinstance(tx_obj.get("occurred_on"), date) else str(tx_obj.get("occurred_on")) if tx_obj.get("occurred_on") else None
+                options_list.append({
+                    "transaction_id": str(tx_obj["id"]),
+                    "occurred_on": occ_on,
+                    "merchant": tx_obj.get("merchant"),
+                    "amount": str(tx_amt) if tx_amt is not None else None,
+                    "currency": str(tx_curr) if tx_curr is not None else None,
+                    "match_score": int(rc.score.total_score),
+                    "score_breakdown": {
+                        "amount": rc.score.amount_score,
+                        "date": rc.score.date_score,
+                        "merchant": rc.score.merchant_score,
+                        "type": rc.score.type_score,
+                        "extra": rc.score.extra_score,
+                        "total": rc.score.total_score
+                    }
+                })
+
             match_candidates.append(CandidateProposal(
                 candidate_type="match",
                 status="needs_review",
@@ -290,7 +337,8 @@ def match_statement_lines_to_transactions(
                             "total": best_cand.score.total_score
                         },
                         "conflict": "Multiple statement lines claim the same transaction"
-                    }
+                    },
+                    "options": options_list
                 },
                 confidence=Decimal(best_score) / Decimal("100.00"),
                 reason_code=MULTIPLE_TRANSACTION_MATCHES,

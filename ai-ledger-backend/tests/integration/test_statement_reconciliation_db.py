@@ -16,6 +16,7 @@ from app.domain.statements import StatementExtractionResult, ParsedStatementLine
 from app.domain.transactions import (
     IncompatibleTargetTransactionError,
     InvalidCandidatePayloadError,
+    InvalidCandidateStateError,
     StatementParseFailedError
 )
 from app.services.statement_parser import validate_and_normalize_extraction
@@ -2600,26 +2601,68 @@ class TestStatementReconciliationDb(BaseDbTestCase):
                 )
                 self.assertEqual(res_cny["status"], "ready")
 
-            # D. Valid USD -> CNY explicit two-leg transfer -> accepted
+            # D. Accepted candidate cannot be patched -> raises InvalidCandidateStateError
+            with transaction(conn):
+                with self.assertRaises(InvalidCandidateStateError):
+                    statement_service.patch_candidate(
+                        conn=conn,
+                        candidate_id=cand_id,
+                        household_id=self.household_id,
+                        payload={
+                            "transfer": {
+                                "from_account_id": str(self.acc_cny_id),
+                                "to_account_id": str(self.acc_usd_id),
+                                "from_amount": "500.00",
+                                "to_amount": "69.44",
+                                "from_currency": "CNY",
+                                "to_currency": "USD"
+                            }
+                        }
+                    )
+
+            # E. Valid CNY -> USD explicit two-leg transfer on fresh candidate -> accepted
+            line2 = NormalizedStatementLine(
+                transaction_on=date(2026, 8, 12),
+                description_raw="Transfer Cross Currency",
+                direction="debit",
+                line_type="transfer",
+                settlement_amount=Decimal("500.00"),
+                settlement_currency="CNY"
+            )
+            with transaction(conn):
+                preview2 = create_statement_reconciliation_batch(
+                    conn=conn,
+                    household_id=self.household_id,
+                    account_id=self.acc_cny_id,
+                    lines=[line2],
+                    authoritative_balance=None,
+                    user_id=self.user_id,
+                    fx_service=self.mock_fx
+                )
+                batch2_id = UUID(preview2["batch_id"])
+
+            cands2 = reconciliation_repo.list_candidates_for_batch(conn, batch2_id)
+            cand2_id = cands2[0]["id"]
+
             with transaction(conn):
                 statement_service.patch_candidate(
                     conn=conn,
-                    candidate_id=cand_id,
+                    candidate_id=cand2_id,
                     household_id=self.household_id,
                     payload={
                         "transfer": {
-                            "from_account_id": str(self.acc_usd_id),
-                            "to_account_id": str(self.acc_cny_id),
-                            "from_amount": "69.44",
-                            "to_amount": "500.00",
-                            "from_currency": "USD",
-                            "to_currency": "CNY"
+                            "from_account_id": str(self.acc_cny_id),
+                            "to_account_id": str(self.acc_usd_id),
+                            "from_amount": "500.00",
+                            "to_amount": "69.44",
+                            "from_currency": "CNY",
+                            "to_currency": "USD"
                         }
                     }
                 )
                 res_cross = statement_service.accept_candidate(
                     conn=conn,
-                    candidate_id=cand_id,
+                    candidate_id=cand2_id,
                     household_id=self.household_id,
                     user_id=self.user_id,
                     fx_service=self.mock_fx

@@ -12,7 +12,7 @@ import pypdf
 from fastapi.testclient import TestClient
 
 from app.main import create_app
-from app.db import get_connection
+from app.db import get_connection, transaction
 from app.api.deps import get_db_connection
 from app.services.reference_fx_service import ReferenceFxService
 from app.domain.statements import ParsedStatementLine, StatementExtractionResult
@@ -21,6 +21,7 @@ from app.api.routes.statements import router as statements_router
 from app.api.routes.reconciliation import router as reconciliation_router, candidates_router as reconciliation_candidates_router
 from tests.support.db_helper import BaseDbTestCase
 import app.repositories.reconciliation as reconciliation_repo
+import app.repositories.transactions as tx_repo
 
 
 def make_pdf_bytes(text_lines: list[str], password: str = None) -> bytes:
@@ -504,6 +505,221 @@ class TestStatementApiDb(BaseDbTestCase):
         self.assertEqual(commit2.status_code, 200)
         self.assertEqual(commit2.json()["summary"]["matched_count"], 1)
         self.assertEqual(commit2.json()["summary"]["created_count"], 0)
+
+
+    def test_ambiguous_match_options_and_review_workflow(self):
+        """
+        Tests ambiguous candidate review:
+        1. Two plausible transactions exist.
+        2. Matcher flags MULTIPLE_TRANSACTION_MATCHES and includes options in preview.
+        3. Accept without target is rejected.
+        4. Accept with invalid / cross-household target is rejected.
+        5. Accept with valid selected target transaction succeeds.
+        6. Batch row_version increments and commit succeeds.
+        """
+        # Create two similar transactions
+        tx_a_id = uuid4()
+        tx_b_id = uuid4()
+        tx_cross_id = uuid4()
+        conn = get_connection(self.test_schema)
+        try:
+            with transaction(conn):
+                tx_repo.create_transaction(
+                    conn, tx_a_id, self.household_id, "expense", date(2026, 7, 20),
+                    original_amount=Decimal("199.00"), original_currency="CNY",
+                    from_amount=Decimal("199.00"), from_currency="CNY",
+                    from_account_id=self.acc_cny_id, category_id=self.cat_dining_id,
+                    merchant="Starbucks Coffee", status="committed"
+                )
+                tx_repo.create_transaction(
+                    conn, tx_b_id, self.household_id, "expense", date(2026, 7, 21),
+                    original_amount=Decimal("199.00"), original_currency="CNY",
+                    from_amount=Decimal("199.00"), from_currency="CNY",
+                    from_account_id=self.acc_cny_id, category_id=self.cat_dining_id,
+                    merchant="Starbucks Coffee", status="committed"
+                )
+                # Cross-household transaction
+                tx_repo.create_transaction(
+                    conn, tx_cross_id, self.household_b_id, "expense", date(2026, 7, 20),
+                    original_amount=Decimal("199.00"), original_currency="CNY",
+                    from_amount=Decimal("199.00"), from_currency="CNY",
+                    from_account_id=self.acc_b_id, category_id=self.cat_dining_id,
+                    merchant="Starbucks", status="committed"
+                )
+        finally:
+            conn.close()
+
+        # Upload statement line with ambiguous match
+        pdf_bytes = make_pdf_bytes(["Statement Starbucks July 2026"])
+        mock_extraction = StatementExtractionResult(
+            period_start=date(2026, 7, 1),
+            period_end=date(2026, 7, 31),
+            closing_balance=Decimal("-199.00"),
+            currency="CNY",
+            lines=[
+                ParsedStatementLine(
+                    source_page_no=1,
+                    source_row_no=1,
+                    transaction_on=date(2026, 7, 20),
+                    description_raw="Starbucks Coffee",
+                    amount=Decimal("199.00"),
+                    currency="CNY",
+                    direction="debit",
+                    line_type="expense",
+                    merchant_hint="Starbucks Coffee"
+                )
+            ]
+        )
+        statements_router._statement_parser = MockStatementParser(result=mock_extraction)
+
+        res_upload = self.client.post(
+            f"/api/v1/accounts/{self.acc_cny_id}/statements",
+            headers=self.headers,
+            files={"file": ("statement.pdf", pdf_bytes, "application/pdf")},
+            data={"default_expense_category_id": str(self.cat_dining_id)}
+        )
+        self.assertEqual(res_upload.status_code, 201)
+        batch_id = res_upload.json()["batch_id"]
+
+        # Preview exposes options
+        prev_res = self.client.get(f"/api/v1/reconciliation-batches/{batch_id}/preview", headers=self.headers)
+        self.assertEqual(prev_res.status_code, 200)
+        match_cands = [c for c in prev_res.json()["candidates"] if c["candidate_type"] == "match"]
+        self.assertEqual(len(match_cands), 1)
+        cand = match_cands[0]
+        cand_id = cand["id"]
+        self.assertEqual(cand["status"], "needs_review")
+        self.assertEqual(cand["reason_code"], "MULTIPLE_TRANSACTION_MATCHES")
+        self.assertIn("options", cand)
+        self.assertGreaterEqual(len(cand["options"]), 2)
+
+        opt_tx_ids = [opt["transaction_id"] for opt in cand["options"]]
+        self.assertIn(str(tx_a_id), opt_tx_ids)
+        self.assertIn(str(tx_b_id), opt_tx_ids)
+
+        # 1. Accept without explicit target_transaction_id must be rejected
+        accept_no_target = self.client.post(
+            f"/api/v1/reconciliation-candidates/{cand_id}/accept",
+            headers=self.headers,
+            json={}
+        )
+        self.assertEqual(accept_no_target.status_code, 422)
+
+        # 2. Accept with cross-household target must be rejected
+        accept_cross = self.client.post(
+            f"/api/v1/reconciliation-candidates/{cand_id}/accept",
+            headers=self.headers,
+            json={"target_transaction_id": str(tx_cross_id)}
+        )
+        self.assertEqual(accept_cross.status_code, 422)
+
+        # 3. Accept with Option A succeeds
+        accept_ok = self.client.post(
+            f"/api/v1/reconciliation-candidates/{cand_id}/accept",
+            headers=self.headers,
+            json={"target_transaction_id": str(tx_a_id)}
+        )
+        self.assertEqual(accept_ok.status_code, 200)
+        self.assertIn(accept_ok.json()["status"], ("ready", "needs_review"))
+
+        # Refreshed preview reflects accepted candidate and updated batch row_version
+        prev_after = self.client.get(f"/api/v1/reconciliation-batches/{batch_id}/preview", headers=self.headers)
+        self.assertEqual(prev_after.status_code, 200)
+        cand_after = [c for c in prev_after.json()["candidates"] if c["id"] == cand_id][0]
+        self.assertEqual(cand_after["status"], "accepted")
+        self.assertGreater(prev_after.json()["batch"]["row_version"], 0)
+
+        # Commit batch succeeds
+        commit_res = self.client.post(
+            f"/api/v1/reconciliation-batches/{batch_id}/commit",
+            headers=self.headers,
+            json={"row_version": prev_after.json()["batch"]["row_version"]}
+        )
+        self.assertEqual(commit_res.status_code, 200)
+        self.assertEqual(commit_res.json()["status"], "committed")
+
+    def test_candidate_category_patch_and_commit_workflow(self):
+        """
+        Tests candidate patch workflow:
+        1. Statement creates candidate without default category.
+        2. Candidate has CATEGORY_REQUIRED reason.
+        3. Invalid category patch -> 422.
+        4. Valid category patch updates payload and increments batch row_version.
+        5. Accept and batch commit succeed.
+        """
+        pdf_bytes = make_pdf_bytes(["Statement Grocery July 2026"])
+        mock_extraction = StatementExtractionResult(
+            period_start=date(2026, 7, 1),
+            period_end=date(2026, 7, 31),
+            closing_balance=Decimal("-88.00"),
+            currency="CNY",
+            lines=[
+                ParsedStatementLine(
+                    source_page_no=1,
+                    source_row_no=1,
+                    transaction_on=date(2026, 7, 25),
+                    description_raw="Supermarket Organic",
+                    amount=Decimal("88.00"),
+                    currency="CNY",
+                    direction="debit",
+                    line_type="expense"
+                )
+            ]
+        )
+        statements_router._statement_parser = MockStatementParser(result=mock_extraction)
+
+        # Upload without default category
+        res_upload = self.client.post(
+            f"/api/v1/accounts/{self.acc_cny_id}/statements",
+            headers=self.headers,
+            files={"file": ("statement.pdf", pdf_bytes, "application/pdf")}
+        )
+        self.assertEqual(res_upload.status_code, 201)
+        batch_id = res_upload.json()["batch_id"]
+
+        prev_res = self.client.get(f"/api/v1/reconciliation-batches/{batch_id}/preview", headers=self.headers)
+        cand = prev_res.json()["candidates"][0]
+        cand_id = cand["id"]
+        v_before = prev_res.json()["batch"]["row_version"]
+
+        # 1. Invalid category UUID -> 422
+        patch_bad = self.client.patch(
+            f"/api/v1/reconciliation-candidates/{cand_id}",
+            headers=self.headers,
+            json={"payload": {"transaction": {"category_id": str(uuid4())}}}
+        )
+        self.assertEqual(patch_bad.status_code, 422)
+
+        # 2. Valid category patch -> 200
+        patch_ok = self.client.patch(
+            f"/api/v1/reconciliation-candidates/{cand_id}",
+            headers=self.headers,
+            json={"payload": {"transaction": {"category_id": str(self.cat_dining_id)}}}
+        )
+        self.assertEqual(patch_ok.status_code, 200)
+
+        # 3. Batch row_version changed
+        prev_after_patch = self.client.get(f"/api/v1/reconciliation-batches/{batch_id}/preview", headers=self.headers)
+        v_after = prev_after_patch.json()["batch"]["row_version"]
+        self.assertGreater(v_after, v_before)
+
+        # 4. Accept candidate
+        accept_res = self.client.post(
+            f"/api/v1/reconciliation-candidates/{cand_id}/accept",
+            headers=self.headers,
+            json={}
+        )
+        self.assertEqual(accept_res.status_code, 200)
+
+        # 5. Commit with latest row_version succeeds
+        prev_final = self.client.get(f"/api/v1/reconciliation-batches/{batch_id}/preview", headers=self.headers)
+        commit_res = self.client.post(
+            f"/api/v1/reconciliation-batches/{batch_id}/commit",
+            headers=self.headers,
+            json={"row_version": prev_final.json()["batch"]["row_version"]}
+        )
+        self.assertEqual(commit_res.status_code, 200)
+        self.assertEqual(commit_res.json()["status"], "committed")
 
 
 if __name__ == "__main__":

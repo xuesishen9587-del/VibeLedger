@@ -314,12 +314,16 @@ class TestDashboardApiDb(BaseDbTestCase):
         self.assertEqual(data["net_cash_flow"], "4080.00")
         self.assertEqual(data["reporting_currency"], "CNY")
 
-        # expense_by_category
+        # expense_by_category (net expense by category: 1000.00 Shopping - 100.00 Shopping refund = 900.00 Shopping)
         self.assertIn("expense_by_category", data)
         exp_by_cat = data["expense_by_category"]
         self.assertGreaterEqual(len(exp_by_cat), 1)
-        self.assertEqual(exp_by_cat[0]["category_name"], "Shopping")
-        self.assertEqual(exp_by_cat[0]["amount"], "1000.00")
+        cat_map = {item["category_name"]: Decimal(item["amount"]) for item in exp_by_cat}
+        self.assertEqual(cat_map["Shopping"], Decimal("900.00"))
+        if "未分类" in cat_map:
+            self.assertEqual(cat_map["未分类"], Decimal("20.00"))
+        # Sum of category expenses equals net household expense
+        self.assertEqual(sum(cat_map.values()), Decimal("920.00"))
 
     def test_dashboard_investments_endpoint(self):
         res = self.client.get("/api/v1/dashboard/investments?from=2026-08-01&to=2026-08-31", headers=self.headers)

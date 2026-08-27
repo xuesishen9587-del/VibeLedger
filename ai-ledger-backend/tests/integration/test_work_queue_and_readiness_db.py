@@ -32,6 +32,15 @@ class TestWorkQueueAndReadinessDb(BaseDbTestCase):
                 if not conn.closed:
                     conn.close()
 
+        os.environ["DB_SCHEMA"] = cls.test_schema
+        try:
+            from app.config import get_settings
+            s = get_settings()
+            if s:
+                s.db_schema = cls.test_schema
+        except Exception:
+            pass
+
         cls.app.dependency_overrides[get_db_connection] = _get_db
         cls.static_verifier = StaticBrowserAuthVerifier()
         set_browser_verifier(cls.static_verifier)
@@ -166,3 +175,50 @@ class TestWorkQueueAndReadinessDb(BaseDbTestCase):
             self.assertEqual(resp_ok.json()["status"], "ok")
             self.assertEqual(resp_ok.json()["gemini"], "ok")
             self.assertEqual(resp_ok.json()["database"], "ok")
+
+        # 4. Connection acquisition failure -> 503 unavailable
+        with patch("app.db.get_connection", side_effect=Exception("Database pool exhausted")):
+            resp_conn_fail = self.client.get("/ready")
+            self.assertEqual(resp_conn_fail.status_code, 503)
+            self.assertEqual(resp_conn_fail.json()["status"], "unavailable")
+            self.assertEqual(resp_conn_fail.json()["database"], "unavailable")
+
+        # 5. Query execution failure -> 503 unavailable
+        mock_bad_conn = MagicMock()
+        mock_bad_cur = MagicMock()
+        mock_bad_cur.execute.side_effect = Exception("Fatal database query error")
+        mock_bad_conn.cursor.return_value.__enter__.return_value = mock_bad_cur
+        with patch("app.db.get_connection", return_value=mock_bad_conn):
+            resp_query_fail = self.client.get("/ready")
+            self.assertEqual(resp_query_fail.status_code, 503)
+            self.assertEqual(resp_query_fail.json()["status"], "unavailable")
+            self.assertEqual(resp_query_fail.json()["database"], "unavailable")
+
+        # 6. Missing schema_migrations table -> 503 schema_not_ready
+        mock_no_table_conn = MagicMock()
+        mock_no_table_cur = MagicMock()
+        mock_no_table_cur.execute.return_value = None
+        mock_no_table_cur.fetchone.return_value = [False]
+        mock_no_table_conn.cursor.return_value.__enter__.return_value = mock_no_table_cur
+        with patch("app.db.get_connection", return_value=mock_no_table_conn):
+            resp_no_table = self.client.get("/ready")
+            self.assertEqual(resp_no_table.status_code, 503)
+            self.assertEqual(resp_no_table.json()["status"], "unavailable")
+            self.assertEqual(resp_no_table.json()["database"], "schema_not_ready")
+
+        # 7. Stale migration version -> 503 schema_not_ready
+        mock_stale_conn = MagicMock()
+        mock_stale_cur = MagicMock()
+        mock_stale_cur.execute.return_value = None
+        mock_stale_cur.fetchone.return_value = [True]
+        mock_stale_cur.fetchall.return_value = [("0001_extensions.sql",)]  # Only 1 of 9 migrations applied
+        mock_stale_conn.cursor.return_value.__enter__.return_value = mock_stale_cur
+        with patch("app.db.get_connection", return_value=mock_stale_conn):
+            resp_stale = self.client.get("/ready")
+            self.assertEqual(resp_stale.status_code, 503)
+            self.assertEqual(resp_stale.json()["status"], "unavailable")
+            self.assertEqual(resp_stale.json()["database"], "schema_not_ready")
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -578,7 +578,9 @@ def update_transaction_fields(
     remarks: Optional[str] = None,
     from_amount: Optional[Decimal] = None,
     to_amount: Optional[Decimal] = None,
-    reporting_amount: Optional[Decimal] = None
+    original_amount: Optional[Decimal] = None,
+    reporting_amount: Optional[Decimal] = None,
+    effective_fx_rate: Optional[Decimal] = None
 ) -> None:
     """
     Updates the specified fields on a transaction and increments row_version.
@@ -594,7 +596,9 @@ def update_transaction_fields(
                 remarks = COALESCE(%(remarks)s, remarks),
                 from_amount = COALESCE(%(from_amount)s, from_amount),
                 to_amount = COALESCE(%(to_amount)s, to_amount),
+                original_amount = COALESCE(%(original_amount)s, original_amount),
                 reporting_amount = COALESCE(%(reporting_amount)s, reporting_amount),
+                effective_fx_rate = COALESCE(%(effective_fx_rate)s, effective_fx_rate),
                 row_version = row_version + 1,
                 updated_at = now()
             WHERE id = %(transaction_id)s;
@@ -607,7 +611,9 @@ def update_transaction_fields(
                 "remarks": remarks,
                 "from_amount": from_amount,
                 "to_amount": to_amount,
+                "original_amount": original_amount,
                 "reporting_amount": reporting_amount,
+                "effective_fx_rate": effective_fx_rate,
                 "transaction_id": transaction_id
             }
         )

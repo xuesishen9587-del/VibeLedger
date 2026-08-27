@@ -314,3 +314,124 @@ class TestTransactionCorrectionsApiDb(BaseDbTestCase):
             json={"expected_version": 0, "changes": {"from_amount": "1000.50"}}
         )
         self.assertEqual(resp_jpy_frac.status_code, 422)
+
+    def test_transaction_shape_invariants_and_cross_field_reprojection(self):
+        headers = {"Authorization": f"Bearer {self.browser_token}"}
+
+        # 1. Expense cannot have to_amount
+        exp_tx = ledger_service.record_expense(
+            self.conn,
+            household_id=self.household_id,
+            from_account_id=self.account_id,
+            amount=Decimal("100.00"),
+            currency="CNY",
+            category_id=self.category_id,
+            occurred_on=date(2026, 8, 2),
+            merchant="Cafe",
+            created_by_user_id=self.user_id
+        )
+        self.conn.commit()
+        resp_exp_bad = self.client.post(
+            f"/api/v1/transactions/{exp_tx['id']}/corrections/commit",
+            headers=headers,
+            json={"expected_version": 0, "changes": {"to_amount": "100.00"}}
+        )
+        self.assertEqual(resp_exp_bad.status_code, 422)
+
+        # 2. Income cannot have from_amount
+        inc_tx = ledger_service.record_cash_income(
+            self.conn,
+            household_id=self.household_id,
+            to_account_id=self.account_id,
+            amount=Decimal("5000.00"),
+            currency="CNY",
+            category_id=self.income_category_id,
+            occurred_on=date(2026, 8, 3),
+            merchant="Employer",
+            created_by_user_id=self.user_id
+        )
+        self.conn.commit()
+        resp_inc_bad = self.client.post(
+            f"/api/v1/transactions/{inc_tx['id']}/corrections/commit",
+            headers=headers,
+            json={"expected_version": 0, "changes": {"from_amount": "5000.00"}}
+        )
+        self.assertEqual(resp_inc_bad.status_code, 422)
+
+        # 3. Successful same-currency expense correction updates original_amount, from_amount, reporting_amount
+        resp_exp_ok = self.client.post(
+            f"/api/v1/transactions/{exp_tx['id']}/corrections/commit",
+            headers=headers,
+            json={"expected_version": 0, "changes": {"from_amount": "125.00", "merchant": "Specialty Cafe"}}
+        )
+        self.assertEqual(resp_exp_ok.status_code, 200)
+        detail = resp_exp_ok.json()
+        self.assertEqual(detail["from_amount"], "125.00")
+        self.assertEqual(detail["original_amount"], "125.00")
+        self.assertEqual(detail["reporting_amount"], "125.00")
+        self.assertEqual(detail["merchant"], "Specialty Cafe")
+        self.assertEqual(detail["row_version"], 1)
+
+        # 4. Same-currency transfer maintains equality and FX=1.0
+        acc_b_id = uuid4()
+        accounts_repo.create_account(
+            self.conn,
+            account_id=acc_b_id,
+            household_id=self.household_id,
+            name="Bank B",
+            institution="B",
+            account_type="cash",
+            currency="CNY",
+            owner_user_id=self.user_id
+        )
+        self.conn.commit()
+        transfer_tx = ledger_service.record_transfer(
+            self.conn,
+            household_id=self.household_id,
+            from_account_id=self.account_id,
+            to_account_id=acc_b_id,
+            from_amount=Decimal("300.00"),
+            to_amount=Decimal("300.00"),
+            from_currency="CNY",
+            to_currency="CNY",
+            occurred_on=date(2026, 8, 4),
+            created_by_user_id=self.user_id
+        )
+        self.conn.commit()
+
+        # Mismatched amounts on same currency transfer -> 422
+        resp_trans_bad = self.client.post(
+            f"/api/v1/transactions/{transfer_tx['id']}/corrections/commit",
+            headers=headers,
+            json={"expected_version": 0, "changes": {"from_amount": "400.00", "to_amount": "450.00"}}
+        )
+        self.assertEqual(resp_trans_bad.status_code, 422)
+
+        # Updating one leg updates both and effective_fx_rate=1.0
+        resp_trans_ok = self.client.post(
+            f"/api/v1/transactions/{transfer_tx['id']}/corrections/commit",
+            headers=headers,
+            json={"expected_version": 0, "changes": {"from_amount": "500.00"}}
+        )
+        self.assertEqual(resp_trans_ok.status_code, 200)
+        trans_detail = resp_trans_ok.json()
+        self.assertEqual(trans_detail["from_amount"], "500.00")
+        self.assertEqual(trans_detail["to_amount"], "500.00")
+        self.assertEqual(Decimal(str(trans_detail["effective_fx_rate"])), Decimal("1.000000000000"))
+
+        # 5. System adjustment transactions reject amount corrections
+        adj_tx = ledger_service.record_reconciliation_adjustment(
+            self.conn,
+            household_id=self.household_id,
+            account_id=self.account_id,
+            amount=Decimal("50.00"),
+            currency="CNY",
+            occurred_on=date(2026, 8, 5)
+        )
+        self.conn.commit()
+        resp_adj_bad = self.client.post(
+            f"/api/v1/transactions/{adj_tx['id']}/corrections/commit",
+            headers=headers,
+            json={"expected_version": 0, "changes": {"from_amount": "80.00"}}
+        )
+        self.assertEqual(resp_adj_bad.status_code, 422)

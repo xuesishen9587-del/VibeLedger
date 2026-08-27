@@ -19,6 +19,7 @@ from app.domain.transactions import (
     InvalidCandidatePayloadError,
     IncompatibleTargetTransactionError,
     StatementParseFailedError,
+    CategoryNotFoundError,
     CategoryResourceNotFoundError,
     CategoryMismatchError,
     SameAccountTransferError
@@ -324,7 +325,8 @@ def get_statement_batch_preview(
             "confidence": str(c["confidence"]) if c.get("confidence") is not None else None,
             "reason_code": c.get("reason_code"),
             "reason_detail": c.get("reason_detail"),
-            "payload": c.get("payload")
+            "payload": c.get("payload"),
+            "options": c.get("payload", {}).get("options", []) if isinstance(c.get("payload"), dict) else []
         }
         if c.get("statement_line_id") and c["statement_line_id"] in line_map:
             sl = line_map[c["statement_line_id"]]
@@ -490,7 +492,7 @@ def validate_candidate_payload_for_type(
                 cat_id = UUID(str(cat_id_str))
                 cat = accounts_repo.get_category(conn, cat_id)
                 if not cat or cat["household_id"] != household_id or cat["status"] != "active":
-                    raise CategoryResourceNotFoundError(cat_id)
+                    raise CategoryNotFoundError(cat_id)
                 if tx_type in ("expense", "fee") and cat["category_type"] != "expense":
                     raise InvalidCandidatePayloadError(f"Category type '{cat['category_type']}' is not valid for {tx_type} transaction.")
                 if tx_type == "cash_income" and cat["category_type"] != "income":
@@ -650,7 +652,7 @@ def validate_candidate_payload_for_type(
                     cat_id = UUID(str(cat_id_str))
                     cat = accounts_repo.get_category(conn, cat_id)
                     if not cat or cat["household_id"] != household_id or cat["status"] != "active":
-                        raise CategoryResourceNotFoundError(cat_id)
+                        raise CategoryNotFoundError(cat_id)
                     if cat["category_type"] != "expense":
                         raise InvalidCandidatePayloadError("Installment category must be an expense category.")
                 except (ValueError, TypeError):
@@ -842,8 +844,12 @@ def accept_candidate(
     st_line_row = reconciliation_repo.get_statement_line(conn, sl_id) if sl_id else None
     account = accounts_repo.get_account(conn, batch["account_id"])
 
+    # If candidate is MULTIPLE_TRANSACTION_MATCHES, explicit target_transaction_id is strictly required
+    if r_code == "MULTIPLE_TRANSACTION_MATCHES" and not target_transaction_id:
+        raise InvalidCandidatePayloadError("Explicit target_transaction_id is required to accept candidate with MULTIPLE_TRANSACTION_MATCHES.")
+
     selected_target_tx = None
-    if target_transaction_id or (c_type == "match" and current_target_tx):
+    if target_transaction_id or (c_type == "match" and current_target_tx and r_code != "MULTIPLE_TRANSACTION_MATCHES"):
         selected_target_tx = target_transaction_id or current_target_tx
         target_tx = tx_repo.get_transaction(conn, selected_target_tx)
         if not target_tx or target_tx["household_id"] != household_id:

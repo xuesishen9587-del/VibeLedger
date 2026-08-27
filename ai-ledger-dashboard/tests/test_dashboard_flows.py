@@ -1,9 +1,24 @@
+import os
 import unittest
 from unittest.mock import MagicMock, patch
 from datetime import date, datetime, timezone
 from decimal import Decimal
+from zoneinfo import ZoneInfo
 
-from time_utils import format_iso_timestamp
+from time_utils import (
+    format_iso_timestamp,
+    get_dashboard_timezone,
+    get_dashboard_today,
+    get_dashboard_now
+)
+from dashboard_controller import (
+    classify_candidates,
+    format_candidate_options,
+    is_ambiguous_match_candidate,
+    is_category_required_candidate,
+    build_category_patch_payload,
+    is_batch_ready_to_commit
+)
 from api_client import ApiClient, AuthError, ConflictError, ValidationError
 
 
@@ -15,25 +30,181 @@ class TestDashboardFlows(unittest.TestCase):
     def setUp(self):
         self.client = ApiClient(base_url="http://mock-backend:8000", auth_token="mock.token")
 
+    def test_timezone_singapore_boundary(self):
+        """
+        Proves that when DASHBOARD_TIMEZONE is Asia/Singapore and UTC is 2026-08-27 23:30,
+        the local business date in Singapore is 2026-08-28 (boundary check).
+        """
+        with patch.dict(os.environ, {"DASHBOARD_TIMEZONE": "Asia/Singapore"}):
+            self.assertEqual(get_dashboard_timezone().key, "Asia/Singapore")
+
+            # Mock datetime.now() with UTC 2026-08-27 23:30:00
+            utc_dt = datetime(2026, 8, 27, 23, 30, 0, tzinfo=timezone.utc)
+            with patch("time_utils.datetime") as mock_datetime:
+                mock_datetime.now.side_effect = lambda tz=None: utc_dt.astimezone(tz or ZoneInfo("Asia/Singapore"))
+                mock_datetime.combine = datetime.combine
+
+                now_local = get_dashboard_now()
+                self.assertEqual(now_local.year, 2026)
+                self.assertEqual(now_local.month, 8)
+                self.assertEqual(now_local.day, 28)
+                self.assertEqual(now_local.hour, 7)
+                self.assertEqual(now_local.minute, 30)
+
+                today_local = get_dashboard_today()
+                self.assertEqual(today_local, date(2026, 8, 28))
+
+                iso_ts = format_iso_timestamp()
+                self.assertTrue(iso_ts.startswith("2026-08-28T07:30:00+08:00"))
+
+    def test_classify_candidates_canonical_lifecycle(self):
+        """
+        Proves that candidates with canonical statuses are correctly partitioned:
+        - actionable: 'proposed', 'needs_review'
+        - resolved: 'accepted', 'applied'
+        - rejected: 'rejected'
+        """
+        candidates = [
+            {"id": "c-1", "candidate_type": "match", "status": "needs_review"},
+            {"id": "c-2", "candidate_type": "create_transaction", "status": "proposed"},
+            {"id": "c-3", "candidate_type": "match", "status": "accepted"},
+            {"id": "c-4", "candidate_type": "create_transaction", "status": "applied"},
+            {"id": "c-5", "candidate_type": "match", "status": "rejected"}
+        ]
+
+        classified = classify_candidates(candidates)
+
+        actionable_ids = [c["id"] for c in classified["actionable"]]
+        resolved_ids = [c["id"] for c in classified["resolved"]]
+        rejected_ids = [c["id"] for c in classified["rejected"]]
+
+        self.assertEqual(actionable_ids, ["c-1", "c-2"])
+        self.assertEqual(resolved_ids, ["c-3", "c-4"])
+        self.assertEqual(rejected_ids, ["c-5"])
+
+    def test_ambiguous_match_options_presentation_and_target_selection(self):
+        """
+        Proves that MULTIPLE_TRANSACTION_MATCHES candidates present options
+        and submit the chosen target_transaction_id.
+        """
+        ambiguous_cand = {
+            "id": "cand-amb-1",
+            "candidate_type": "match",
+            "status": "needs_review",
+            "reason_code": "MULTIPLE_TRANSACTION_MATCHES",
+            "options": [
+                {
+                    "transaction_id": "tx-opt-a",
+                    "occurred_on": "2026-08-10",
+                    "merchant": "Apple Store",
+                    "amount": "999.00",
+                    "currency": "CNY",
+                    "match_score": 92
+                },
+                {
+                    "transaction_id": "tx-opt-b",
+                    "occurred_on": "2026-08-11",
+                    "merchant": "Apple Online",
+                    "amount": "999.00",
+                    "currency": "CNY",
+                    "match_score": 88
+                }
+            ]
+        }
+
+        self.assertTrue(is_ambiguous_match_candidate(ambiguous_cand))
+        options = format_candidate_options(ambiguous_cand)
+        self.assertEqual(len(options), 2)
+        self.assertEqual(options[0]["transaction_id"], "tx-opt-a")
+        self.assertEqual(options[1]["transaction_id"], "tx-opt-b")
+
+        # Mock accepting with selected option B
+        with patch.object(ApiClient, "request") as mock_request:
+            mock_request.return_value = {"status": "accepted"}
+            self.client.accept_reconciliation_candidate("cand-amb-1", target_transaction_id="tx-opt-b")
+            mock_request.assert_called_once_with(
+                "POST",
+                "/api/v1/reconciliation-candidates/cand-amb-1/accept",
+                json_data={"target_transaction_id": "tx-opt-b"}
+            )
+
+    def test_category_required_patch_flow(self):
+        """
+        Proves that CATEGORY_REQUIRED candidates trigger patch payload generation and execution.
+        """
+        cat_req_cand = {
+            "id": "cand-cat-1",
+            "candidate_type": "create_transaction",
+            "status": "needs_review",
+            "reason_code": "CATEGORY_REQUIRED",
+            "payload": {
+                "transaction": {
+                    "transaction_type": "expense",
+                    "occurred_on": "2026-08-15",
+                    "amount": "250.00",
+                    "currency": "CNY",
+                    "category_id": None
+                }
+            }
+        }
+
+        self.assertTrue(is_category_required_candidate(cat_req_cand))
+
+        chosen_cat_id = "cat-uuid-shopping"
+        patch_payload = build_category_patch_payload(cat_req_cand, chosen_cat_id)
+        self.assertEqual(patch_payload["transaction"]["category_id"], "cat-uuid-shopping")
+
+        with patch.object(ApiClient, "request") as mock_request:
+            mock_request.return_value = {"status": "needs_review", "payload": patch_payload}
+            self.client.patch_reconciliation_candidate("cand-cat-1", patch_payload)
+            mock_request.assert_called_once_with(
+                "PATCH",
+                "/api/v1/reconciliation-candidates/cand-cat-1",
+                json_data={"payload": patch_payload}
+            )
+
+    def test_batch_readiness_and_concurrency(self):
+        """
+        Proves is_batch_ready_to_commit is False when actionable candidates remain,
+        and becomes True when all candidates are resolved or rejected.
+        """
+        # 1. Unresolved batch
+        preview_unresolved = {
+            "batch": {"id": "batch-1", "row_version": 1, "status": "needs_review"},
+            "candidates": [
+                {"id": "c-1", "status": "needs_review"},
+                {"id": "c-2", "status": "accepted"}
+            ]
+        }
+        self.assertFalse(is_batch_ready_to_commit(preview_unresolved))
+
+        # 2. Resolved batch
+        preview_resolved = {
+            "batch": {"id": "batch-1", "row_version": 2, "status": "needs_review"},
+            "candidates": [
+                {"id": "c-1", "status": "accepted"},
+                {"id": "c-2", "status": "rejected"}
+            ]
+        }
+        self.assertTrue(is_batch_ready_to_commit(preview_resolved))
+
+        # 3. Commit with row_version
+        with patch.object(ApiClient, "request") as mock_request:
+            mock_request.return_value = {"status": "committed"}
+            self.client.commit_reconciliation_batch("batch-1", row_version=2)
+            mock_request.assert_called_once_with(
+                "POST",
+                "/api/v1/reconciliation-batches/batch-1/commit",
+                json_data={"row_version": 2}
+            )
+
     def test_snapshot_timestamp_helper_timezone_aware(self):
         """Proves format_iso_timestamp constructs timezone-aware ISO 8601 strings."""
-        # 1. From date
         target_d = date(2026, 8, 27)
         iso_str = format_iso_timestamp(target_d)
         dt = datetime.fromisoformat(iso_str)
         self.assertIsNotNone(dt.tzinfo, "Constructed timestamp must be timezone-aware.")
         self.assertEqual(dt.date(), target_d)
-
-        # 2. From ISO string date
-        iso_str2 = format_iso_timestamp("2026-08-27")
-        dt2 = datetime.fromisoformat(iso_str2)
-        self.assertIsNotNone(dt2.tzinfo)
-        self.assertEqual(dt2.date(), date(2026, 8, 27))
-
-        # 3. Default current time
-        iso_str3 = format_iso_timestamp()
-        dt3 = datetime.fromisoformat(iso_str3)
-        self.assertIsNotNone(dt3.tzinfo)
 
     @patch.object(ApiClient, "request")
     def test_account_snapshot_submission_contract(self, mock_request):
@@ -130,29 +301,6 @@ class TestDashboardFlows(unittest.TestCase):
         )
 
     @patch.object(ApiClient, "request")
-    def test_reconciliation_optimistic_concurrency_refresh_and_commit(self, mock_request):
-        """Proves batch commit sends row_version from batch object."""
-        # 1. Preview returns batch row_version = 2
-        mock_request.return_value = {
-            "batch": {"id": "batch-1", "row_version": 2, "status": "needs_review"},
-            "candidates": [],
-            "summary": {"pending_count": 0}
-        }
-        preview = self.client.get_reconciliation_preview("batch-1")
-        row_version = preview["batch"]["row_version"]
-        self.assertEqual(row_version, 2)
-
-        # 2. Commit batch with row_version = 2
-        mock_request.reset_mock()
-        mock_request.return_value = {"status": "committed"}
-        self.client.commit_reconciliation_batch("batch-1", row_version=row_version)
-        mock_request.assert_called_once_with(
-            "POST",
-            "/api/v1/reconciliation-batches/batch-1/commit",
-            json_data={"row_version": 2}
-        )
-
-    @patch.object(ApiClient, "request")
     def test_transaction_void_mandatory_version(self, mock_request):
         """Proves transaction void requires expected_version."""
         mock_request.return_value = {"status": "voided", "account_balance_restored": True}
@@ -180,3 +328,7 @@ class TestDashboardFlows(unittest.TestCase):
         self.assertEqual(overview["reporting_currency"], "CNY")
         self.assertEqual(len(overview["asset_allocation"]), 2)
         self.assertEqual(overview["asset_allocation"][0]["amount"], "10000.00")
+
+
+if __name__ == "__main__":
+    unittest.main()

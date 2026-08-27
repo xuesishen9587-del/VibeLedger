@@ -71,7 +71,36 @@ def create_app() -> FastAPI:
         return {"status": "ok", "service": "vibeledger-api", "version": "1.0.0"}
 
     @app.get("/ready", tags=["Health"])
-    def readiness_check(conn: Any = Depends(get_db_connection)):
+    def readiness_check():
+        import logging
+        from app.db import get_connection
+        from migrations.runner import get_migration_files
+
+        gemini_api_key = os.environ.get("GEMINI_API_KEY")
+        gemini_status = "ok" if (gemini_api_key and gemini_api_key.strip()) else "unavailable"
+
+        conn = None
+        try:
+            target_schema = os.environ.get("DB_SCHEMA")
+            try:
+                from app.config import get_settings
+                s = get_settings()
+                if s and s.db_schema:
+                    target_schema = s.db_schema
+            except Exception:
+                pass
+            conn = get_connection(schema=target_schema)
+        except Exception as e:
+            logging.getLogger("app.readiness").error(f"Readiness DB connection acquisition failed: {e}")
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "status": "unavailable",
+                    "database": "unavailable",
+                    "gemini": gemini_status
+                }
+            )
+
         try:
             with conn.cursor() as cur:
                 cur.execute("SELECT 1;")
@@ -90,23 +119,39 @@ def create_app() -> FastAPI:
                         content={
                             "status": "unavailable",
                             "database": "schema_not_ready",
-                            "schema": "missing_migrations_table"
+                            "gemini": gemini_status
+                        }
+                    )
+
+                expected_files = get_migration_files()
+                cur.execute("SELECT migration_name FROM schema_migrations;")
+                applied_files = {row[0] for row in cur.fetchall()}
+
+                missing = set(expected_files) - applied_files
+                if missing or len(applied_files) < len(expected_files):
+                    return JSONResponse(
+                        status_code=503,
+                        content={
+                            "status": "unavailable",
+                            "database": "schema_not_ready",
+                            "gemini": gemini_status
                         }
                     )
         except Exception as e:
+            logging.getLogger("app.readiness").error(f"Readiness check execution failed: {e}")
             return JSONResponse(
                 status_code=503,
                 content={
                     "status": "unavailable",
-                    "database": "error",
-                    "error": str(e)
+                    "database": "unavailable",
+                    "gemini": gemini_status
                 }
             )
+        finally:
+            if conn and not conn.closed:
+                conn.close()
 
-        gemini_api_key = os.environ.get("GEMINI_API_KEY")
-        gemini_status = "ok" if (gemini_api_key and gemini_api_key.strip()) else "unavailable"
         overall_status = "ok" if gemini_status == "ok" else "degraded"
-
         return {
             "status": overall_status,
             "database": "ok",

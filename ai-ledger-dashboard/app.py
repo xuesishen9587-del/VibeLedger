@@ -18,7 +18,15 @@ from api_client import (
     BackendUnavailableError,
     TimeoutError
 )
-from time_utils import format_iso_timestamp
+from time_utils import format_iso_timestamp, get_dashboard_today, get_dashboard_now, get_dashboard_timezone
+from dashboard_controller import (
+    classify_candidates,
+    format_candidate_options,
+    is_ambiguous_match_candidate,
+    is_category_required_candidate,
+    build_category_patch_payload,
+    is_batch_ready_to_commit
+)
 
 # --- 页面全局设置 ---
 st.set_page_config(page_title="Vibe Finance Center", page_icon="🏦", layout="wide")
@@ -139,7 +147,7 @@ if active_accounts:
         if submit_snap:
             chosen_acc = acc_map[sel_acc_label]
             try:
-                iso_as_of = format_iso_timestamp(date.today())
+                iso_as_of = format_iso_timestamp(get_dashboard_today())
                 snap_res = client.create_account_snapshot(
                     account_id=chosen_acc["id"],
                     balance=Decimal(str(input_balance)),
@@ -321,8 +329,9 @@ elif menu == "📊 收支统计中心":
     st.markdown("权威统计家庭日常现金收支、费用与退款（投资盈亏与内部转账严格分离）")
 
     col_f1, col_f2 = st.columns(2)
-    current_year = date.today().year
-    current_month = date.today().month
+    now_d = get_dashboard_today()
+    current_year = now_d.year
+    current_month = now_d.month
 
     with col_f1:
         sel_year = st.selectbox("年份", options=list(range(current_year, current_year - 5, -1)), index=0)
@@ -440,7 +449,7 @@ elif menu == "📈 投资管理中心":
         with st.form("investment_snapshot_form", clear_on_submit=True):
             sel_inv_name = st.selectbox("选择投资账户", options=list(acc_dict.keys()))
             inv_total_val = st.number_input("期末权威总资产估值", value=0.0, step=1000.0, format="%.2f")
-            inv_as_of = st.date_input("估值基准日期", value=date.today())
+            inv_as_of = st.date_input("估值基准日期", value=get_dashboard_today())
             submit_inv = st.form_submit_button("提交投资估值")
 
             if submit_inv:
@@ -520,54 +529,117 @@ elif menu == "⚖️ 账户校准与对账":
                 with p4:
                     st.metric("自动平账差异", f"￥{preview.get('adjustment_amount') or '0.00'}")
 
-                # Item 4: Actionable Review Controls from preview["candidates"]
+                # Item 1, 2, 3: Actionable Review Controls from preview["candidates"]
                 if candidates:
-                    st.markdown("#### 🔍 候选流水对账复核 (Actionable Candidates)")
-                    pending_cands = [c for c in candidates if c.get("status") in ("pending", "draft")]
-                    if not pending_cands:
-                        st.info("✅ 所有候选已完成复核决策。")
+                    st.markdown("#### 🔍 候选流水对账复核 (Candidate Review)")
+                    classified = classify_candidates(candidates)
+                    actionable_cands = classified["actionable"]
+                    resolved_cands = classified["resolved"]
+                    rejected_cands = classified["rejected"]
+
+                    if not actionable_cands:
+                        st.info("✅ 所有候选已完成复核决策，可提交对账批次入账。")
                     else:
-                        for cand in pending_cands:
+                        for cand in actionable_cands:
                             c_id = cand["id"]
                             sl = cand.get("statement_line") or {}
-                            c_col1, c_col2, c_col3 = st.columns([3, 2, 2])
-                            with c_col1:
-                                st.write(f"📅 **{sl.get('transaction_on', '-')}** · `{sl.get('currency', '')} {sl.get('amount', '')}` · {sl.get('description', '')}")
-                            with c_col2:
-                                st.write(f"类型: `{cand.get('candidate_type')}` | 置信度: `{cand.get('confidence', '-')}`")
-                            with c_col3:
+                            c_type = cand.get("candidate_type")
+                            r_code = cand.get("reason_code")
+                            options = format_candidate_options(cand)
+                            is_ambiguous = is_ambiguous_match_candidate(cand)
+                            is_cat_req = is_category_required_candidate(cand)
+
+                            with st.container():
+                                c_col1, c_col2 = st.columns([3, 2])
+                                with c_col1:
+                                    st.write(f"📅 **{sl.get('transaction_on', '-')}** · `{sl.get('currency', '')} {sl.get('amount', '')}` · {sl.get('description', '')}")
+                                with c_col2:
+                                    st.write(f"类型: `{c_type}` | 状态: `{cand.get('status')}` | 置信度: `{cand.get('confidence', '-')}`")
+
+                                selected_tx_id = None
+                                # Ambiguous match selector
+                                if is_ambiguous and options:
+                                    st.warning("⚠️ 存在多个疑似匹配交易，请选择具体匹配项：")
+                                    opt_labels = []
+                                    opt_map = {}
+                                    for opt in options:
+                                        lbl = f"{opt.get('occurred_on')} | {opt.get('merchant') or '-'} | {opt.get('currency')} {opt.get('amount')} (匹配分: {opt.get('match_score')})"
+                                        opt_labels.append(lbl)
+                                        opt_map[lbl] = opt.get("transaction_id")
+                                    sel_lbl = st.selectbox("选择目标交易", options=opt_labels, key=f"sel_target_{c_id}")
+                                    selected_tx_id = opt_map.get(sel_lbl)
+
+                                # Category patch expander/form
+                                if is_cat_req:
+                                    st.info("💡 该交易需要补充支出分类：")
+                                    cat_col1, cat_col2 = st.columns([3, 1])
+                                    with cat_col1:
+                                        exp_cats = [c for c in active_categories if c.get("category_type") == "expense"] or active_categories
+                                        chosen_cat = st.selectbox(
+                                            "选择分类",
+                                            options=exp_cats,
+                                            format_func=lambda x: x["name"],
+                                            key=f"patch_cat_sel_{c_id}"
+                                        )
+                                    with cat_col2:
+                                        if st.button("保存分类", key=f"patch_cat_btn_{c_id}"):
+                                            try:
+                                                patch_p = build_category_patch_payload(cand, chosen_cat["id"])
+                                                client.patch_reconciliation_candidate(c_id, patch_p)
+                                                st.success("分类已补充，预览已刷新")
+                                                st.rerun()
+                                            except Exception as ex:
+                                                handle_api_error(ex, "分类修改失败")
+
                                 btn_c1, btn_c2 = st.columns(2)
                                 with btn_c1:
-                                    if st.button("接受", key=f"acc_cand_{c_id}"):
+                                    if st.button("接受 (Accept)", key=f"acc_cand_{c_id}", type="secondary"):
                                         try:
-                                            client.accept_reconciliation_candidate(c_id)
+                                            client.accept_reconciliation_candidate(c_id, target_transaction_id=selected_tx_id)
                                             st.success("已接受该候选")
                                             st.rerun()
                                         except Exception as ex:
                                             handle_api_error(ex, "接受失败")
                                 with btn_c2:
-                                    if st.button("忽略", key=f"rej_cand_{c_id}"):
+                                    if st.button("忽略 (Reject)", key=f"rej_cand_{c_id}"):
                                         try:
                                             client.reject_reconciliation_candidate(c_id, reason="用户手动忽略")
                                             st.success("已忽略该候选")
                                             st.rerun()
                                         except Exception as ex:
                                             handle_api_error(ex, "忽略失败")
+                                st.divider()
+
+                    if resolved_cands:
+                        with st.expander(f"✅ 已解决候选 (Resolved Candidates) ({len(resolved_cands)})", expanded=False):
+                            for rc in resolved_cands:
+                                r_sl = rc.get("statement_line") or {}
+                                st.write(f"- `{rc.get('status')}` | {r_sl.get('transaction_on')} | {r_sl.get('description')} | {r_sl.get('currency')} {r_sl.get('amount')}")
+
+                    if rejected_cands:
+                        with st.expander(f"🚫 已忽略候选 (Rejected Candidates) ({len(rejected_cands)})", expanded=False):
+                            for rjc in rejected_cands:
+                                rj_sl = rjc.get("statement_line") or {}
+                                st.write(f"- `{rjc.get('status')}` | {rj_sl.get('transaction_on')} | {rj_sl.get('description')} | {rj_sl.get('currency')} {rj_sl.get('amount')}")
 
                 # Item 5: Concurrency Safe Batch Commit using preview["batch"]["row_version"]
-                st.divider()
                 batch_row_ver = batch_info.get("row_version", 0)
-                if st.button("🚀 原子提交该对账批次 (Commit Ledger)", type="primary"):
-                    try:
-                        commit_res = client.commit_reconciliation_batch(active_batch_id, row_version=batch_row_ver)
-                        if commit_res.get("status") == "committed":
-                            st.success(f"🎉 对账批次已原子提交入账！")
-                            st.session_state.pop("active_batch_id", None)
-                            st.rerun()
-                        elif commit_res.get("status") == "needs_review":
-                            st.warning("⚠️ 尚有未解决的待复核项，无法直接提交入账。")
-                    except Exception as ex:
-                        handle_api_error(ex, "对账批次提交失败")
+                ready_to_commit = is_batch_ready_to_commit(preview)
+                if ready_to_commit:
+                    if st.button("🚀 原子提交该对账批次 (Commit Ledger)", type="primary"):
+                        try:
+                            commit_res = client.commit_reconciliation_batch(active_batch_id, row_version=batch_row_ver)
+                            if commit_res.get("status") == "committed":
+                                st.success("🎉 对账批次已原子提交入账！")
+                                st.session_state.pop("active_batch_id", None)
+                                st.rerun()
+                            elif commit_res.get("status") == "needs_review":
+                                st.warning("⚠️ 尚有未解决的待复核项，无法直接提交入账。")
+                        except Exception as ex:
+                            handle_api_error(ex, "对账批次提交失败")
+                else:
+                    st.warning(f"⚠️ 尚有待复核候选未完成决策，请先完成决策后再提交入账。")
+                    st.button("🚀 原子提交该对账批次 (Commit Ledger)", type="primary", disabled=True)
 
             except Exception as e:
                 handle_api_error(e, "加载对账批次失败")
@@ -580,7 +652,7 @@ elif menu == "⚖️ 账户校准与对账":
             with st.form("manual_snap_page_form", clear_on_submit=True):
                 s_acc_label = st.selectbox("选择账户", options=list(m_acc_opts.keys()), key="man_snap_acc")
                 s_balance = st.number_input("账户当前真实余额", value=0.0, step=100.0, format="%.2f", key="man_snap_bal")
-                s_as_of = st.date_input("基准日期", value=date.today(), key="man_snap_date")
+                s_as_of = st.date_input("基准日期", value=get_dashboard_today(), key="man_snap_date")
                 s_submit = st.form_submit_button("提交余额并校准")
 
                 if s_submit:
@@ -796,7 +868,7 @@ elif menu == "📋 交易明细与纠错/作废":
                         options=[a["id"] for a in active_accounts],
                         format_func=lambda x: next((a["name"] for a in active_accounts if a["id"] == x), x)
                     )
-                    ref_date = st.date_input("退款入账日期", value=date.today())
+                    ref_date = st.date_input("退款入账日期", value=get_dashboard_today())
                     ref_remarks = st.text_input("退款备注", value="商品售后退款")
                     btn_ref = st.form_submit_button("提交退款")
 

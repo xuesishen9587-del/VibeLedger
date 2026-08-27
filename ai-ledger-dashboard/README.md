@@ -32,6 +32,7 @@ VibeLedger Dashboard is a presentation-layer Streamlit frontend that communicate
 Set the following environment variables:
 - `BACKEND_URL`: URL of the VibeLedger Backend service (defaults to `http://localhost:8000`).
 - `AUTH_TOKEN`: Optional default Browser JWT Token for authentication.
+- `DASHBOARD_TIMEZONE`: IANA timezone used for local date/time display and snapshot timestamp generation (defaults to `Asia/Singapore`).
 
 ---
 

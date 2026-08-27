@@ -160,9 +160,13 @@ def get_cash_flow(
                    t.to_amount, t.to_currency,
                    t.original_amount, t.original_currency,
                    t.reporting_amount, t.reporting_currency,
-                   t.category_id, c.name AS category_name
+                   COALESCE(t.category_id, orig_t.category_id) AS category_id,
+                   COALESCE(c.name, orig_c.name) AS category_name
             FROM transactions t
             LEFT JOIN categories c ON c.id = t.category_id
+            LEFT JOIN transaction_links tl ON tl.target_transaction_id = t.id AND tl.relation_type = 'refund'
+            LEFT JOIN transactions orig_t ON orig_t.id = tl.source_transaction_id
+            LEFT JOIN categories orig_c ON orig_c.id = orig_t.category_id
             WHERE t.household_id = %s
               AND t.occurred_on >= %s
               AND t.occurred_on <= %s
@@ -229,8 +233,9 @@ def get_cash_flow(
             category_totals[(cat_id, cat_name)] += converted
         elif tx_type == "refund":
             refund_total += converted
+            category_totals[(cat_id, cat_name)] -= converted
 
-    # Household Expense = ordinary expense + fee - refund
+    # Household Expense = ordinary expense + fee - refund (net expense)
     household_expense = ordinary_expense_total + fee_total - refund_total
     net_cash_flow = cash_income_total - household_expense
 

@@ -1,7 +1,7 @@
 from typing import Optional, Dict, Any, List
 from uuid import UUID
 from datetime import date
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 
 from app.domain.money import parse_decimal, quantize_money, validate_minor_units
 from app.domain.transactions import (
@@ -12,7 +12,8 @@ from app.domain.transactions import (
     InvalidTransactionShapeError,
     InvalidAmountError,
     CategoryNotFoundError,
-    CategoryMismatchError
+    CategoryMismatchError,
+    RefundExceedsOriginalError
 )
 import app.repositories.transactions as tx_repo
 import app.repositories.accounts as accounts_repo
@@ -27,18 +28,27 @@ def _validate_correction_fields(
     changes: Dict[str, Any]
 ) -> Dict[str, Any]:
     """
-    Strictly validates proposed correction changes against domain invariants.
-    Rejects unsupported keys, validates amount positivity and minor unit precision,
-    and ensures category matches household and active status.
+    Strictly validates proposed correction changes against domain and transaction-shape invariants.
+    Rejects unsupported keys, validates amount positivity, minor unit precision, category validity,
+    and enforces transaction-type specific leg rules.
     """
     allowed_keys = {"occurred_on", "category_id", "merchant", "remarks", "from_amount", "to_amount"}
     unknown_keys = set(changes.keys()) - allowed_keys
     if unknown_keys:
         raise InvalidTransactionShapeError(f"Unsupported correction field(s): {', '.join(sorted(unknown_keys))}")
 
+    tx_type = tx.get("transaction_type")
+
+    # 1. Engine-owned / system transactions reject generic amount modifications
+    if tx_type in ("reconciliation_adjustment", "opening_balance", "investment_pnl"):
+        if "from_amount" in changes or "to_amount" in changes:
+            raise InvalidTransactionShapeError(
+                f"Direct manual amount correction is not permitted for '{tx_type}' transactions."
+            )
+
     validated_changes: Dict[str, Any] = {}
 
-    # 1. Date
+    # 2. Date
     if "occurred_on" in changes and changes["occurred_on"] is not None:
         val = changes["occurred_on"]
         if isinstance(val, str):
@@ -51,7 +61,7 @@ def _validate_correction_fields(
         else:
             raise InvalidTransactionShapeError("occurred_on must be a date or ISO string.")
 
-    # 2. Category
+    # 3. Category
     if "category_id" in changes and changes["category_id"] is not None:
         cat_id_val = changes["category_id"]
         try:
@@ -65,14 +75,14 @@ def _validate_correction_fields(
         if cat.get("status") != "active":
             raise CategoryMismatchError(f"Category {cat_uuid} is inactive.")
 
-        if tx.get("transaction_type") == "expense" and cat.get("category_type") != "expense":
+        if tx_type == "expense" and cat.get("category_type") != "expense":
             raise CategoryMismatchError(f"Category type '{cat.get('category_type')}' is incompatible with expense transaction.")
-        elif tx.get("transaction_type") == "cash_income" and cat.get("category_type") != "income":
+        elif tx_type == "cash_income" and cat.get("category_type") != "income":
             raise CategoryMismatchError(f"Category type '{cat.get('category_type')}' is incompatible with income transaction.")
 
         validated_changes["category_id"] = cat_uuid
 
-    # 3. Merchant & Remarks
+    # 4. Merchant & Remarks
     if "merchant" in changes:
         m_val = changes["merchant"]
         validated_changes["merchant"] = str(m_val).strip() if m_val is not None else None
@@ -80,10 +90,23 @@ def _validate_correction_fields(
         r_val = changes["remarks"]
         validated_changes["remarks"] = str(r_val).strip() if r_val is not None else None
 
-    # 4. Amounts & Minor Units
+    # 5. Transaction-Type Specific Leg & Amount Invariants
     from_curr = tx.get("from_currency") or tx.get("original_currency", "CNY")
     to_curr = tx.get("to_currency") or tx.get("original_currency", "CNY")
 
+    if tx_type in ("expense", "fee"):
+        if "to_amount" in changes and changes["to_amount"] is not None:
+            raise InvalidTransactionShapeError(f"Transaction of type '{tx_type}' cannot have a to_amount leg.")
+
+    elif tx_type == "cash_income":
+        if "from_amount" in changes and changes["from_amount"] is not None:
+            raise InvalidTransactionShapeError("Transaction of type 'cash_income' cannot have a from_amount leg.")
+
+    elif tx_type == "refund":
+        if "from_amount" in changes and changes["from_amount"] is not None:
+            raise InvalidTransactionShapeError("Transaction of type 'refund' cannot have a from_amount leg.")
+
+    # Validate and parse amounts
     if "from_amount" in changes and changes["from_amount"] is not None:
         try:
             dec_from = parse_decimal(changes["from_amount"])
@@ -109,6 +132,49 @@ def _validate_correction_fields(
         except ValueError as ve:
             raise InvalidAmountError(str(ve))
         validated_changes["to_amount"] = dec_to
+
+    # 6. Transfer Consistency
+    if tx_type == "transfer":
+        is_same_currency = from_curr.upper() == to_curr.upper()
+        if is_same_currency:
+            if "from_amount" in validated_changes and "to_amount" in validated_changes:
+                if validated_changes["from_amount"] != validated_changes["to_amount"]:
+                    raise InvalidTransactionShapeError("Same-currency transfer must have equal from_amount and to_amount.")
+            elif "from_amount" in validated_changes:
+                validated_changes["to_amount"] = validated_changes["from_amount"]
+            elif "to_amount" in validated_changes:
+                validated_changes["from_amount"] = validated_changes["to_amount"]
+
+    # 7. Refund Bounds Validation
+    if tx_type == "refund" and "to_amount" in validated_changes:
+        new_ref_amt = validated_changes["to_amount"]
+        # Find original expense link
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT source_transaction_id 
+                FROM transaction_links 
+                WHERE target_transaction_id = %s AND relation_type = 'refund';
+                """,
+                (tx["id"],)
+            )
+            link_row = cur.fetchone()
+
+        if link_row:
+            orig_expense_id = link_row[0]
+            orig_tx = tx_repo.get_transaction(conn, orig_expense_id)
+            if orig_tx:
+                orig_total = parse_decimal(orig_tx["from_amount"] if orig_tx.get("from_amount") is not None else orig_tx["original_amount"])
+                active_refunds = tx_repo.get_active_refunds_for_expense(conn, orig_expense_id)
+                other_refunds_total = sum(
+                    parse_decimal(r["to_amount"] if r.get("to_amount") is not None else r["original_amount"])
+                    for r in active_refunds
+                    if str(r["id"]) != str(tx["id"])
+                )
+                if other_refunds_total + new_ref_amt > orig_total:
+                    raise RefundExceedsOriginalError(
+                        f"Refund amount {new_ref_amt} exceeds remaining refundable amount {orig_total - other_refunds_total}."
+                    )
 
     return validated_changes
 
@@ -209,6 +275,7 @@ def commit_transaction_correction(
 ) -> Dict[str, Any]:
     """
     Atomically commits explicit correction to a transaction and reconciles account balances.
+    Maintains all dependent fields (original_amount, reporting_amount, effective_fx_rate).
     """
     # 1. Lock transaction row
     tx = tx_repo.lock_transaction(conn, transaction_id)
@@ -225,6 +292,7 @@ def commit_transaction_correction(
 
     # 3. Domain validation
     validated_changes = _validate_correction_fields(conn, household_id, tx, changes)
+    tx_type = tx.get("transaction_type")
 
     before_data = {
         "occurred_on": tx["occurred_on"].isoformat() if tx.get("occurred_on") else None,
@@ -232,7 +300,9 @@ def commit_transaction_correction(
         "merchant": tx.get("merchant"),
         "remarks": tx.get("remarks"),
         "from_amount": str(tx["from_amount"]) if tx.get("from_amount") is not None else None,
-        "to_amount": str(tx["to_amount"]) if tx.get("to_amount") is not None else None
+        "to_amount": str(tx["to_amount"]) if tx.get("to_amount") is not None else None,
+        "original_amount": str(tx["original_amount"]) if tx.get("original_amount") is not None else None,
+        "effective_fx_rate": str(tx["effective_fx_rate"]) if tx.get("effective_fx_rate") is not None else None
     }
 
     # 4. Account balance deltas with deterministic lock ordering
@@ -258,7 +328,35 @@ def commit_transaction_correction(
             new_bal = locked_states[tx["to_account_id"]]["ledger_balance"] + delta
             accounts_repo.update_account_state_projection(conn, tx["to_account_id"], new_bal)
 
-    # 5. Execute repository update
+    # 5. Compute dependent fields (original_amount, reporting_amount, effective_fx_rate)
+    new_from = validated_changes.get("from_amount") if "from_amount" in validated_changes else tx.get("from_amount")
+    new_to = validated_changes.get("to_amount") if "to_amount" in validated_changes else tx.get("to_amount")
+    new_orig = tx.get("original_amount")
+    new_fx_rate = tx.get("effective_fx_rate")
+    new_rep_amount = tx.get("reporting_amount")
+
+    household = accounts_repo.get_household(conn, household_id)
+    rep_curr = household["reporting_currency"]
+
+    if tx_type in ("expense", "fee") and new_from is not None:
+        if tx.get("from_currency") == tx.get("original_currency") or tx.get("original_currency") is None:
+            new_orig = new_from
+        if tx.get("from_currency") == rep_curr:
+            new_rep_amount = new_from
+    elif tx_type in ("cash_income", "refund") and new_to is not None:
+        if tx.get("to_currency") == tx.get("original_currency") or tx.get("original_currency") is None:
+            new_orig = new_to
+        if tx.get("to_currency") == rep_curr:
+            new_rep_amount = new_to
+    elif tx_type == "transfer":
+        if new_from is not None and new_to is not None:
+            if tx.get("from_currency") == tx.get("to_currency"):
+                new_fx_rate = Decimal("1.000000000000")
+                new_orig = new_from
+            else:
+                new_fx_rate = (new_from / new_to).quantize(Decimal("0.000000000001"), rounding=ROUND_HALF_UP)
+
+    # 6. Execute repository update
     merchant_raw = validated_changes.get("merchant") if "merchant" in validated_changes else tx.get("merchant")
     merchant_norm = merchant_raw.strip().lower() if merchant_raw else None
 
@@ -270,11 +368,14 @@ def commit_transaction_correction(
         merchant=merchant_raw,
         merchant_normalized=merchant_norm,
         remarks=validated_changes.get("remarks") if "remarks" in validated_changes else tx.get("remarks"),
-        from_amount=validated_changes.get("from_amount") if "from_amount" in validated_changes else tx.get("from_amount"),
-        to_amount=validated_changes.get("to_amount") if "to_amount" in validated_changes else tx.get("to_amount")
+        from_amount=new_from,
+        to_amount=new_to,
+        original_amount=new_orig,
+        reporting_amount=new_rep_amount,
+        effective_fx_rate=new_fx_rate
     )
 
-    # 6. Append immutable audit event
+    # 7. Append immutable audit event
     audit_repo.insert_audit_event(
         conn=conn,
         household_id=household_id,

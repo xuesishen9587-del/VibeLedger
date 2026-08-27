@@ -435,3 +435,83 @@ class TestTransactionCorrectionsApiDb(BaseDbTestCase):
             json={"expected_version": 0, "changes": {"from_amount": "80.00"}}
         )
         self.assertEqual(resp_adj_bad.status_code, 422)
+
+    def test_foreign_card_reporting_fx_frozen_invariants(self):
+        """
+        Proves that correcting a statement-confirmed multi-currency transaction
+        (original_currency EUR != account_currency USD != reporting_currency CNY):
+        - preserves the frozen reporting_fx_rate
+        - recomputes reporting_amount deterministically using the frozen rate
+        - preserves foreign original_amount/original_currency
+        - atomically updates account_state
+        - records audit events
+        """
+        headers = {"Authorization": f"Bearer {self.browser_token}"}
+
+        # 1. Create USD account with initial balance
+        acc_usd_id = uuid4()
+        accounts_repo.create_account(
+            self.conn,
+            account_id=acc_usd_id,
+            household_id=self.household_id,
+            name="Chase USD Card",
+            institution="Chase",
+            account_type="credit",
+            currency="USD",
+            owner_user_id=self.user_id
+        )
+        accounts_repo.update_account_state_projection(self.conn, acc_usd_id, Decimal("1000.00"))
+
+        # 2. Insert statement-confirmed foreign transaction
+        # Billed: 68.90 USD, Original: 60.00 EUR, Frozen USD->CNY FX rate: 7.200000000000 -> 496.08 CNY
+        foreign_tx_id = uuid4()
+        now_dt = datetime.now(timezone.utc)
+        tx_repo.create_transaction(
+            self.conn,
+            tx_id=foreign_tx_id,
+            household_id=self.household_id,
+            transaction_type="expense",
+            occurred_on=date(2026, 8, 10),
+            original_amount=Decimal("60.00"),
+            original_currency="EUR",
+            from_amount=Decimal("68.90"),
+            from_currency="USD",
+            from_account_id=acc_usd_id,
+            category_id=self.category_id,
+            merchant="Paris Hotel",
+            reporting_amount=Decimal("496.08"),
+            reporting_currency="CNY",
+            reporting_fx_rate=Decimal("7.200000000000"),
+            reporting_fx_locked_at=now_dt,
+            verification_status="statement_confirmed"
+        )
+        self.conn.commit()
+
+        # 3. Correct from_amount to 68.20 USD
+        resp_corr = self.client.post(
+            f"/api/v1/transactions/{foreign_tx_id}/corrections/commit",
+            headers=headers,
+            json={
+                "expected_version": 0,
+                "changes": {"from_amount": "68.20"},
+                "reason": "Adjusted statement fee refund"
+            }
+        )
+        self.assertEqual(resp_corr.status_code, 200)
+        res_data = resp_corr.json()
+
+        # Assert from_amount updated
+        self.assertEqual(res_data["from_amount"], "68.20")
+        # Assert EUR original amount preserved (foreign card semantics)
+        self.assertEqual(res_data["original_amount"], "60.00")
+        self.assertEqual(res_data["original_currency"], "EUR")
+        # Assert frozen reporting_fx_rate preserved
+        self.assertEqual(Decimal(str(res_data["reporting_fx_rate"])), Decimal("7.200000000000"))
+        # Assert reporting_amount recomputed from 68.20 * 7.20 = 491.04 CNY
+        self.assertEqual(res_data["reporting_amount"], "491.04")
+        self.assertEqual(res_data["reporting_currency"], "CNY")
+        self.assertEqual(res_data["row_version"], 1)
+
+        # 4. Assert account_state updated atomically (1000.00 + (68.90 - 68.20) = 1000.70)
+        state = accounts_repo.get_account_state(self.conn, acc_usd_id)
+        self.assertEqual(Decimal(str(state["ledger_balance"])), Decimal("1000.70"))

@@ -23,6 +23,8 @@ from dashboard_controller import (
     classify_candidates,
     format_candidate_options,
     is_ambiguous_match_candidate,
+    is_type_ambiguous_candidate,
+    is_credit_ambiguous_candidate,
     is_category_required_candidate,
     build_category_patch_payload,
     is_batch_ready_to_commit
@@ -547,6 +549,8 @@ elif menu == "⚖️ 账户校准与对账":
                             r_code = cand.get("reason_code")
                             options = format_candidate_options(cand)
                             is_ambiguous = is_ambiguous_match_candidate(cand)
+                            is_type_ambig = is_type_ambiguous_candidate(cand)
+                            is_credit_ambig = is_credit_ambiguous_candidate(cand)
                             is_cat_req = is_category_required_candidate(cand)
 
                             with st.container():
@@ -554,7 +558,7 @@ elif menu == "⚖️ 账户校准与对账":
                                 with c_col1:
                                     st.write(f"📅 **{sl.get('transaction_on', '-')}** · `{sl.get('currency', '')} {sl.get('amount', '')}` · {sl.get('description', '')}")
                                 with c_col2:
-                                    st.write(f"类型: `{c_type}` | 状态: `{cand.get('status')}` | 置信度: `{cand.get('confidence', '-')}`")
+                                    st.write(f"类型: `{c_type}` | 状态: `{cand.get('status')}` | 原因: `{r_code or 'normal'}`")
 
                                 selected_tx_id = None
                                 # Ambiguous match selector
@@ -569,8 +573,139 @@ elif menu == "⚖️ 账户校准与对账":
                                     sel_lbl = st.selectbox("选择目标交易", options=opt_labels, key=f"sel_target_{c_id}")
                                     selected_tx_id = opt_map.get(sel_lbl)
 
+                                # Type ambiguous resolution (Debit / General ambiguity)
+                                if is_type_ambig:
+                                    st.warning("⚠️ 交易类型不明确，必须人工明确业务语义及支出分类：")
+                                    t_col1, t_col2, t_col3 = st.columns([2, 2, 1])
+                                    with t_col1:
+                                        sel_type = st.selectbox("选择交易性质", options=["expense", "fee"], format_func=lambda x: "支出 (Expense)" if x == "expense" else "手续费 (Fee)", key=f"sel_type_{c_id}")
+                                    with t_col2:
+                                        exp_cats = [c for c in active_categories if c.get("category_type") == "expense"] or active_categories
+                                        chosen_cat = st.selectbox(
+                                            "选择支出分类",
+                                            options=exp_cats,
+                                            format_func=lambda x: x["name"],
+                                            key=f"type_ambig_cat_{c_id}"
+                                        )
+                                    with t_col3:
+                                        if st.button("确认性质与分类", key=f"res_type_btn_{c_id}"):
+                                            try:
+                                                client.resolve_reconciliation_candidate(
+                                                    candidate_id=c_id,
+                                                    resolution_type=sel_type,
+                                                    category_id=chosen_cat["id"]
+                                                )
+                                                st.success("已明确交易性质并更新分类")
+                                                st.rerun()
+                                            except Exception as ex:
+                                                handle_api_error(ex, "类型确认失败")
+
+                                # Credit ambiguous resolution (Income vs Refund vs Transfer vs Match)
+                                if is_credit_ambig:
+                                    st.warning("⚠️ 存入/贷记流水业务性质未定，请选择确定项：")
+                                    res_kind = st.radio(
+                                        "选择资金性质",
+                                        options=["cash_income", "refund", "transfer", "match"],
+                                        format_func=lambda x: {
+                                            "cash_income": "收入 (Cash Income)",
+                                            "refund": "退款 (Refund)",
+                                            "transfer": "内部转账 (Internal Transfer)",
+                                            "match": "关联已有交易 (Match Transaction)"
+                                        }[x],
+                                        key=f"res_kind_{c_id}",
+                                        horizontal=True
+                                    )
+
+                                    if res_kind == "cash_income":
+                                        inc_col1, inc_col2 = st.columns([3, 1])
+                                        with inc_col1:
+                                            inc_cats = [c for c in active_categories if c.get("category_type") == "income"] or active_categories
+                                            chosen_inc_cat = st.selectbox(
+                                                "选择收入分类",
+                                                options=inc_cats,
+                                                format_func=lambda x: x["name"],
+                                                key=f"res_inc_cat_{c_id}"
+                                            )
+                                        with inc_col2:
+                                            if st.button("确认为收入", key=f"btn_res_inc_{c_id}"):
+                                                try:
+                                                    client.resolve_reconciliation_candidate(
+                                                        candidate_id=c_id,
+                                                        resolution_type="cash_income",
+                                                        category_id=chosen_inc_cat["id"]
+                                                    )
+                                                    st.success("已确认为收入并更新分类")
+                                                    st.rerun()
+                                                except Exception as ex:
+                                                    handle_api_error(ex, "收入确认失败")
+
+                                    elif res_kind == "refund":
+                                        ref_col1, ref_col2 = st.columns([3, 1])
+                                        with ref_col1:
+                                            orig_exp_input = st.text_input("原支出交易 ID (Original Expense ID)", key=f"orig_exp_id_{c_id}")
+                                        with ref_col2:
+                                            if st.button("确认为退款", key=f"btn_res_ref_{c_id}"):
+                                                try:
+                                                    client.resolve_reconciliation_candidate(
+                                                        candidate_id=c_id,
+                                                        resolution_type="refund",
+                                                        original_expense_id=orig_exp_input.strip()
+                                                    )
+                                                    st.success("已确认为退款关联")
+                                                    st.rerun()
+                                                except Exception as ex:
+                                                    handle_api_error(ex, "退款关联失败")
+
+                                    elif res_kind == "transfer":
+                                        tf_col1, tf_col2, tf_col3 = st.columns([2, 2, 1])
+                                        with tf_col1:
+                                            other_accs = [a for a in active_accounts if a["id"] != batch_info.get("account_id")] or active_accounts
+                                            sel_counter_acc = st.selectbox(
+                                                "对方转出账户",
+                                                options=other_accs,
+                                                format_func=lambda x: f"{x['name']} ({x['currency']})",
+                                                key=f"sel_counter_{c_id}"
+                                            )
+                                        with tf_col2:
+                                            cross_curr = sel_counter_acc and sel_counter_acc["currency"] != sl.get("currency")
+                                            tf_counter_amt = None
+                                            if cross_curr:
+                                                tf_counter_amt = st.text_input(f"对方账户扣款金额 ({sel_counter_acc['currency']})", key=f"tf_amt_{c_id}")
+                                            else:
+                                                st.caption(f"同币种划转：扣款金额自动等额 ({sl.get('currency')} {sl.get('amount')})")
+                                        with tf_col3:
+                                            if st.button("确认为转账", key=f"btn_res_tf_{c_id}"):
+                                                try:
+                                                    client.resolve_reconciliation_candidate(
+                                                        candidate_id=c_id,
+                                                        resolution_type="transfer",
+                                                        counter_account_id=sel_counter_acc["id"],
+                                                        counter_amount=tf_counter_amt
+                                                    )
+                                                    st.success("已确认为内部转账")
+                                                    st.rerun()
+                                                except Exception as ex:
+                                                    handle_api_error(ex, "转账确认失败")
+
+                                    elif res_kind == "match":
+                                        m_col1, m_col2 = st.columns([3, 1])
+                                        with m_col1:
+                                            match_tx_input = st.text_input("匹配目标交易 ID (Target Transaction ID)", key=f"target_tx_id_{c_id}")
+                                        with m_col2:
+                                            if st.button("确认为匹配", key=f"btn_res_m_{c_id}"):
+                                                try:
+                                                    client.resolve_reconciliation_candidate(
+                                                        candidate_id=c_id,
+                                                        resolution_type="match",
+                                                        target_transaction_id=match_tx_input.strip()
+                                                    )
+                                                    st.success("已确认为交易匹配")
+                                                    st.rerun()
+                                                except Exception as ex:
+                                                    handle_api_error(ex, "匹配确认失败")
+
                                 # Category patch expander/form
-                                if is_cat_req:
+                                if is_cat_req and not is_type_ambig:
                                     st.info("💡 该交易需要补充支出分类：")
                                     cat_col1, cat_col2 = st.columns([3, 1])
                                     with cat_col1:
@@ -591,9 +726,11 @@ elif menu == "⚖️ 账户校准与对账":
                                             except Exception as ex:
                                                 handle_api_error(ex, "分类修改失败")
 
+                                # Action buttons: direct Accept disabled if candidate has unresolved semantic ambiguity
+                                has_unresolved_semantics = bool(r_code in ("TYPE_AMBIGUOUS", "INCOME_TRANSFER_REFUND_AMBIGUOUS"))
                                 btn_c1, btn_c2 = st.columns(2)
                                 with btn_c1:
-                                    if st.button("接受 (Accept)", key=f"acc_cand_{c_id}", type="secondary"):
+                                    if st.button("接受 (Accept)", key=f"acc_cand_{c_id}", type="secondary", disabled=has_unresolved_semantics):
                                         try:
                                             client.accept_reconciliation_candidate(c_id, target_transaction_id=selected_tx_id)
                                             st.success("已接受该候选")

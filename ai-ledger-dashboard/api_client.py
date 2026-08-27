@@ -441,6 +441,30 @@ class ApiClient:
             payload["target_transaction_id"] = target_transaction_id
         return self.request("POST", f"/api/v1/reconciliation-candidates/{candidate_id}/accept", json_data=payload)
 
+    def resolve_reconciliation_candidate(
+        self,
+        candidate_id: str,
+        resolution_type: str,
+        category_id: Optional[str] = None,
+        original_expense_id: Optional[str] = None,
+        counter_account_id: Optional[str] = None,
+        counter_amount: Optional[Union[str, Decimal, float]] = None,
+        target_transaction_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """POST /api/v1/reconciliation-candidates/{candidate_id}/resolve"""
+        payload: Dict[str, Any] = {"resolution_type": resolution_type}
+        if category_id:
+            payload["category_id"] = category_id
+        if original_expense_id:
+            payload["original_expense_id"] = original_expense_id
+        if counter_account_id:
+            payload["counter_account_id"] = counter_account_id
+        if counter_amount is not None:
+            payload["counter_amount"] = str(counter_amount)
+        if target_transaction_id:
+            payload["target_transaction_id"] = target_transaction_id
+        return self.request("POST", f"/api/v1/reconciliation-candidates/{candidate_id}/resolve", json_data=payload)
+
     def patch_reconciliation_candidate(self, candidate_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         """PATCH /api/v1/reconciliation-candidates/{candidate_id}"""
         return self.request("PATCH", f"/api/v1/reconciliation-candidates/{candidate_id}", json_data={"payload": payload})

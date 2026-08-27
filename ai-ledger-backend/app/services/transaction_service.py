@@ -338,23 +338,49 @@ def commit_transaction_correction(
     household = accounts_repo.get_household(conn, household_id)
     rep_curr = household["reporting_currency"]
 
+    # Determine active financial leg and currency
+    financial_leg: Optional[Decimal] = None
+    leg_curr: Optional[str] = None
+
     if tx_type in ("expense", "fee") and new_from is not None:
+        financial_leg = new_from
+        leg_curr = tx.get("from_currency")
         if tx.get("from_currency") == tx.get("original_currency") or tx.get("original_currency") is None:
             new_orig = new_from
-        if tx.get("from_currency") == rep_curr:
-            new_rep_amount = new_from
+        else:
+            # Foreign card transaction: preserve original foreign currency amount
+            new_orig = tx.get("original_amount")
     elif tx_type in ("cash_income", "refund") and new_to is not None:
+        financial_leg = new_to
+        leg_curr = tx.get("to_currency")
         if tx.get("to_currency") == tx.get("original_currency") or tx.get("original_currency") is None:
             new_orig = new_to
-        if tx.get("to_currency") == rep_curr:
-            new_rep_amount = new_to
+        else:
+            new_orig = tx.get("original_amount")
     elif tx_type == "transfer":
+        financial_leg = new_from
+        leg_curr = tx.get("from_currency")
         if new_from is not None and new_to is not None:
             if tx.get("from_currency") == tx.get("to_currency"):
                 new_fx_rate = Decimal("1.000000000000")
                 new_orig = new_from
             else:
                 new_fx_rate = (new_from / new_to).quantize(Decimal("0.000000000001"), rounding=ROUND_HALF_UP)
+
+    # Recompute reporting_amount deterministically preserving frozen reporting FX rate
+    if financial_leg is not None and leg_curr is not None:
+        if leg_curr == rep_curr:
+            new_rep_amount = quantize_money(financial_leg, rep_curr)
+        else:
+            if tx.get("reporting_fx_rate") is not None:
+                frozen_rate = parse_decimal(tx["reporting_fx_rate"])
+                new_rep_amount = quantize_money(financial_leg * frozen_rate, rep_curr)
+            elif tx.get("reporting_amount") is not None or tx.get("verification_status") == "statement_confirmed":
+                raise domain_tx.InvalidTransactionShapeError(
+                    "Cannot deterministically recompute reporting amount: missing frozen reporting FX rate."
+                )
+            else:
+                new_rep_amount = None
 
     # 6. Execute repository update
     merchant_raw = validated_changes.get("merchant") if "merchant" in validated_changes else tx.get("merchant")

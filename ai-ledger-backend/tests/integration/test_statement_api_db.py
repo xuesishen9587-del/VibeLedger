@@ -1,8 +1,4 @@
 import os
-os.environ.setdefault("ENVIRONMENT", "test")
-os.environ.setdefault("DATABASE_URL", "postgresql://test_user:test_pass@127.0.0.1:5432/vibeledger_test")
-os.environ.setdefault("DB_SCHEMA", "vibeledger_test_runner")
-
 import io
 import unittest
 from uuid import uuid4
@@ -720,6 +716,351 @@ class TestStatementApiDb(BaseDbTestCase):
         )
         self.assertEqual(commit_res.status_code, 200)
         self.assertEqual(commit_res.json()["status"], "committed")
+
+    def test_semantic_ambiguity_resolution_flow_and_guards(self):
+        """
+        Proves comprehensive semantic candidate resolution and critical direction guards:
+        A. unknown debit -> TYPE_AMBIGUOUS -> cannot accept directly -> resolve as expense + category -> accept -> commit succeeds
+        B. ambiguous credit -> INCOME_TRANSFER_REFUND_AMBIGUOUS -> cannot accept directly (NEVER silently becomes cash_income)
+        C. choose cash_income + income category -> succeeds
+        D. choose refund + valid original expense -> succeeds -> over-refund rejected
+        E. choose internal transfer -> valid counter-account succeeds -> cross-household rejected -> cross-currency missing leg rejected
+        """
+        import app.repositories.accounts as accounts_repo
+        conn = get_connection(self.test_schema)
+        try:
+            with transaction(conn):
+                acc_cny_2_id = uuid4()
+                accounts_repo.create_account(
+                    conn=conn,
+                    account_id=acc_cny_2_id,
+                    household_id=self.household_id,
+                    name="Second Checking CNY",
+                    account_type="cash",
+                    currency="CNY",
+                    owner_user_id=self.user_id
+                )
+                acc_usd_id = uuid4()
+                accounts_repo.create_account(
+                    conn=conn,
+                    account_id=acc_usd_id,
+                    household_id=self.household_id,
+                    name="USD Savings",
+                    account_type="cash",
+                    currency="USD",
+                    owner_user_id=self.user_id
+                )
+                # Seed committed original expense of 200 CNY for refund testing
+                orig_expense_id = uuid4()
+                tx_repo.create_transaction(
+                    conn=conn,
+                    tx_id=orig_expense_id,
+                    household_id=self.household_id,
+                    transaction_type="expense",
+                    occurred_on=date(2026, 8, 1),
+                    original_amount=Decimal("200.00"),
+                    original_currency="CNY",
+                    from_amount=Decimal("200.00"),
+                    from_currency="CNY",
+                    from_account_id=self.acc_cny_id,
+                    category_id=self.cat_dining_id,
+                    merchant="Sample Restaurant",
+                    reporting_amount=Decimal("200.00"),
+                    reporting_currency="CNY"
+                )
+        finally:
+            conn.close()
+
+        # -------------------------------------------------------------
+        # Scenario A: Unknown debit -> TYPE_AMBIGUOUS -> guarded accept
+        # -------------------------------------------------------------
+        mock_debit_extraction = StatementExtractionResult(
+            period_start=date(2026, 8, 1),
+            period_end=date(2026, 8, 31),
+            closing_balance=None,
+            currency="CNY",
+            lines=[
+                ParsedStatementLine(
+                    source_page_no=1,
+                    source_row_no=1,
+                    transaction_on=date(2026, 8, 5),
+                    description_raw="Miscellaneous Charge 100",
+                    amount=Decimal("100.00"),
+                    currency="CNY",
+                    direction="debit",
+                    line_type="unknown"
+                )
+            ]
+        )
+        statements_router._statement_parser = MockStatementParser(result=mock_debit_extraction)
+        pdf_bytes = make_pdf_bytes(["Debit Statement"])
+
+        res_up_debit = self.client.post(
+            f"/api/v1/accounts/{acc_cny_2_id}/statements",
+            headers=self.headers,
+            files={"file": ("stmt_debit.pdf", pdf_bytes, "application/pdf")}
+        )
+        self.assertEqual(res_up_debit.status_code, 201)
+        batch_debit_id = res_up_debit.json()["batch_id"]
+
+        prev_debit = self.client.get(f"/api/v1/reconciliation-batches/{batch_debit_id}/preview", headers=self.headers)
+        debit_cand = prev_debit.json()["candidates"][0]
+        self.assertEqual(debit_cand.get("reason_code"), "TYPE_AMBIGUOUS")
+
+        # Scenario A1: Direct accept without resolution is strictly rejected
+        acc_debit_fail = self.client.post(
+            f"/api/v1/reconciliation-candidates/{debit_cand['id']}/accept",
+            headers=self.headers,
+            json={}
+        )
+        self.assertEqual(acc_debit_fail.status_code, 422)
+
+        # Scenario A2: Resolve as expense with valid category
+        res_debit_ok = self.client.post(
+            f"/api/v1/reconciliation-candidates/{debit_cand['id']}/resolve",
+            headers=self.headers,
+            json={
+                "resolution_type": "expense",
+                "category_id": str(self.cat_dining_id)
+            }
+        )
+        self.assertEqual(res_debit_ok.status_code, 200)
+
+        # Scenario A3: Accept resolved candidate -> succeeds
+        acc_debit_ok = self.client.post(
+            f"/api/v1/reconciliation-candidates/{debit_cand['id']}/accept",
+            headers=self.headers,
+            json={}
+        )
+        self.assertEqual(acc_debit_ok.status_code, 200)
+
+        # Scenario A4: Commit batch succeeds
+        prev_debit_ready = self.client.get(f"/api/v1/reconciliation-batches/{batch_debit_id}/preview", headers=self.headers)
+        self.assertEqual(prev_debit_ready.json()["batch"]["status"], "ready")
+        commit_debit = self.client.post(
+            f"/api/v1/reconciliation-batches/{batch_debit_id}/commit",
+            headers=self.headers,
+            json={"row_version": prev_debit_ready.json()["batch"]["row_version"]}
+        )
+        self.assertEqual(commit_debit.status_code, 200)
+        self.assertEqual(commit_debit.json()["status"], "committed")
+
+        # -------------------------------------------------------------
+        # Scenario B & C: Ambiguous credit -> guarded accept & resolve as cash_income
+        # -------------------------------------------------------------
+        mock_credit_extraction = StatementExtractionResult(
+            period_start=date(2026, 8, 1),
+            period_end=date(2026, 8, 31),
+            closing_balance=None,
+            currency="CNY",
+            lines=[
+                ParsedStatementLine(
+                    source_page_no=1,
+                    source_row_no=1,
+                    transaction_on=date(2026, 8, 6),
+                    description_raw="Deposit Inflow 600.00",
+                    amount=Decimal("600.00"),
+                    currency="CNY",
+                    direction="credit",
+                    line_type="unknown"
+                )
+            ]
+        )
+        statements_router._statement_parser = MockStatementParser(result=mock_credit_extraction)
+        res_up_credit = self.client.post(
+            f"/api/v1/accounts/{acc_cny_2_id}/statements",
+            headers=self.headers,
+            files={"file": ("stmt_credit.pdf", pdf_bytes, "application/pdf")}
+        )
+        self.assertEqual(res_up_credit.status_code, 201)
+        batch_credit_id = res_up_credit.json()["batch_id"]
+
+        prev_credit = self.client.get(f"/api/v1/reconciliation-batches/{batch_credit_id}/preview", headers=self.headers)
+        credit_cand = prev_credit.json()["candidates"][0]
+        self.assertEqual(credit_cand.get("reason_code"), "INCOME_TRANSFER_REFUND_AMBIGUOUS")
+
+        # CRITICAL REGRESSION ASSERTION: Unresolved credit candidate must NEVER silently accept as cash_income
+        acc_credit_fail = self.client.post(
+            f"/api/v1/reconciliation-candidates/{credit_cand['id']}/accept",
+            headers=self.headers,
+            json={}
+        )
+        self.assertEqual(acc_credit_fail.status_code, 422)
+
+        # Scenario C: Resolve as cash_income + income category
+        res_credit_inc = self.client.post(
+            f"/api/v1/reconciliation-candidates/{credit_cand['id']}/resolve",
+            headers=self.headers,
+            json={
+                "resolution_type": "cash_income",
+                "category_id": str(self.cat_income_id)
+            }
+        )
+        self.assertEqual(res_credit_inc.status_code, 200)
+
+        # Accept and commit cash_income
+        self.assertEqual(self.client.post(f"/api/v1/reconciliation-candidates/{credit_cand['id']}/accept", headers=self.headers, json={}).status_code, 200)
+        prev_c_ready = self.client.get(f"/api/v1/reconciliation-batches/{batch_credit_id}/preview", headers=self.headers)
+        self.assertEqual(self.client.post(f"/api/v1/reconciliation-batches/{batch_credit_id}/commit", headers=self.headers, json={"row_version": prev_c_ready.json()["batch"]["row_version"]}).status_code, 200)
+
+        # -------------------------------------------------------------
+        # Scenario D: Resolve as refund & over-refund guard
+        # -------------------------------------------------------------
+        # Upload statement line with 250 CNY credit (exceeds 200 original expense)
+        mock_refund_over_ext = StatementExtractionResult(
+            period_start=date(2026, 8, 1),
+            period_end=date(2026, 8, 31),
+            closing_balance=None,
+            currency="CNY",
+            lines=[
+                ParsedStatementLine(
+                    source_page_no=1,
+                    source_row_no=1,
+                    transaction_on=date(2026, 8, 7),
+                    description_raw="Merchant Refund 250.00",
+                    amount=Decimal("250.00"),
+                    currency="CNY",
+                    direction="credit",
+                    line_type="unknown"
+                )
+            ]
+        )
+        statements_router._statement_parser = MockStatementParser(result=mock_refund_over_ext)
+        res_up_ref_over = self.client.post(
+            f"/api/v1/accounts/{self.acc_cny_id}/statements",
+            headers=self.headers,
+            files={"file": ("stmt_ref_over.pdf", pdf_bytes, "application/pdf")}
+        )
+        self.assertEqual(res_up_ref_over.status_code, 201)
+        batch_ref_over_id = res_up_ref_over.json()["batch_id"]
+        cand_ref_over = self.client.get(f"/api/v1/reconciliation-batches/{batch_ref_over_id}/preview", headers=self.headers).json()["candidates"][0]
+
+        # Over-refund attempt: 250 > 200 -> 422 rejected!
+        res_over_ref = self.client.post(
+            f"/api/v1/reconciliation-candidates/{cand_ref_over['id']}/resolve",
+            headers=self.headers,
+            json={
+                "resolution_type": "refund",
+                "original_expense_id": str(orig_expense_id)
+            }
+        )
+        self.assertEqual(res_over_ref.status_code, 422)
+
+        # Upload valid partial refund line of 50.00 CNY
+        mock_refund_valid_ext = StatementExtractionResult(
+            period_start=date(2026, 8, 1),
+            period_end=date(2026, 8, 31),
+            closing_balance=None,
+            currency="CNY",
+            lines=[
+                ParsedStatementLine(
+                    source_page_no=1,
+                    source_row_no=1,
+                    transaction_on=date(2026, 8, 7),
+                    description_raw="Merchant Refund 50.00",
+                    amount=Decimal("50.00"),
+                    currency="CNY",
+                    direction="credit",
+                    line_type="unknown"
+                )
+            ]
+        )
+        statements_router._statement_parser = MockStatementParser(result=mock_refund_valid_ext)
+        res_up_ref_valid = self.client.post(
+            f"/api/v1/accounts/{self.acc_cny_id}/statements",
+            headers=self.headers,
+            files={"file": ("stmt_ref_valid.pdf", pdf_bytes, "application/pdf")}
+        )
+        self.assertEqual(res_up_ref_valid.status_code, 201)
+        batch_ref_valid_id = res_up_ref_valid.json()["batch_id"]
+        cand_ref_valid = self.client.get(f"/api/v1/reconciliation-batches/{batch_ref_valid_id}/preview", headers=self.headers).json()["candidates"][0]
+
+        # Valid refund resolve succeeds
+        res_ref_valid = self.client.post(
+            f"/api/v1/reconciliation-candidates/{cand_ref_valid['id']}/resolve",
+            headers=self.headers,
+            json={
+                "resolution_type": "refund",
+                "original_expense_id": str(orig_expense_id)
+            }
+        )
+        self.assertEqual(res_ref_valid.status_code, 200)
+        self.assertEqual(self.client.post(f"/api/v1/reconciliation-candidates/{cand_ref_valid['id']}/accept", headers=self.headers, json={}).status_code, 200)
+
+        # -------------------------------------------------------------
+        # Scenario E: Resolve as transfer & isolation/currency guards
+        # -------------------------------------------------------------
+        mock_tf_ext = StatementExtractionResult(
+            period_start=date(2026, 8, 1),
+            period_end=date(2026, 8, 31),
+            closing_balance=None,
+            currency="CNY",
+            lines=[
+                ParsedStatementLine(
+                    source_page_no=1,
+                    source_row_no=1,
+                    transaction_on=date(2026, 8, 8),
+                    description_raw="Transfer from other bank 300.00",
+                    amount=Decimal("300.00"),
+                    currency="CNY",
+                    direction="credit",
+                    line_type="unknown"
+                )
+            ]
+        )
+        statements_router._statement_parser = MockStatementParser(result=mock_tf_ext)
+        res_up_tf = self.client.post(
+            f"/api/v1/accounts/{self.acc_cny_id}/statements",
+            headers=self.headers,
+            files={"file": ("stmt_tf.pdf", pdf_bytes, "application/pdf")}
+        )
+        self.assertEqual(res_up_tf.status_code, 201)
+        batch_tf_id = res_up_tf.json()["batch_id"]
+        cand_tf = self.client.get(f"/api/v1/reconciliation-batches/{batch_tf_id}/preview", headers=self.headers).json()["candidates"][0]
+
+        # E1. Cross-household counter-account -> 422 rejected!
+        res_cross_hh = self.client.post(
+            f"/api/v1/reconciliation-candidates/{cand_tf['id']}/resolve",
+            headers=self.headers,
+            json={
+                "resolution_type": "transfer",
+                "counter_account_id": str(self.acc_b_id)
+            }
+        )
+        self.assertEqual(res_cross_hh.status_code, 422)
+
+        # E2. Cross-currency counter-account missing explicit counter_amount -> 422 rejected!
+        res_cross_curr_missing = self.client.post(
+            f"/api/v1/reconciliation-candidates/{cand_tf['id']}/resolve",
+            headers=self.headers,
+            json={
+                "resolution_type": "transfer",
+                "counter_account_id": str(acc_usd_id)
+            }
+        )
+        self.assertEqual(res_cross_curr_missing.status_code, 422)
+
+        # E3. Same-currency valid counter-account -> succeeds!
+        res_tf_valid = self.client.post(
+            f"/api/v1/reconciliation-candidates/{cand_tf['id']}/resolve",
+            headers=self.headers,
+            json={
+                "resolution_type": "transfer",
+                "counter_account_id": str(acc_cny_2_id)
+            }
+        )
+        self.assertEqual(res_tf_valid.status_code, 200)
+
+        # Accept and commit transfer batch
+        self.assertEqual(self.client.post(f"/api/v1/reconciliation-candidates/{cand_tf['id']}/accept", headers=self.headers, json={}).status_code, 200)
+        prev_tf_ready = self.client.get(f"/api/v1/reconciliation-batches/{batch_tf_id}/preview", headers=self.headers)
+        commit_tf = self.client.post(
+            f"/api/v1/reconciliation-batches/{batch_tf_id}/commit",
+            headers=self.headers,
+            json={"row_version": prev_tf_ready.json()["batch"]["row_version"]}
+        )
+        self.assertEqual(commit_tf.status_code, 200)
+        self.assertEqual(commit_tf.json()["status"], "committed")
 
 
 if __name__ == "__main__":

@@ -1,3 +1,4 @@
+from decimal import Decimal
 from typing import Optional, Dict, Any
 from uuid import UUID
 from fastapi import APIRouter, Depends, Query, status
@@ -30,6 +31,15 @@ class CandidateAcceptRequest(BaseModel):
 
 class CandidatePatchRequest(BaseModel):
     payload: Dict[str, Any] = Field(..., description="Updated candidate payload data")
+
+
+class CandidateResolveRequest(BaseModel):
+    resolution_type: str = Field(..., description="Explicit resolution type (expense, fee, cash_income, refund, transfer, match)")
+    category_id: Optional[UUID] = Field(None, description="Active category ID (required for expense/fee/cash_income)")
+    original_expense_id: Optional[UUID] = Field(None, description="Target original expense ID for refund")
+    counter_account_id: Optional[UUID] = Field(None, description="Counter account ID for internal transfer")
+    counter_amount: Optional[Decimal] = Field(None, description="Explicit counter amount for cross-currency transfer")
+    target_transaction_id: Optional[UUID] = Field(None, description="Target transaction ID for match")
 
 
 class CandidateRejectRequest(BaseModel):
@@ -202,6 +212,35 @@ def accept_reconciliation_candidate_endpoint(
             household_id=device["household_id"],
             user_id=device.get("user_id"),
             target_transaction_id=target_tx,
+            device_id=device.get("device_id"),
+            fx_service=fx_svc
+        )
+
+
+@candidates_router.post("/{candidate_id}/resolve", summary="Resolve Semantic Candidate")
+def resolve_reconciliation_candidate_endpoint(
+    candidate_id: UUID,
+    payload: CandidateResolveRequest,
+    device: Dict[str, Any] = Depends(get_authenticated_actor),
+    conn: Any = Depends(get_db_connection)
+) -> Dict[str, Any]:
+    """
+    Explicitly resolves a semantically ambiguous candidate with typed inputs.
+    """
+    fx_svc = getattr(candidates_router, "_reference_fx_service", None) or ReferenceFxService()
+
+    with transaction(conn):
+        return statement_service.resolve_candidate(
+            conn=conn,
+            candidate_id=candidate_id,
+            household_id=device["household_id"],
+            resolution_type=payload.resolution_type,
+            category_id=payload.category_id,
+            original_expense_id=payload.original_expense_id,
+            counter_account_id=payload.counter_account_id,
+            counter_amount=payload.counter_amount,
+            target_transaction_id=payload.target_transaction_id,
+            user_id=device.get("user_id"),
             device_id=device.get("device_id"),
             fx_service=fx_svc
         )

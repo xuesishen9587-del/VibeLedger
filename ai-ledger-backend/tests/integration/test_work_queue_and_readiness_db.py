@@ -206,18 +206,34 @@ class TestWorkQueueAndReadinessDb(BaseDbTestCase):
             self.assertEqual(resp_no_table.json()["status"], "unavailable")
             self.assertEqual(resp_no_table.json()["database"], "schema_not_ready")
 
-        # 7. Stale migration version -> 503 schema_not_ready
+        # 7. Missing/stale migration version -> 503 schema_not_ready
         mock_stale_conn = MagicMock()
         mock_stale_cur = MagicMock()
         mock_stale_cur.execute.return_value = None
         mock_stale_cur.fetchone.return_value = [True]
-        mock_stale_cur.fetchall.return_value = [("0001_extensions.sql",)]  # Only 1 of 9 migrations applied
+        mock_stale_cur.fetchall.return_value = [("0001_extensions.sql", "valid_hash")]  # Only 1 of 9 migrations applied
         mock_stale_conn.cursor.return_value.__enter__.return_value = mock_stale_cur
         with patch("app.db.get_connection", return_value=mock_stale_conn):
             resp_stale = self.client.get("/ready")
             self.assertEqual(resp_stale.status_code, 503)
             self.assertEqual(resp_stale.json()["status"], "unavailable")
             self.assertEqual(resp_stale.json()["database"], "schema_not_ready")
+
+        # 8. Same filename, wrong checksum -> 503 schema_not_ready
+        from migrations.runner import get_migration_files
+        all_files = get_migration_files()
+        tampered_rows = [(f, "tampered_bad_checksum_hash") for f in all_files]
+        mock_drift_conn = MagicMock()
+        mock_drift_cur = MagicMock()
+        mock_drift_cur.execute.return_value = None
+        mock_drift_cur.fetchone.return_value = [True]
+        mock_drift_cur.fetchall.return_value = tampered_rows
+        mock_drift_conn.cursor.return_value.__enter__.return_value = mock_drift_cur
+        with patch("app.db.get_connection", return_value=mock_drift_conn):
+            resp_drift = self.client.get("/ready")
+            self.assertEqual(resp_drift.status_code, 503)
+            self.assertEqual(resp_drift.json()["status"], "unavailable")
+            self.assertEqual(resp_drift.json()["database"], "schema_not_ready")
 
 
 if __name__ == "__main__":

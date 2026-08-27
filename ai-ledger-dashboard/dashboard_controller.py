@@ -54,6 +54,20 @@ def is_ambiguous_match_candidate(candidate: Dict[str, Any]) -> bool:
     return len(options) > 1
 
 
+def is_type_ambiguous_candidate(candidate: Dict[str, Any]) -> bool:
+    """
+    Checks if candidate is an ambiguous debit/general line requiring explicit type & category selection.
+    """
+    return candidate.get("reason_code") == "TYPE_AMBIGUOUS"
+
+
+def is_credit_ambiguous_candidate(candidate: Dict[str, Any]) -> bool:
+    """
+    Checks if candidate is an ambiguous credit line requiring explicit income/refund/transfer/match resolution.
+    """
+    return candidate.get("reason_code") == "INCOME_TRANSFER_REFUND_AMBIGUOUS"
+
+
 def is_category_required_candidate(candidate: Dict[str, Any]) -> bool:
     """
     Determines if candidate requires category selection before accept.
@@ -82,10 +96,15 @@ def build_category_patch_payload(candidate: Dict[str, Any], category_id: str) ->
     return {"transaction": {"category_id": str(category_id)}}
 
 
-def is_batch_ready_to_commit(preview: Dict[str, Any]) -> bool:
+def is_batch_ready_to_commit(preview: Optional[Dict[str, Any]]) -> bool:
     """
-    Checks if reconciliation batch has no remaining actionable candidates.
+    Checks if reconciliation batch is in status 'ready' AND has zero actionable candidates.
     """
+    if not preview or not isinstance(preview, dict):
+        return False
+    batch = preview.get("batch", {})
+    if not isinstance(batch, dict) or batch.get("status") != "ready":
+        return False
     candidates = preview.get("candidates", [])
     classified = classify_candidates(candidates)
     return len(classified["actionable"]) == 0

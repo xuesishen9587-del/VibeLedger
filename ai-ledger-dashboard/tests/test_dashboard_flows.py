@@ -15,6 +15,8 @@ from dashboard_controller import (
     classify_candidates,
     format_candidate_options,
     is_ambiguous_match_candidate,
+    is_type_ambiguous_candidate,
+    is_credit_ambiguous_candidate,
     is_category_required_candidate,
     build_category_patch_payload,
     is_batch_ready_to_commit
@@ -165,30 +167,50 @@ class TestDashboardFlows(unittest.TestCase):
 
     def test_batch_readiness_and_concurrency(self):
         """
-        Proves is_batch_ready_to_commit is False when actionable candidates remain,
-        and becomes True when all candidates are resolved or rejected.
+        Proves that is_batch_ready_to_commit returns True ONLY when:
+        preview["batch"]["status"] == "ready" AND zero actionable candidates.
         """
-        # 1. Unresolved batch
-        preview_unresolved = {
-            "batch": {"id": "batch-1", "row_version": 1, "status": "needs_review"},
+        # 1. ready + zero actionable -> True
+        preview_ready_zero_actionable = {
+            "batch": {"id": "batch-1", "row_version": 2, "status": "ready"},
             "candidates": [
-                {"id": "c-1", "status": "needs_review"},
-                {"id": "c-2", "status": "accepted"}
+                {"id": "c-1", "status": "accepted"},
+                {"id": "c-2", "status": "rejected"}
             ]
         }
-        self.assertFalse(is_batch_ready_to_commit(preview_unresolved))
+        self.assertTrue(is_batch_ready_to_commit(preview_ready_zero_actionable))
 
-        # 2. Resolved batch
-        preview_resolved = {
+        # 2. needs_review + zero actionable -> False
+        preview_needs_review_zero_actionable = {
             "batch": {"id": "batch-1", "row_version": 2, "status": "needs_review"},
             "candidates": [
                 {"id": "c-1", "status": "accepted"},
                 {"id": "c-2", "status": "rejected"}
             ]
         }
-        self.assertTrue(is_batch_ready_to_commit(preview_resolved))
+        self.assertFalse(is_batch_ready_to_commit(preview_needs_review_zero_actionable))
 
-        # 3. Commit with row_version
+        # 3. ready + needs_review candidate -> False
+        preview_ready_with_actionable = {
+            "batch": {"id": "batch-1", "row_version": 1, "status": "ready"},
+            "candidates": [
+                {"id": "c-1", "status": "needs_review"},
+                {"id": "c-2", "status": "accepted"}
+            ]
+        }
+        self.assertFalse(is_batch_ready_to_commit(preview_ready_with_actionable))
+
+        # 4. committed -> False
+        preview_committed = {
+            "batch": {"id": "batch-1", "row_version": 3, "status": "committed"},
+            "candidates": [
+                {"id": "c-1", "status": "applied"},
+                {"id": "c-2", "status": "applied"}
+            ]
+        }
+        self.assertFalse(is_batch_ready_to_commit(preview_committed))
+
+        # 5. Commit with row_version
         with patch.object(ApiClient, "request") as mock_request:
             mock_request.return_value = {"status": "committed"}
             self.client.commit_reconciliation_batch("batch-1", row_version=2)
@@ -288,7 +310,7 @@ class TestDashboardFlows(unittest.TestCase):
 
     @patch.object(ApiClient, "request")
     def test_reconciliation_candidate_accept_uses_candidate_id(self, mock_request):
-        """Proves candidate accept sends candidate_id in path, not statement_line_id."""
+        # Candidate accept sends candidate_id in path, not statement_line_id
         mock_request.return_value = {"status": "accepted"}
         cand_id = "real-candidate-uuid-1111"
         target_tx_id = "target-tx-uuid-2222"
@@ -302,7 +324,7 @@ class TestDashboardFlows(unittest.TestCase):
 
     @patch.object(ApiClient, "request")
     def test_transaction_void_mandatory_version(self, mock_request):
-        """Proves transaction void requires expected_version."""
+        # Transaction void requires expected_version
         mock_request.return_value = {"status": "voided", "account_balance_restored": True}
         self.client.void_transaction("tx-1", delete_reason="Wrong entry", expected_version=3)
         mock_request.assert_called_once_with(
@@ -313,7 +335,7 @@ class TestDashboardFlows(unittest.TestCase):
 
     @patch.object(ApiClient, "request")
     def test_backend_multi_currency_aggregates_consumed(self, mock_request):
-        """Proves dashboard consumes backend-provided reporting currency aggregates."""
+        # Dashboard consumes backend-provided reporting currency aggregates
         mock_request.return_value = {
             "reporting_currency": "CNY",
             "total_assets": "15000.00",
@@ -328,6 +350,46 @@ class TestDashboardFlows(unittest.TestCase):
         self.assertEqual(overview["reporting_currency"], "CNY")
         self.assertEqual(len(overview["asset_allocation"]), 2)
         self.assertEqual(overview["asset_allocation"][0]["amount"], "10000.00")
+
+    def test_candidate_semantic_ambiguity_helpers(self):
+        type_ambig_cand = {"id": "c-1", "reason_code": "TYPE_AMBIGUOUS"}
+        credit_ambig_cand = {"id": "c-2", "reason_code": "INCOME_TRANSFER_REFUND_AMBIGUOUS"}
+        normal_cand = {"id": "c-3", "reason_code": None}
+
+        self.assertTrue(is_type_ambiguous_candidate(type_ambig_cand))
+        self.assertFalse(is_type_ambiguous_candidate(credit_ambig_cand))
+        self.assertFalse(is_type_ambiguous_candidate(normal_cand))
+
+        self.assertTrue(is_credit_ambiguous_candidate(credit_ambig_cand))
+        self.assertFalse(is_credit_ambiguous_candidate(type_ambig_cand))
+        self.assertFalse(is_credit_ambiguous_candidate(normal_cand))
+
+    @patch.object(ApiClient, "request")
+    def test_reconciliation_candidate_resolve_call(self, mock_request):
+        mock_request.return_value = {"status": "needs_review"}
+
+        self.client.resolve_reconciliation_candidate(
+            candidate_id="cand-123",
+            resolution_type="expense",
+            category_id="cat-exp-456"
+        )
+        mock_request.assert_called_with(
+            "POST",
+            "/api/v1/reconciliation-candidates/cand-123/resolve",
+            json_data={"resolution_type": "expense", "category_id": "cat-exp-456"}
+        )
+
+        self.client.resolve_reconciliation_candidate(
+            candidate_id="cand-123",
+            resolution_type="transfer",
+            counter_account_id="acc-counter-789",
+            counter_amount=Decimal("150.00")
+        )
+        mock_request.assert_called_with(
+            "POST",
+            "/api/v1/reconciliation-candidates/cand-123/resolve",
+            json_data={"resolution_type": "transfer", "counter_account_id": "acc-counter-789", "counter_amount": "150.00"}
+        )
 
 
 if __name__ == "__main__":

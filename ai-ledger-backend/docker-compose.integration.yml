@@ -1,0 +1,16 @@
+services:
+  postgres-integration:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: vibeledger_test
+      POSTGRES_PASSWORD: vibeledger_test
+      POSTGRES_DB: vibeledger_test
+    ports:
+      - "127.0.0.1:${VIBELEDGER_TEST_DB_PORT:-55432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vibeledger_test -d vibeledger_test"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+    tmpfs:
+      - /var/lib/postgresql/data

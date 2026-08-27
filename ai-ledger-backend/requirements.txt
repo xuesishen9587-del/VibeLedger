@@ -10,3 +10,4 @@ psycopg2-binary>=2.9.0
 pillow>=10.2.0
 pypdf>=4.0.0
 python-multipart>=0.0.9
+pyjwt[crypto]>=2.9.0,<3

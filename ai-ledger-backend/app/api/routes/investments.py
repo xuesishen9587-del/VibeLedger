@@ -5,7 +5,7 @@ from decimal import Decimal
 from fastapi import APIRouter, Depends, status, Query
 from pydantic import BaseModel, Field
 
-from app.api.deps import get_db_connection, get_authenticated_device
+from app.api.deps import get_db_connection, get_authenticated_actor
 from app.db import transaction
 import app.services.investment_service as investment_service
 
@@ -14,7 +14,7 @@ router = APIRouter(prefix="/api/v1/investment-accounts", tags=["Investments"])
 
 
 class ManualInvestmentSnapshotRequest(BaseModel):
-    idempotency_key: str = Field(..., min_length=8, max_length=200, description="Idempotency key for request deduplication")
+    idempotency_key: Optional[str] = Field(None, min_length=8, max_length=200, description="Idempotency key for request deduplication (required for device, optional for browser)")
     as_of: str = Field(..., description="ISO 8601 timezone-aware timestamp for valuation")
     total_asset_value: str = Field(..., description="Authoritative account-level total asset valuation")
     currency: str = Field(..., min_length=3, max_length=3, description="Currency code (e.g. CNY, USD)")
@@ -60,7 +60,7 @@ class InvestmentPerformanceResponse(BaseModel):
 def create_investment_snapshot(
     account_id: UUID,
     payload: ManualInvestmentSnapshotRequest,
-    device: Dict[str, Any] = Depends(get_authenticated_device),
+    device: Dict[str, Any] = Depends(get_authenticated_actor),
     conn: Any = Depends(get_db_connection)
 ) -> Dict[str, Any]:
     """
@@ -75,7 +75,7 @@ def create_investment_snapshot(
             account_id=account_id,
             payload=payload.model_dump(),
             user_id=device.get("user_id"),
-            device_id=device.get("device_id") or device.get("id")
+            device_id=device.get("device_id")
         )
         return result
 
@@ -90,7 +90,7 @@ def get_investment_account_performance(
     account_id: UUID,
     from_date: Optional[date] = Query(None, alias="from", description="Optional filter start date"),
     to_date: Optional[date] = Query(None, alias="to", description="Optional filter end date"),
-    device: Dict[str, Any] = Depends(get_authenticated_device),
+    device: Dict[str, Any] = Depends(get_authenticated_actor),
     conn: Any = Depends(get_db_connection)
 ) -> Dict[str, Any]:
     """

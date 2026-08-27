@@ -4,7 +4,7 @@ from datetime import date
 from fastapi import APIRouter, Depends, Query
 from decimal import Decimal
 
-from app.api.deps import get_db_connection, get_authenticated_device
+from app.api.deps import get_db_connection, get_authenticated_actor
 from app.domain.money import quantize_money
 from app.domain.transactions import TransactionResourceNotFoundError
 import app.repositories.transactions as transactions_repo
@@ -70,7 +70,7 @@ def list_transactions(
     verification_status: Optional[str] = Query(None, description="Verification status filter"),
     limit: int = Query(50, ge=1, le=200, description="Items per page (1-200)"),
     cursor: Optional[str] = Query(None, description="Pagination cursor"),
-    device: Dict[str, Any] = Depends(get_authenticated_device),
+    device: Dict[str, Any] = Depends(get_authenticated_actor),
     conn: Any = Depends(get_db_connection)
 ) -> Dict[str, Any]:
     """
@@ -97,7 +97,7 @@ def list_transactions(
 @router.get("/{transaction_id}", summary="Get Transaction Details")
 def get_transaction(
     transaction_id: UUID,
-    device: Dict[str, Any] = Depends(get_authenticated_device),
+    device: Dict[str, Any] = Depends(get_authenticated_actor),
     conn: Any = Depends(get_db_connection)
 ) -> Dict[str, Any]:
     """

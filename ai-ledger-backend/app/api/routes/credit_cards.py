@@ -2,7 +2,7 @@ from typing import Optional, Dict, Any
 from uuid import UUID
 from fastapi import APIRouter, Depends
 
-from app.api.deps import get_db_connection, get_authenticated_device
+from app.api.deps import get_db_connection, get_authenticated_actor
 from app.domain.money import quantize_money
 from app.domain.transactions import AccountResourceNotFoundError, AccountTypeMismatchError
 import app.repositories.accounts as accounts_repo
@@ -13,7 +13,7 @@ router = APIRouter(prefix="/api/v1/credit-cards", tags=["Credit Cards"])
 @router.get("/{account_id}/state", summary="Get Credit Card Account State")
 def get_credit_card_state(
     account_id: UUID,
-    device: Dict[str, Any] = Depends(get_authenticated_device),
+    device: Dict[str, Any] = Depends(get_authenticated_actor),
     conn: Any = Depends(get_db_connection)
 ) -> Dict[str, Any]:
     """

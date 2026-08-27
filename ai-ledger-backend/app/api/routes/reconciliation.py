@@ -3,7 +3,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Query, status
 from pydantic import BaseModel, Field
 
-from app.api.deps import get_db_connection, get_authenticated_device
+from app.api.deps import get_db_connection, get_authenticated_actor
 from app.db import transaction
 from app.domain.transactions import (
     BatchNotFoundError,
@@ -41,7 +41,7 @@ class CandidateRejectRequest(BaseModel):
 @router.get("/{batch_id}", summary="Get Reconciliation Batch Summary")
 def get_reconciliation_batch_endpoint(
     batch_id: UUID,
-    device: Dict[str, Any] = Depends(get_authenticated_device),
+    device: Dict[str, Any] = Depends(get_authenticated_actor),
     conn: Any = Depends(get_db_connection)
 ) -> Dict[str, Any]:
     """
@@ -69,7 +69,7 @@ def get_reconciliation_batch_endpoint(
 @router.get("/{batch_id}/preview", summary="Get Reconciliation Preview")
 def get_reconciliation_preview_endpoint(
     batch_id: UUID,
-    device: Dict[str, Any] = Depends(get_authenticated_device),
+    device: Dict[str, Any] = Depends(get_authenticated_actor),
     conn: Any = Depends(get_db_connection)
 ) -> Dict[str, Any]:
     """
@@ -103,7 +103,7 @@ def get_statement_lines_endpoint(
     batch_id: UUID,
     match_status: Optional[str] = Query(None, description="Filter by match status"),
     line_type: Optional[str] = Query(None, description="Filter by line type"),
-    device: Dict[str, Any] = Depends(get_authenticated_device),
+    device: Dict[str, Any] = Depends(get_authenticated_actor),
     conn: Any = Depends(get_db_connection)
 ) -> Dict[str, Any]:
     """
@@ -122,7 +122,7 @@ def get_statement_lines_endpoint(
 def commit_reconciliation_batch_endpoint(
     batch_id: UUID,
     payload: Optional[BatchCommitRequest] = None,
-    device: Dict[str, Any] = Depends(get_authenticated_device),
+    device: Dict[str, Any] = Depends(get_authenticated_actor),
     conn: Any = Depends(get_db_connection)
 ) -> Dict[str, Any]:
     """
@@ -151,7 +151,7 @@ def commit_reconciliation_batch_endpoint(
                 conn=conn,
                 batch_id=batch_id,
                 user_id=device.get("user_id"),
-                device_id=device.get("id"),
+                device_id=device.get("device_id"),
                 fx_service=fx_svc
             )
 
@@ -185,7 +185,7 @@ def commit_reconciliation_batch_endpoint(
 def accept_reconciliation_candidate_endpoint(
     candidate_id: UUID,
     payload: Optional[CandidateAcceptRequest] = None,
-    device: Dict[str, Any] = Depends(get_authenticated_device),
+    device: Dict[str, Any] = Depends(get_authenticated_actor),
     conn: Any = Depends(get_db_connection)
 ) -> Dict[str, Any]:
     """
@@ -202,7 +202,7 @@ def accept_reconciliation_candidate_endpoint(
             household_id=device["household_id"],
             user_id=device.get("user_id"),
             target_transaction_id=target_tx,
-            device_id=device.get("id"),
+            device_id=device.get("device_id"),
             fx_service=fx_svc
         )
 
@@ -211,7 +211,7 @@ def accept_reconciliation_candidate_endpoint(
 def patch_reconciliation_candidate_endpoint(
     candidate_id: UUID,
     payload: CandidatePatchRequest,
-    device: Dict[str, Any] = Depends(get_authenticated_device),
+    device: Dict[str, Any] = Depends(get_authenticated_actor),
     conn: Any = Depends(get_db_connection)
 ) -> Dict[str, Any]:
     """
@@ -226,7 +226,7 @@ def patch_reconciliation_candidate_endpoint(
             household_id=device["household_id"],
             payload=payload.payload,
             user_id=device.get("user_id"),
-            device_id=device.get("id"),
+            device_id=device.get("device_id"),
             fx_service=fx_svc
         )
 
@@ -235,7 +235,7 @@ def patch_reconciliation_candidate_endpoint(
 def reject_reconciliation_candidate_endpoint(
     candidate_id: UUID,
     payload: Optional[CandidateRejectRequest] = None,
-    device: Dict[str, Any] = Depends(get_authenticated_device),
+    device: Dict[str, Any] = Depends(get_authenticated_actor),
     conn: Any = Depends(get_db_connection)
 ) -> Dict[str, Any]:
     """
@@ -251,6 +251,6 @@ def reject_reconciliation_candidate_endpoint(
             household_id=device["household_id"],
             reason=reason,
             user_id=device.get("user_id"),
-            device_id=device.get("id"),
+            device_id=device.get("device_id"),
             fx_service=fx_svc
         )

@@ -1,6 +1,18 @@
 from fastapi import Request, HTTPException
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from app.domain.auth import (
+    AuthError,
+    AuthRequiredError,
+    InvalidCredentialsError,
+    DeviceRevokedError as AuthDeviceRevokedError,
+    UserDisabledError,
+    UserNotInHouseholdError as AuthUserNotInHouseholdError,
+    AmbiguousHouseholdMembershipError,
+    HouseholdInactiveError,
+    HouseholdPermissionDeniedError,
+    DeviceNotFoundError,
+)
 from app.domain.transactions import (
     LedgerDomainError,
     IdempotencyKeyReuseError,
@@ -111,6 +123,34 @@ async def ledger_domain_exception_handler(request: Request, exc: LedgerDomainErr
 
     # All other domain validation errors are 422 Unprocessable Entity
     return build_error_response(422, exc.code, exc.message, retryable=False)
+
+
+async def auth_domain_exception_handler(request: Request, exc: AuthError) -> JSONResponse:
+    if isinstance(exc, (AuthRequiredError, InvalidCredentialsError)):
+        return build_error_response(401, exc.code, exc.message, retryable=False, details=exc.details)
+
+    if isinstance(exc, AuthDeviceRevokedError):
+        return build_error_response(401, exc.code, exc.message, retryable=False, details=exc.details)
+
+    if isinstance(exc, UserDisabledError):
+        return build_error_response(403, exc.code, exc.message, retryable=False, details=exc.details)
+
+    if isinstance(exc, AuthUserNotInHouseholdError):
+        return build_error_response(403, exc.code, exc.message, retryable=False, details=exc.details)
+
+    if isinstance(exc, AmbiguousHouseholdMembershipError):
+        return build_error_response(403, exc.code, exc.message, retryable=False, details=exc.details)
+
+    if isinstance(exc, HouseholdInactiveError):
+        return build_error_response(403, exc.code, exc.message, retryable=False, details=exc.details)
+
+    if isinstance(exc, HouseholdPermissionDeniedError):
+        return build_error_response(403, "FORBIDDEN", exc.message, retryable=False, details=exc.details)
+
+    if isinstance(exc, DeviceNotFoundError):
+        return build_error_response(404, exc.code, exc.message, retryable=False, details=exc.details)
+
+    return build_error_response(403, getattr(exc, "code", "FORBIDDEN"), exc.message, retryable=False, details=getattr(exc, "details", {}))
 
 
 async def http_exception_handler(request: Request, exc: HTTPException) -> JSONResponse:

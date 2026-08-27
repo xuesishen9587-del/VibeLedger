@@ -991,6 +991,25 @@ def resolve_candidate(
     new_target_tx = None
     new_payload: Dict[str, Any] = {"evidence": evidence}
 
+    # Directional semantics enforcement
+    if line_dir == "debit":
+        if resolution_type in ("cash_income", "refund"):
+            raise InvalidCandidatePayloadError(f"Statement debit line cannot be resolved as '{resolution_type}'.")
+        if resolution_type not in ("expense", "fee", "transfer", "create_transfer", "match"):
+            raise InvalidCandidatePayloadError(f"Unsupported resolution type '{resolution_type}'.")
+    elif line_dir == "credit":
+        if resolution_type in ("expense", "fee"):
+            raise InvalidCandidatePayloadError(f"Statement credit line cannot be resolved as '{resolution_type}'.")
+        if resolution_type not in ("cash_income", "refund", "transfer", "create_transfer", "match"):
+            raise InvalidCandidatePayloadError(f"Unsupported resolution type '{resolution_type}'.")
+    elif line_dir == "unknown":
+        if resolution_type != "match":
+            raise InvalidCandidatePayloadError(
+                f"Cannot resolve statement line with unknown direction as '{resolution_type}' without explicit directional facts."
+            )
+    else:
+        raise InvalidCandidatePayloadError(f"Unsupported statement line direction '{line_dir}'.")
+
     if resolution_type in ("expense", "fee"):
         if not category_id:
             raise InvalidCandidatePayloadError(f"Active category is required to resolve as {resolution_type}.")
@@ -1086,7 +1105,7 @@ def resolve_candidate(
                 if counter_amount is None or parse_decimal(counter_amount) <= Decimal("0.00"):
                     raise InvalidCandidatePayloadError("Cross-currency transfer requires explicit strictly positive counter_amount.")
                 from_amt = parse_decimal(counter_amount)
-        else:
+        elif line_dir == "debit":
             from_acc_id = account["id"]
             to_acc_id = counter_account_id
             from_amt = line_amt
@@ -1098,6 +1117,8 @@ def resolve_candidate(
                 if counter_amount is None or parse_decimal(counter_amount) <= Decimal("0.00"):
                     raise InvalidCandidatePayloadError("Cross-currency transfer requires explicit strictly positive counter_amount.")
                 to_amt = parse_decimal(counter_amount)
+        else:
+            raise InvalidCandidatePayloadError("Cannot resolve transfer on statement line with unknown direction without explicit directional facts.")
 
         new_candidate_type = "create_transfer"
         new_payload["transfer"] = {

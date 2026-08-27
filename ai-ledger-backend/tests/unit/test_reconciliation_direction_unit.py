@@ -261,6 +261,186 @@ class TestReconciliationDirectionUnit(unittest.TestCase):
         )
         self.assertEqual(res2["status"], "ready")
 
+    @patch("app.services.statement_service.recompute_statement_batch_after_review")
+    @patch("app.services.statement_service.get_statement_batch_summary")
+    @patch("app.repositories.accounts.get_account")
+    @patch("app.repositories.reconciliation.get_statement_line")
+    @patch("app.repositories.reconciliation.lock_reconciliation_batch")
+    def test_resolve_candidate_restricted_to_ambiguous_reasons_and_review_state(
+        self, mock_lock_batch, mock_get_line, mock_get_acc, mock_summary, mock_recompute
+    ):
+        mock_lock_batch.return_value = self.batch_row
+        mock_get_line.return_value = self._make_line_row(direction="debit")
+        mock_get_acc.return_value = self.account_row
+
+        mock_conn = MagicMock()
+        mock_cur = MagicMock()
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cur
+
+        from app.domain.transactions import InvalidCandidateStateError
+
+        # 1. Reject accepted candidate
+        mock_cur.fetchone.return_value = (
+            self.candidate_id, self.batch_id, self.line_id, "create_transaction",
+            "accepted", None, {}, Decimal("0.80"), "TYPE_AMBIGUOUS", None
+        )
+        with self.assertRaises(InvalidCandidateStateError):
+            statement_service.resolve_candidate(
+                conn=mock_conn,
+                candidate_id=self.candidate_id,
+                household_id=self.household_id,
+                resolution_type="expense",
+                category_id=self.category_expense_id
+            )
+
+        # 2. Reject MULTIPLE_TRANSACTION_MATCHES
+        mock_cur.fetchone.return_value = self._make_candidate_row(reason_code="MULTIPLE_TRANSACTION_MATCHES")
+        with self.assertRaises(InvalidCandidatePayloadError):
+            statement_service.resolve_candidate(
+                conn=mock_conn,
+                candidate_id=self.candidate_id,
+                household_id=self.household_id,
+                resolution_type="expense",
+                category_id=self.category_expense_id
+            )
+
+        # 3. Reject CATEGORY_REQUIRED
+        mock_cur.fetchone.return_value = self._make_candidate_row(reason_code="CATEGORY_REQUIRED")
+        with self.assertRaises(InvalidCandidatePayloadError):
+            statement_service.resolve_candidate(
+                conn=mock_conn,
+                candidate_id=self.candidate_id,
+                household_id=self.household_id,
+                resolution_type="expense",
+                category_id=self.category_expense_id
+            )
+
+        # 4. Reject candidate without reason_code
+        mock_cur.fetchone.return_value = self._make_candidate_row(reason_code=None)
+        with self.assertRaises(InvalidCandidatePayloadError):
+            statement_service.resolve_candidate(
+                conn=mock_conn,
+                candidate_id=self.candidate_id,
+                household_id=self.household_id,
+                resolution_type="expense",
+                category_id=self.category_expense_id
+            )
+
+    @patch("app.services.statement_service.recompute_statement_batch_after_review")
+    @patch("app.services.statement_service.get_statement_batch_summary")
+    @patch("app.repositories.audit.insert_audit_event")
+    @patch("app.repositories.accounts.get_category")
+    @patch("app.repositories.accounts.get_account")
+    @patch("app.repositories.reconciliation.get_statement_line")
+    @patch("app.repositories.reconciliation.lock_reconciliation_batch")
+    def test_patch_candidate_semantic_guards(
+        self, mock_lock_batch, mock_get_line, mock_get_acc, mock_get_cat, mock_audit, mock_summary, mock_recompute
+    ):
+        mock_lock_batch.return_value = self.batch_row
+        mock_get_line.return_value = self._make_line_row(direction="debit")
+        mock_get_acc.return_value = self.account_row
+        mock_summary.return_value = {"status": "ready"}
+
+        mock_conn = MagicMock()
+        mock_cur = MagicMock()
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cur
+
+        # 1. Generic PATCH on TYPE_AMBIGUOUS candidate must be rejected
+        mock_cur.fetchone.return_value = self._make_candidate_row(reason_code="TYPE_AMBIGUOUS")
+        with self.assertRaises(InvalidCandidatePayloadError):
+            statement_service.patch_candidate(
+                conn=mock_conn,
+                candidate_id=self.candidate_id,
+                household_id=self.household_id,
+                payload={"transaction": {"category_id": str(self.category_expense_id)}}
+            )
+
+        # 2. Generic PATCH mutating transaction_type must be rejected
+        mock_cur.fetchone.return_value = (
+            self.candidate_id, self.batch_id, self.line_id, "create_transaction",
+            "needs_review", None, {"transaction": {"transaction_type": "expense"}},
+            Decimal("0.80"), "CATEGORY_REQUIRED", None
+        )
+        with self.assertRaises(InvalidCandidatePayloadError):
+            statement_service.patch_candidate(
+                conn=mock_conn,
+                candidate_id=self.candidate_id,
+                household_id=self.household_id,
+                payload={"transaction": {"transaction_type": "cash_income"}}
+            )
+
+        # 3. Generic PATCH on CATEGORY_REQUIRED with valid category succeeds and clears reason_code
+        mock_get_cat.return_value = {
+            "id": self.category_expense_id,
+            "household_id": self.household_id,
+            "status": "active",
+            "name": "Dining",
+            "category_type": "expense"
+        }
+        res = statement_service.patch_candidate(
+            conn=mock_conn,
+            candidate_id=self.candidate_id,
+            household_id=self.household_id,
+            payload={"transaction": {"category_id": str(self.category_expense_id)}}
+        )
+        self.assertEqual(res["status"], "ready")
+
+    def test_validate_candidate_payload_direction_invariants(self):
+        # 1. Debit create_transaction rejecting cash_income
+        with self.assertRaises(InvalidCandidatePayloadError):
+            statement_service.validate_candidate_payload_for_type(
+                conn=MagicMock(),
+                candidate_type="create_transaction",
+                merged_payload={"transaction": {"transaction_type": "cash_income"}},
+                account=self.account_row,
+                household_id=self.household_id,
+                statement_line={"direction": "debit"}
+            )
+
+        # 2. Credit create_transaction rejecting expense
+        with self.assertRaises(InvalidCandidatePayloadError):
+            statement_service.validate_candidate_payload_for_type(
+                conn=MagicMock(),
+                candidate_type="create_transaction",
+                merged_payload={"transaction": {"transaction_type": "expense"}},
+                account=self.account_row,
+                household_id=self.household_id,
+                statement_line={"direction": "credit"}
+            )
+
+        # 3. Debit transfer rejecting reconciled account as to_account
+        with self.assertRaises(InvalidCandidatePayloadError):
+            statement_service.validate_candidate_payload_for_type(
+                conn=MagicMock(),
+                candidate_type="create_transfer",
+                merged_payload={"transfer": {"to_account_id": str(self.account_id)}},
+                account=self.account_row,
+                household_id=self.household_id,
+                statement_line={"direction": "debit"}
+            )
+
+        # 4. Credit transfer rejecting reconciled account as from_account
+        with self.assertRaises(InvalidCandidatePayloadError):
+            statement_service.validate_candidate_payload_for_type(
+                conn=MagicMock(),
+                candidate_type="create_transfer",
+                merged_payload={"transfer": {"from_account_id": str(self.account_id)}},
+                account=self.account_row,
+                household_id=self.household_id,
+                statement_line={"direction": "credit"}
+            )
+
+        # 5. Refund rejecting debit statement line
+        with self.assertRaises(InvalidCandidatePayloadError):
+            statement_service.validate_candidate_payload_for_type(
+                conn=MagicMock(),
+                candidate_type="refund",
+                merged_payload={"refund": {}},
+                account=self.account_row,
+                household_id=self.household_id,
+                statement_line={"direction": "debit"}
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -458,6 +458,14 @@ def validate_candidate_payload_for_type(
         if tx_type:
             if tx_type not in ("expense", "fee", "cash_income"):
                 raise InvalidCandidatePayloadError(f"Unsupported transaction type '{tx_type}' for create_transaction candidate.")
+            if line_dir == "debit":
+                if tx_type not in ("expense", "fee"):
+                    raise InvalidCandidatePayloadError(f"Statement debit line cannot have transaction_type '{tx_type}'.")
+            elif line_dir == "credit":
+                if tx_type not in ("cash_income",):
+                    raise InvalidCandidatePayloadError(f"Statement credit line cannot have transaction_type '{tx_type}'.")
+            elif line_dir == "unknown":
+                raise InvalidCandidatePayloadError("Cannot set direction-dependent transaction_type on statement line with unknown direction.")
         elif for_accept:
             raise InvalidCandidatePayloadError("Cannot accept candidate with unknown transaction semantics. Explicit transaction_type is required.")
 
@@ -508,6 +516,20 @@ def validate_candidate_payload_for_type(
         from_curr_val = tf_data.get("from_currency")
         to_curr_val = tf_data.get("to_currency")
 
+        line_dir = statement_line.get("direction") if statement_line else None
+        if line_dir == "debit":
+            if from_acc_str and str(from_acc_str) != str(account["id"]):
+                raise InvalidCandidatePayloadError("Debit statement line transfer from_account_id must match the reconciled account.")
+            if to_acc_str and str(to_acc_str) == str(account["id"]):
+                raise InvalidCandidatePayloadError("Debit statement line transfer to_account_id cannot be the reconciled account.")
+        elif line_dir == "credit":
+            if to_acc_str and str(to_acc_str) != str(account["id"]):
+                raise InvalidCandidatePayloadError("Credit statement line transfer to_account_id must match the reconciled account.")
+            if from_acc_str and str(from_acc_str) == str(account["id"]):
+                raise InvalidCandidatePayloadError("Credit statement line transfer from_account_id cannot be the reconciled account.")
+        elif line_dir == "unknown":
+            raise InvalidCandidatePayloadError("Transfer candidate on statement line with unknown direction is not allowed without explicit directional contract.")
+
         if for_accept:
             if not from_acc_str or not to_acc_str:
                 raise InvalidCandidatePayloadError("Transfer requires both from_account_id and to_account_id.")
@@ -555,6 +577,10 @@ def validate_candidate_payload_for_type(
                 raise InvalidCandidatePayloadError(f"to_currency '{to_curr_val}' must match to_account currency '{to_acc['currency']}'.")
 
     elif candidate_type == "refund":
+        line_dir = statement_line.get("direction") if statement_line else None
+        if line_dir and line_dir != "credit":
+            raise InvalidCandidatePayloadError(f"Refund candidate requires credit statement line, found '{line_dir}'.")
+
         rf_data = merged_payload.get("refund", merged_payload)
         orig_expense_id_str = rf_data.get("original_expense_id") or rf_data.get("original_transaction_id") or rf_data.get("target_transaction_id")
         if orig_expense_id_str:
@@ -583,7 +609,7 @@ def validate_candidate_payload_for_type(
                     raise InvalidCandidatePayloadError(f"Refund currency '{rf_curr}' must match original expense currency '{orig_tx['from_currency']}'.")
 
                 existing_refunds = tx_repo.get_active_refunds_for_expense(conn, orig_tx["id"])
-                total_refunded = sum(parse_decimal(r.get("from_amount") or r.get("to_amount") or r.get("original_amount")) for r in existing_refunds)
+                total_refunded = sum(parse_decimal(r.get("from_amount") or r.get("to_amount") or r.get("original_amount")) for r in active_refunds)
                 remaining = parse_decimal(orig_tx["from_amount"]) - total_refunded
                 if rf_amt > remaining:
                     raise InvalidCandidatePayloadError(f"Refund amount {rf_amt} exceeds remaining refundable amount {remaining}.")
@@ -966,6 +992,12 @@ def resolve_candidate(
 
     c_id, b_id, sl_id, c_type, c_status, current_target_tx, old_payload, conf, r_code, r_detail = cand_row
 
+    if c_status not in ("proposed", "needs_review"):
+        raise InvalidCandidateStateError(f"Candidate in status '{c_status}' cannot be resolved via semantic resolver.")
+
+    if r_code not in ("TYPE_AMBIGUOUS", "INCOME_TRANSFER_REFUND_AMBIGUOUS"):
+        raise InvalidCandidatePayloadError(f"Candidate with reason_code '{r_code}' cannot be resolved via semantic resolver.")
+
     # 2. Lock batch
     batch = reconciliation_repo.lock_reconciliation_batch(conn, b_id)
     if not batch or batch["household_id"] != household_id:
@@ -1247,12 +1279,29 @@ def patch_candidate(
     if batch["status"] in ("committed", "rejected", "failed"):
         raise InvalidCandidateStateError(f"Cannot edit candidate on '{batch['status']}' batch.")
 
+    if c_status not in ("proposed", "needs_review"):
+        raise InvalidCandidateStateError(f"Cannot edit candidate in '{c_status}' status.")
+
+    # Semantic ambiguity candidates must use /resolve instead of generic PATCH
+    if r_code in ("TYPE_AMBIGUOUS", "INCOME_TRANSFER_REFUND_AMBIGUOUS"):
+        raise InvalidCandidatePayloadError(
+            f"Candidate with semantic ambiguity ({r_code}) must be resolved via /resolve endpoint, not generic PATCH."
+        )
+
     # 3. Validate new payload based on candidate_type
     if not isinstance(payload, dict):
         raise InvalidCandidatePayloadError("Payload must be a JSON object.")
 
     account = accounts_repo.get_account(conn, batch["account_id"])
     st_line_row = reconciliation_repo.get_statement_line(conn, sl_id) if sl_id else None
+
+    # Disallow mutating transaction_type through generic PATCH
+    old_tx_data = old_payload.get("transaction", {}) if isinstance(old_payload, dict) else {}
+    old_tx_type = old_tx_data.get("transaction_type")
+    new_tx_data = payload.get("payload", {}).get("transaction", {}) if isinstance(payload.get("payload"), dict) else payload.get("transaction", {})
+    new_tx_type = new_tx_data.get("transaction_type") if isinstance(new_tx_data, dict) else None
+    if old_tx_type and new_tx_type and new_tx_type != old_tx_type:
+        raise InvalidCandidatePayloadError("Cannot mutate transaction_type via generic PATCH.")
 
     # 4. Merge payload preserving evidence and sub-dictionaries
     merged_payload = dict(old_payload if isinstance(old_payload, dict) else {})
@@ -1276,7 +1325,7 @@ def patch_candidate(
     )
 
     if c_type == "create_transaction" and merged_payload.get("transaction", {}).get("category_id"):
-        if r_code in ("CATEGORY_REQUIRED", "TYPE_AMBIGUOUS"):
+        if r_code == "CATEGORY_REQUIRED":
             r_code = None
 
     with conn.cursor() as cur:

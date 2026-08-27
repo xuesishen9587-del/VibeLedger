@@ -163,7 +163,7 @@ class TestReconciliationReviewApiDb(BaseDbTestCase):
         finally:
             conn.close()
 
-    def _upload_test_statement(self, lines: list[ParsedStatementLine], closing_balance: Decimal = None):
+    def _upload_test_statement(self, lines: list[ParsedStatementLine], closing_balance: Decimal = None, default_expense_category_id: Any = None):
         pdf_bytes = make_pdf_bytes(["Test Statement Document"])
         mock_extraction = StatementExtractionResult(
             period_start=date(2026, 7, 1),
@@ -174,11 +174,16 @@ class TestReconciliationReviewApiDb(BaseDbTestCase):
         )
         statements_router._statement_parser = MockStatementParser(result=mock_extraction)
 
+        data = {}
+        target_cat = self.cat_dining_id if default_expense_category_id is None else (default_expense_category_id if default_expense_category_id is not False else None)
+        if target_cat is not None:
+            data["default_expense_category_id"] = str(target_cat)
+
         res = self.client.post(
             f"/api/v1/accounts/{self.acc_cny_id}/statements",
             headers=self.headers,
             files={"file": ("statement.pdf", pdf_bytes, "application/pdf")},
-            data={"default_expense_category_id": str(self.cat_dining_id)}
+            data=data
         )
         self.assertEqual(res.status_code, 201)
         return res.json()["batch_id"]
@@ -267,20 +272,21 @@ class TestReconciliationReviewApiDb(BaseDbTestCase):
         self.assertEqual(res_cross.status_code, 404)
 
     def test_candidate_accept_workflow(self):
-        # Line with unknown direction or needs_review candidate
+        # Line with missing category -> CATEGORY_REQUIRED candidate
         lines = [
             ParsedStatementLine(
                 source_page_no=1,
                 source_row_no=1,
                 transaction_on=date(2026, 7, 5),
-                description_raw="Unknown Store Charge",
+                description_raw="Restaurant Store Charge",
                 amount=Decimal("75.00"),
                 currency="CNY",
-                direction="unknown",
-                line_type="unknown"
+                direction="debit",
+                line_type="expense"
             )
         ]
-        batch_id = self._upload_test_statement(lines)
+        # Upload without default category so candidate has CATEGORY_REQUIRED
+        batch_id = self._upload_test_statement(lines, default_expense_category_id=False)
 
         conn = get_connection(self.test_schema)
         try:
@@ -288,6 +294,7 @@ class TestReconciliationReviewApiDb(BaseDbTestCase):
             self.assertEqual(len(candidates), 1)
             cand = candidates[0]
             self.assertEqual(cand["status"], "needs_review")
+            self.assertEqual(cand["reason_code"], "CATEGORY_REQUIRED")
             cand_id = cand["id"]
         finally:
             conn.close()
@@ -296,7 +303,7 @@ class TestReconciliationReviewApiDb(BaseDbTestCase):
         sum_res = self.client.get(f"/api/v1/reconciliation-batches/{batch_id}", headers=self.headers)
         self.assertEqual(sum_res.json()["status"], "needs_review")
 
-        # 1. Empty accept on unknown candidate MUST be rejected (422)
+        # 1. Empty accept on CATEGORY_REQUIRED candidate MUST be rejected (422)
         empty_accept_res = self.client.post(
             f"/api/v1/reconciliation-candidates/{cand_id}/accept",
             headers=self.headers,
@@ -304,16 +311,14 @@ class TestReconciliationReviewApiDb(BaseDbTestCase):
         )
         self.assertEqual(empty_accept_res.status_code, 422)
 
-        # 2. PATCH candidate with explicit validated facts
+        # 2. PATCH candidate with explicit validated category
         patch_res = self.client.patch(
             f"/api/v1/reconciliation-candidates/{cand_id}",
             headers=self.headers,
             json={
                 "payload": {
                     "transaction": {
-                        "transaction_type": "expense",
-                        "category_id": str(self.cat_dining_id),
-                        "from_account_id": str(self.acc_cny_id)
+                        "category_id": str(self.cat_dining_id)
                     }
                 }
             }

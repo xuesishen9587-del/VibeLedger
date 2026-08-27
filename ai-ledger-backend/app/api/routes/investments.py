@@ -75,7 +75,7 @@ def create_investment_snapshot(
             account_id=account_id,
             payload=payload.model_dump(),
             user_id=device.get("user_id"),
-            device_id=device.get("device_id") or device.get("id")
+            device_id=device.get("device_id")
         )
         return result
 

@@ -1,6 +1,9 @@
 import unittest
 import hashlib
-from uuid import uuid4
+import io
+import pypdf
+from uuid import uuid4, UUID
+from decimal import Decimal
 from datetime import date
 from unittest.mock import patch
 from fastapi.testclient import TestClient
@@ -13,7 +16,37 @@ from app.repositories import users as users_repo
 from app.repositories import household_members as members_repo
 from app.repositories import devices as devices_repo
 from app.repositories import accounts as accounts_repo
+from app.services.statement_parser import MockStatementParser
+from app.domain.statements import StatementExtractionResult
+from app.api.routes.statements import router as statements_router
 from tests.support.db_helper import BaseDbTestCase
+
+
+def _make_pdf_bytes(text_lines: list[str]) -> bytes:
+    writer = pypdf.PdfWriter()
+    from pypdf.generic import DecodedStreamObject, NameObject, DictionaryObject
+    for t in text_lines:
+        page = writer.add_blank_page(width=612, height=792)
+        stream = DecodedStreamObject()
+        stream_content = f"BT /F1 12 Tf 72 712 Td ({t}) Tj ET".encode("latin-1", errors="replace")
+        stream.set_data(stream_content)
+        
+        resources = DictionaryObject()
+        fonts = DictionaryObject()
+        f1 = DictionaryObject({
+            NameObject("/Type"): NameObject("/Font"),
+            NameObject("/Subtype"): NameObject("/Type1"),
+            NameObject("/BaseFont"): NameObject("/Helvetica"),
+        })
+        fonts[NameObject("/F1")] = f1
+        resources[NameObject("/Font")] = fonts
+        
+        page[NameObject("/Resources")] = resources
+        page[NameObject("/Contents")] = stream
+
+    buf = io.BytesIO()
+    writer.write(buf)
+    return buf.getvalue()
 
 
 class TestAuthPhase10Db(BaseDbTestCase):
@@ -452,6 +485,353 @@ class TestAuthPhase10Db(BaseDbTestCase):
         devices_repo.update_device_last_seen_isolated(self.device_id, schema=self.test_schema)
         dev = devices_repo.get_device_by_id(self.conn, self.device_id)
         self.assertIsNotNone(dev["last_seen_at"])
+
+    def test_audit_provenance_browser_account_mutation(self):
+        # 1. Create account via Browser JWT
+        res = self.client.post(
+            "/api/v1/accounts",
+            headers={"Authorization": f"Bearer {self.browser_jwt_token}"},
+            json={
+                "name": "Browser Checking",
+                "account_type": "cash",
+                "currency": "CNY"
+            }
+        )
+        self.assertEqual(res.status_code, 201)
+        account_id = UUID(res.json()["id"])
+
+        # Verify audit_events for create
+        with self.conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT actor_type, actor_user_id, actor_device_id, action
+                FROM audit_events
+                WHERE entity_type = 'account' AND entity_id = %s AND action = 'create';
+                """,
+                (account_id,)
+            )
+            row = cur.fetchone()
+            self.assertIsNotNone(row)
+            self.assertEqual(row[0], "user")
+            self.assertEqual(row[1], self.user_id)
+            self.assertIsNone(row[2])
+
+        # 2. Patch account via Browser JWT
+        patch_res = self.client.patch(
+            f"/api/v1/accounts/{account_id}",
+            headers={"Authorization": f"Bearer {self.browser_jwt_token}"},
+            json={
+                "name": "Browser Checking Renamed",
+                "row_version": res.json()["row_version"]
+            }
+        )
+        self.assertEqual(patch_res.status_code, 200)
+
+        # Verify audit_events for update
+        with self.conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT actor_type, actor_user_id, actor_device_id, action
+                FROM audit_events
+                WHERE entity_type = 'account' AND entity_id = %s AND action = 'update';
+                """,
+                (account_id,)
+            )
+            row = cur.fetchone()
+            self.assertIsNotNone(row)
+            self.assertEqual(row[0], "user")
+            self.assertEqual(row[1], self.user_id)
+            self.assertIsNone(row[2])
+
+    def test_audit_provenance_device_account_mutation(self):
+        # 1. Create account via Device Bearer
+        res = self.client.post(
+            "/api/v1/accounts",
+            headers={"Authorization": f"Bearer {self.raw_device_token}"},
+            json={
+                "name": "Device Cash Account",
+                "account_type": "cash",
+                "currency": "CNY"
+            }
+        )
+        self.assertEqual(res.status_code, 201)
+        account_id = UUID(res.json()["id"])
+
+        # Verify audit_events for create
+        with self.conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT actor_type, actor_user_id, actor_device_id, action
+                FROM audit_events
+                WHERE entity_type = 'account' AND entity_id = %s AND action = 'create';
+                """,
+                (account_id,)
+            )
+            row = cur.fetchone()
+            self.assertIsNotNone(row)
+            self.assertEqual(row[0], "device")
+            self.assertEqual(row[1], self.user_id)
+            self.assertEqual(row[2], self.device_id)
+
+        # 2. Patch account via Device Bearer
+        patch_res = self.client.patch(
+            f"/api/v1/accounts/{account_id}",
+            headers={"Authorization": f"Bearer {self.raw_device_token}"},
+            json={
+                "name": "Device Cash Account Renamed",
+                "row_version": res.json()["row_version"]
+            }
+        )
+        self.assertEqual(patch_res.status_code, 200)
+
+        # Verify audit_events for update
+        with self.conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT actor_type, actor_user_id, actor_device_id, action
+                FROM audit_events
+                WHERE entity_type = 'account' AND entity_id = %s AND action = 'update';
+                """,
+                (account_id,)
+            )
+            row = cur.fetchone()
+            self.assertIsNotNone(row)
+            self.assertEqual(row[0], "device")
+            self.assertEqual(row[1], self.user_id)
+            self.assertEqual(row[2], self.device_id)
+
+    def test_audit_provenance_browser_category_mutation(self):
+        # 1. Create category via Browser JWT
+        res = self.client.post(
+            "/api/v1/categories",
+            headers={"Authorization": f"Bearer {self.browser_jwt_token}"},
+            json={
+                "name": "Browser Category",
+                "type": "expense"
+            }
+        )
+        self.assertEqual(res.status_code, 201)
+        category_id = UUID(res.json()["id"])
+
+        # Verify audit_events for create
+        with self.conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT actor_type, actor_user_id, actor_device_id, action
+                FROM audit_events
+                WHERE entity_type = 'category' AND entity_id = %s AND action = 'create';
+                """,
+                (category_id,)
+            )
+            row = cur.fetchone()
+            self.assertIsNotNone(row)
+            self.assertEqual(row[0], "user")
+            self.assertEqual(row[1], self.user_id)
+            self.assertIsNone(row[2])
+
+        # 2. Patch category via Browser JWT
+        patch_res = self.client.patch(
+            f"/api/v1/categories/{category_id}",
+            headers={"Authorization": f"Bearer {self.browser_jwt_token}"},
+            json={"name": "Browser Category Renamed"}
+        )
+        self.assertEqual(patch_res.status_code, 200)
+
+        # Verify audit_events for update
+        with self.conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT actor_type, actor_user_id, actor_device_id, action
+                FROM audit_events
+                WHERE entity_type = 'category' AND entity_id = %s AND action = 'update';
+                """,
+                (category_id,)
+            )
+            row = cur.fetchone()
+            self.assertIsNotNone(row)
+            self.assertEqual(row[0], "user")
+            self.assertEqual(row[1], self.user_id)
+            self.assertIsNone(row[2])
+
+        # 3. Deactivate category via Browser JWT
+        deact_res = self.client.post(
+            f"/api/v1/categories/{category_id}/deactivate",
+            headers={"Authorization": f"Bearer {self.browser_jwt_token}"}
+        )
+        self.assertEqual(deact_res.status_code, 200)
+
+        # Verify audit_events for soft_delete
+        with self.conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT actor_type, actor_user_id, actor_device_id, action
+                FROM audit_events
+                WHERE entity_type = 'category' AND entity_id = %s AND action = 'soft_delete';
+                """,
+                (category_id,)
+            )
+            row = cur.fetchone()
+            self.assertIsNotNone(row)
+            self.assertEqual(row[0], "user")
+            self.assertEqual(row[1], self.user_id)
+            self.assertIsNone(row[2])
+
+    def test_audit_provenance_device_category_mutation(self):
+        # 1. Create category via Device Bearer
+        res = self.client.post(
+            "/api/v1/categories",
+            headers={"Authorization": f"Bearer {self.raw_device_token}"},
+            json={
+                "name": "Device Category",
+                "type": "expense"
+            }
+        )
+        self.assertEqual(res.status_code, 201)
+        category_id = UUID(res.json()["id"])
+
+        # Verify audit_events for create
+        with self.conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT actor_type, actor_user_id, actor_device_id, action
+                FROM audit_events
+                WHERE entity_type = 'category' AND entity_id = %s AND action = 'create';
+                """,
+                (category_id,)
+            )
+            row = cur.fetchone()
+            self.assertIsNotNone(row)
+            self.assertEqual(row[0], "device")
+            self.assertEqual(row[1], self.user_id)
+            self.assertEqual(row[2], self.device_id)
+
+        # 2. Patch category via Device Bearer
+        patch_res = self.client.patch(
+            f"/api/v1/categories/{category_id}",
+            headers={"Authorization": f"Bearer {self.raw_device_token}"},
+            json={"name": "Device Category Renamed"}
+        )
+        self.assertEqual(patch_res.status_code, 200)
+
+        # Verify audit_events for update
+        with self.conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT actor_type, actor_user_id, actor_device_id, action
+                FROM audit_events
+                WHERE entity_type = 'category' AND entity_id = %s AND action = 'update';
+                """,
+                (category_id,)
+            )
+            row = cur.fetchone()
+            self.assertIsNotNone(row)
+            self.assertEqual(row[0], "device")
+            self.assertEqual(row[1], self.user_id)
+            self.assertEqual(row[2], self.device_id)
+
+        # 3. Deactivate category via Device Bearer
+        deact_res = self.client.post(
+            f"/api/v1/categories/{category_id}/deactivate",
+            headers={"Authorization": f"Bearer {self.raw_device_token}"}
+        )
+        self.assertEqual(deact_res.status_code, 200)
+
+        # Verify audit_events for soft_delete
+        with self.conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT actor_type, actor_user_id, actor_device_id, action
+                FROM audit_events
+                WHERE entity_type = 'category' AND entity_id = %s AND action = 'soft_delete';
+                """,
+                (category_id,)
+            )
+            row = cur.fetchone()
+            self.assertIsNotNone(row)
+            self.assertEqual(row[0], "device")
+            self.assertEqual(row[1], self.user_id)
+            self.assertEqual(row[2], self.device_id)
+
+    def test_audit_provenance_device_id_forwarding_statement(self):
+        # Create bank account
+        acc_id = uuid4()
+        accounts_repo.create_account(
+            self.conn,
+            account_id=acc_id,
+            household_id=self.household_id,
+            name="Bank Statement Account",
+            account_type="cash",
+            currency="CNY",
+            owner_user_id=self.user_id,
+            status="active"
+        )
+        self.conn.commit()
+
+        # Mock statement parser
+        mock_result = StatementExtractionResult(
+            account_number_mask="*1234",
+            period_start=date(2026, 1, 1),
+            period_end=date(2026, 1, 31),
+            opening_balance=Decimal("1000.00"),
+            closing_balance=Decimal("1000.00"),
+            currency="CNY",
+            lines=[]
+        )
+        parser = MockStatementParser(result=mock_result)
+        statements_router._statement_parser = parser
+
+        # Make dummy PDF bytes with text
+        pdf_bytes = _make_pdf_bytes(["Bank Statement", "Account 1234", "Balance 1000 CNY"])
+
+        # 1. Device statement upload
+        res_dev = self.client.post(
+            f"/api/v1/accounts/{acc_id}/statements",
+            headers={"Authorization": f"Bearer {self.raw_device_token}"},
+            files={"file": ("statement.pdf", pdf_bytes, "application/pdf")}
+        )
+        self.assertEqual(res_dev.status_code, 201)
+        dev_batch_id = UUID(res_dev.json()["batch_id"])
+
+        # Verify audit event for device upload
+        with self.conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT actor_type, actor_user_id, actor_device_id, action
+                FROM audit_events
+                WHERE entity_type = 'reconciliation_batch' AND entity_id = %s AND action = 'create';
+                """,
+                (dev_batch_id,)
+            )
+            row = cur.fetchone()
+            self.assertIsNotNone(row)
+            self.assertEqual(row[0], "device")
+            self.assertEqual(row[1], self.user_id)
+            self.assertEqual(row[2], self.device_id)
+
+        # 2. Browser statement upload
+        res_browser = self.client.post(
+            f"/api/v1/accounts/{acc_id}/statements",
+            headers={"Authorization": f"Bearer {self.browser_jwt_token}"},
+            files={"file": ("statement2.pdf", pdf_bytes, "application/pdf")}
+        )
+        self.assertEqual(res_browser.status_code, 201)
+        browser_batch_id = UUID(res_browser.json()["batch_id"])
+
+        # Verify audit event for browser upload
+        with self.conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT actor_type, actor_user_id, actor_device_id, action
+                FROM audit_events
+                WHERE entity_type = 'reconciliation_batch' AND entity_id = %s AND action = 'create';
+                """,
+                (browser_batch_id,)
+            )
+            row = cur.fetchone()
+            self.assertIsNotNone(row)
+            self.assertEqual(row[0], "user")
+            self.assertEqual(row[1], self.user_id)
+            self.assertIsNone(row[2])
 
 
 if __name__ == "__main__":

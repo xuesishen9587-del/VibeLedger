@@ -46,6 +46,19 @@ class PatchAccountRequest(BaseModel):
 class CreateAliasRequest(BaseModel):
     alias: str = Field(..., min_length=1, max_length=100, description="Alias text")
 
+def _get_audit_actor_info(actor: Dict[str, Any]) -> tuple[str, Optional[UUID], Optional[UUID]]:
+    auth_mode = actor.get("auth_mode")
+    user_id = actor.get("user_id")
+    device_id = actor.get("device_id")
+    if auth_mode == "browser":
+        return "user", user_id, None
+    elif auth_mode == "device":
+        return "device", user_id, device_id
+    else:
+        if device_id is not None:
+            return "device", user_id, device_id
+        return "user", user_id, None
+
 def _format_account(acc: Dict[str, Any]) -> Dict[str, Any]:
     curr = acc["currency"]
     bal = acc.get("ledger_balance", 0)
@@ -134,15 +147,16 @@ def create_account(
             due_day=payload.due_day,
             status='active'
         )
+        actor_type, actor_user_id, actor_device_id = _get_audit_actor_info(device)
         audit_repo.insert_audit_event(
             conn=conn,
             household_id=household_id,
-            actor_type="device",
+            actor_type=actor_type,
             entity_type="account",
             entity_id=account_id,
             action="create",
-            actor_user_id=device.get("user_id"),
-            actor_device_id=device.get("device_id"),
+            actor_user_id=actor_user_id,
+            actor_device_id=actor_device_id,
             after_data={
                 "name": payload.name.strip(),
                 "institution": payload.institution.strip() if payload.institution else None,
@@ -290,15 +304,16 @@ def patch_account(
             "status": updated["status"]
         }
 
+        actor_type, actor_user_id, actor_device_id = _get_audit_actor_info(device)
         audit_repo.insert_audit_event(
             conn=conn,
             household_id=household_id,
-            actor_type="device",
+            actor_type=actor_type,
             entity_type="account",
             entity_id=account_id,
             action="update",
-            actor_user_id=device.get("user_id"),
-            actor_device_id=device.get("device_id"),
+            actor_user_id=actor_user_id,
+            actor_device_id=actor_device_id,
             before_data=before_data,
             after_data=after_data
         )
@@ -326,15 +341,16 @@ def deactivate_account(
         if not deactivated:
             raise AccountResourceNotFoundError(account_id)
 
+        actor_type, actor_user_id, actor_device_id = _get_audit_actor_info(device)
         audit_repo.insert_audit_event(
             conn=conn,
             household_id=household_id,
-            actor_type="device",
+            actor_type=actor_type,
             entity_type="account",
             entity_id=account_id,
             action="soft_delete",
-            actor_user_id=device.get("user_id"),
-            actor_device_id=device.get("device_id"),
+            actor_user_id=actor_user_id,
+            actor_device_id=actor_device_id,
             before_data={"status": existing["status"]},
             after_data={"status": "inactive"}
         )
@@ -397,15 +413,16 @@ def create_account_alias(
             normalized_alias=normalized,
             status='active'
         )
+        actor_type, actor_user_id, actor_device_id = _get_audit_actor_info(device)
         audit_repo.insert_audit_event(
             conn=conn,
             household_id=household_id,
-            actor_type="device",
+            actor_type=actor_type,
             entity_type="account_alias",
             entity_id=alias_id,
             action="create",
-            actor_user_id=device.get("user_id"),
-            actor_device_id=device.get("device_id"),
+            actor_user_id=actor_user_id,
+            actor_device_id=actor_device_id,
             after_data={"account_id": str(account_id), "alias": raw_alias}
         )
 
@@ -436,18 +453,18 @@ def delete_account_alias(
     with transaction(conn):
         deactivated = accounts_repo.deactivate_account_alias(conn, alias_id, account_id)
         if not deactivated:
-
             raise AliasResourceNotFoundError(alias_id)
 
+        actor_type, actor_user_id, actor_device_id = _get_audit_actor_info(device)
         audit_repo.insert_audit_event(
             conn=conn,
             household_id=household_id,
-            actor_type="device",
+            actor_type=actor_type,
             entity_type="account_alias",
             entity_id=alias_id,
             action="soft_delete",
-            actor_user_id=device.get("user_id"),
-            actor_device_id=device.get("device_id"),
+            actor_user_id=actor_user_id,
+            actor_device_id=actor_device_id,
             before_data={"status": "active"},
             after_data={"status": "inactive"}
         )

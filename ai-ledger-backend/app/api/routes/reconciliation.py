@@ -151,7 +151,7 @@ def commit_reconciliation_batch_endpoint(
                 conn=conn,
                 batch_id=batch_id,
                 user_id=device.get("user_id"),
-                device_id=device.get("id"),
+                device_id=device.get("device_id"),
                 fx_service=fx_svc
             )
 
@@ -202,7 +202,7 @@ def accept_reconciliation_candidate_endpoint(
             household_id=device["household_id"],
             user_id=device.get("user_id"),
             target_transaction_id=target_tx,
-            device_id=device.get("id"),
+            device_id=device.get("device_id"),
             fx_service=fx_svc
         )
 
@@ -226,7 +226,7 @@ def patch_reconciliation_candidate_endpoint(
             household_id=device["household_id"],
             payload=payload.payload,
             user_id=device.get("user_id"),
-            device_id=device.get("id"),
+            device_id=device.get("device_id"),
             fx_service=fx_svc
         )
 
@@ -251,6 +251,6 @@ def reject_reconciliation_candidate_endpoint(
             household_id=device["household_id"],
             reason=reason,
             user_id=device.get("user_id"),
-            device_id=device.get("id"),
+            device_id=device.get("device_id"),
             fx_service=fx_svc
         )

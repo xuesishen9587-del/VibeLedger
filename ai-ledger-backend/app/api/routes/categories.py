@@ -21,6 +21,19 @@ class CreateCategoryRequest(BaseModel):
 class PatchCategoryRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=100, description="New category name")
 
+def _get_audit_actor_info(actor: Dict[str, Any]) -> tuple[str, Optional[UUID], Optional[UUID]]:
+    auth_mode = actor.get("auth_mode")
+    user_id = actor.get("user_id")
+    device_id = actor.get("device_id")
+    if auth_mode == "browser":
+        return "user", user_id, None
+    elif auth_mode == "device":
+        return "device", user_id, device_id
+    else:
+        if device_id is not None:
+            return "device", user_id, device_id
+        return "user", user_id, None
+
 def _format_category(cat: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "id": str(cat["id"]),
@@ -72,15 +85,16 @@ def create_category(
             category_type=payload.type,
             status='active'
         )
+        actor_type, actor_user_id, actor_device_id = _get_audit_actor_info(device)
         audit_repo.insert_audit_event(
             conn=conn,
             household_id=household_id,
-            actor_type="device",
+            actor_type=actor_type,
             entity_type="category",
             entity_id=category_id,
             action="create",
-            actor_user_id=device.get("user_id"),
-            actor_device_id=device.get("device_id"),
+            actor_user_id=actor_user_id,
+            actor_device_id=actor_device_id,
             after_data={"name": clean_name, "category_type": payload.type}
         )
 
@@ -113,15 +127,16 @@ def patch_category(
         if not updated:
             raise CategoryResourceNotFoundError(category_id)
 
+        actor_type, actor_user_id, actor_device_id = _get_audit_actor_info(device)
         audit_repo.insert_audit_event(
             conn=conn,
             household_id=household_id,
-            actor_type="device",
+            actor_type=actor_type,
             entity_type="category",
             entity_id=category_id,
             action="update",
-            actor_user_id=device.get("user_id"),
-            actor_device_id=device.get("device_id"),
+            actor_user_id=actor_user_id,
+            actor_device_id=actor_device_id,
             before_data={"name": existing["name"]},
             after_data={"name": clean_name}
         )
@@ -147,15 +162,16 @@ def deactivate_category(
         if not deactivated:
             raise CategoryResourceNotFoundError(category_id)
 
+        actor_type, actor_user_id, actor_device_id = _get_audit_actor_info(device)
         audit_repo.insert_audit_event(
             conn=conn,
             household_id=household_id,
-            actor_type="device",
+            actor_type=actor_type,
             entity_type="category",
             entity_id=category_id,
             action="soft_delete",
-            actor_user_id=device.get("user_id"),
-            actor_device_id=device.get("device_id"),
+            actor_user_id=actor_user_id,
+            actor_device_id=actor_device_id,
             before_data={"status": existing["status"]},
             after_data={"status": "inactive"}
         )

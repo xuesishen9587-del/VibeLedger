@@ -60,7 +60,7 @@ async def upload_account_statement_endpoint(
             default_expense_category_id=default_expense_category_id,
             default_income_category_id=default_income_category_id,
             user_id=device.get("user_id"),
-            device_id=device.get("id"),
+            device_id=device.get("device_id"),
             parser=parser,
             fx_service=fx_svc
         )

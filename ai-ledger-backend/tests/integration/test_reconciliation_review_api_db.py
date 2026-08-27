@@ -5,6 +5,7 @@ os.environ.setdefault("DB_SCHEMA", "vibeledger_test_runner")
 
 import io
 import unittest
+from typing import Any
 from uuid import uuid4
 from decimal import Decimal
 from datetime import datetime, date, timezone

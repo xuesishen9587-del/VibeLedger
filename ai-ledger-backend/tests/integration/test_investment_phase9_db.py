@@ -20,7 +20,7 @@ from app.domain.investments import (
     InvestmentStatementExtractionResult,
     calculate_investment_pnl
 )
-from app.domain.transactions import InvalidCandidatePayloadError
+from app.domain.transactions import InvalidCandidatePayloadError, InvalidCandidateStateError
 from app.services.reference_fx_service import ReferenceFxService
 import app.repositories.accounts as accounts_repo
 import app.repositories.snapshots as snapshots_repo
@@ -1880,41 +1880,56 @@ class TestInvestmentPhase9Db(BaseDbTestCase):
 
                 cands = reconciliation_repo.list_candidates_for_batch(conn, batch_id)
                 pnl_cand = next(c for c in cands if c["candidate_type"] == "investment_pnl")
+                self.assertEqual(pnl_cand["status"], "accepted")
+
+                # Capture the canonical accounting truth before attempting any mutation.
+                p_before = pnl_cand["payload"]["investment_pnl"]
+                canonical_truth = {
+                    field: p_before[field]
+                    for field in (
+                        "opening_snapshot_id",
+                        "opening_value",
+                        "closing_value",
+                        "contributions_amount",
+                        "withdrawals_amount",
+                        "pnl_amount",
+                        "currency",
+                    )
+                }
 
                 # User attempts to patch server-owned accounting truth fields with arbitrary values
                 fake_snap_id = str(uuid4())
-                statement_service.patch_candidate(
-                    conn=conn,
-                    candidate_id=pnl_cand["id"],
-                    household_id=self.household_id,
-                    payload={
-                        "investment_pnl": {
-                            "opening_snapshot_id": fake_snap_id,
-                            "opening_value": "1.00",
-                            "closing_value": "999000.00",
-                            "contributions_amount": "0.00",
-                            "withdrawals_amount": "0.00",
-                            "pnl_amount": "899000.00",
-                            "currency": "USD"
+                with self.assertRaises(InvalidCandidateStateError):
+                    statement_service.patch_candidate(
+                        conn=conn,
+                        candidate_id=pnl_cand["id"],
+                        household_id=self.household_id,
+                        payload={
+                            "investment_pnl": {
+                                "opening_snapshot_id": fake_snap_id,
+                                "opening_value": "1.00",
+                                "closing_value": "999000.00",
+                                "contributions_amount": "0.00",
+                                "withdrawals_amount": "0.00",
+                                "pnl_amount": "899000.00",
+                                "currency": "USD"
+                            }
                         }
-                    }
-                )
+                    )
 
                 # Persisted candidate must preserve true authoritative server values
                 cand_after = next(c for c in reconciliation_repo.list_candidates_for_batch(conn, batch_id) if c["id"] == pnl_cand["id"])
+                self.assertEqual(cand_after["status"], "accepted")
                 p_after = cand_after["payload"]["investment_pnl"]
+                for field, value in canonical_truth.items():
+                    self.assertEqual(p_after[field], value)
                 self.assertEqual(p_after["opening_snapshot_id"], str(baseline_snap_id))
-                self.assertEqual(p_after["opening_value"], "100000.00")
-                self.assertEqual(p_after["closing_value"], "160000.00")
-                self.assertEqual(p_after["contributions_amount"], "50000.00")
-                self.assertEqual(p_after["withdrawals_amount"], "0.00")
-                self.assertEqual(p_after["pnl_amount"], "10000.00")
+                self.assertEqual(Decimal(p_after["opening_value"]), Decimal("100000.00"))
+                self.assertEqual(Decimal(p_after["closing_value"]), Decimal("160000.00"))
+                self.assertEqual(Decimal(p_after["contributions_amount"]), Decimal("50000.00"))
+                self.assertEqual(Decimal(p_after["withdrawals_amount"]), Decimal("0.00"))
+                self.assertEqual(Decimal(p_after["pnl_amount"]), Decimal("10000.00"))
                 self.assertEqual(p_after["currency"], "CNY")
-
-                # Accept candidates and commit
-                snap_cand = next(c for c in cands if c["candidate_type"] == "snapshot")
-                statement_service.accept_candidate(conn, snap_cand["id"], self.household_id, self.user_id)
-                statement_service.accept_candidate(conn, pnl_cand["id"], self.household_id, self.user_id)
 
                 batch = reconciliation_repo.get_reconciliation_batch(conn, batch_id)
                 self.assertEqual(batch["status"], "ready")

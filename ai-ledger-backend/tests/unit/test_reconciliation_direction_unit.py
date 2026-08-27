@@ -6,6 +6,7 @@ from unittest.mock import patch, MagicMock
 
 from app.domain.transactions import (
     InvalidCandidatePayloadError,
+    InvalidCandidateStateError,
     CategoryNotFoundError,
     CategoryMismatchError,
     IncompatibleTargetTransactionError
@@ -369,7 +370,40 @@ class TestReconciliationDirectionUnit(unittest.TestCase):
                 payload={"transaction": {"transaction_type": "cash_income"}}
             )
 
-        # 3. Generic PATCH on CATEGORY_REQUIRED with valid category succeeds and clears reason_code
+        # 3. Generic PATCH on accepted candidate must be rejected
+        mock_cur.fetchone.return_value = (
+            self.candidate_id, self.batch_id, self.line_id, "create_transaction",
+            "accepted", None, {"transaction": {"transaction_type": "expense"}},
+            Decimal("1.00"), None, None
+        )
+        with self.assertRaises(InvalidCandidateStateError):
+            statement_service.patch_candidate(
+                conn=mock_conn,
+                candidate_id=self.candidate_id,
+                household_id=self.household_id,
+                payload={"transaction": {"category_id": str(self.category_expense_id)}}
+            )
+
+        # 4. Generic PATCH on rejected candidate must be rejected
+        mock_cur.fetchone.return_value = (
+            self.candidate_id, self.batch_id, self.line_id, "create_transaction",
+            "rejected", None, {"transaction": {"transaction_type": "expense"}},
+            Decimal("0.00"), None, None
+        )
+        with self.assertRaises(InvalidCandidateStateError):
+            statement_service.patch_candidate(
+                conn=mock_conn,
+                candidate_id=self.candidate_id,
+                household_id=self.household_id,
+                payload={"transaction": {"category_id": str(self.category_expense_id)}}
+            )
+
+        # 5. Generic PATCH on CATEGORY_REQUIRED with valid category succeeds and clears reason_code
+        mock_cur.fetchone.return_value = (
+            self.candidate_id, self.batch_id, self.line_id, "create_transaction",
+            "needs_review", None, {"transaction": {"transaction_type": "expense"}},
+            Decimal("0.80"), "CATEGORY_REQUIRED", None
+        )
         mock_get_cat.return_value = {
             "id": self.category_expense_id,
             "household_id": self.household_id,

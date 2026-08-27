@@ -1279,7 +1279,7 @@ def patch_candidate(
     if batch["status"] in ("committed", "rejected", "failed"):
         raise InvalidCandidateStateError(f"Cannot edit candidate on '{batch['status']}' batch.")
 
-    if c_status not in ("proposed", "needs_review", "accepted"):
+    if c_status not in ("proposed", "needs_review"):
         raise InvalidCandidateStateError(f"Cannot edit candidate in '{c_status}' status.")
 
     # Semantic ambiguity candidates must use /resolve instead of generic PATCH

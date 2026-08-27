@@ -422,7 +422,90 @@ class TestReconciliationReviewApiDb(BaseDbTestCase):
                 line_type="expense"
             )
         ]
-        batch_id = self._upload_test_statement(lines)
+        # Upload without default category so candidate starts in needs_review (CATEGORY_REQUIRED)
+        batch_id = self._upload_test_statement(lines, default_expense_category_id=False)
+
+        conn = get_connection(self.test_schema)
+        try:
+            candidates = reconciliation_repo.list_candidates_for_batch(conn, batch_id)
+            cand_id = candidates[0]["id"]
+            self.assertEqual(candidates[0]["status"], "needs_review")
+            self.assertEqual(candidates[0]["reason_code"], "CATEGORY_REQUIRED")
+        finally:
+            conn.close()
+
+        # 1. needs_review candidate -> safe PATCH with new category (Transport) -> 200
+        patch_res = self.client.patch(
+            f"/api/v1/reconciliation-candidates/{cand_id}",
+            headers=self.headers,
+            json={"payload": {"transaction": {"category_id": str(self.cat_transport_id)}}}
+        )
+        self.assertEqual(patch_res.status_code, 200)
+
+        # Verify candidate payload in DB and reason_code cleared
+        conn = get_connection(self.test_schema)
+        try:
+            candidates = reconciliation_repo.list_candidates_for_batch(conn, batch_id)
+            cand = next(c for c in candidates if c["id"] == cand_id)
+            self.assertEqual(cand["payload"]["transaction"]["category_id"], str(self.cat_transport_id))
+            self.assertIsNone(cand["reason_code"])
+        finally:
+            conn.close()
+
+        # 2. Accept candidate -> 200
+        accept_res = self.client.post(
+            f"/api/v1/reconciliation-candidates/{cand_id}/accept",
+            headers=self.headers,
+            json={}
+        )
+        self.assertEqual(accept_res.status_code, 200)
+
+        # 3. Accepted candidate -> generic PATCH category => 422
+        res_patch_cat_accepted = self.client.patch(
+            f"/api/v1/reconciliation-candidates/{cand_id}",
+            headers=self.headers,
+            json={"payload": {"transaction": {"category_id": str(self.cat_dining_id)}}}
+        )
+        self.assertEqual(res_patch_cat_accepted.status_code, 422)
+
+        # 4. Accepted candidate -> generic PATCH amount => 422
+        res_patch_amt_accepted = self.client.patch(
+            f"/api/v1/reconciliation-candidates/{cand_id}",
+            headers=self.headers,
+            json={"payload": {"transaction": {"amount": "10.00"}}}
+        )
+        self.assertEqual(res_patch_amt_accepted.status_code, 422)
+
+        # 5. Commit batch -> 200
+        commit_res = self.client.post(f"/api/v1/reconciliation-batches/{batch_id}/commit", headers=self.headers, json={})
+        self.assertEqual(commit_res.status_code, 200)
+
+        # 6. Verify created transaction has Transport category
+        conn = get_connection(self.test_schema)
+        try:
+            txs, _ = tx_repo.list_transactions_with_filters(conn, self.household_id, account_id=self.acc_cny_id)
+            created_tx = next(t for t in txs if t["original_amount"] == Decimal("6.00"))
+            self.assertEqual(str(created_tx["category"]["id"]), str(self.cat_transport_id))
+        finally:
+            conn.close()
+
+    def test_accepted_transfer_candidate_patch_freeze(self):
+        """
+        Regression proving that accepted transfer candidate rejects PATCH (account/amount mutation) with 422.
+        """
+        lines = [
+            ParsedStatementLine(
+                source_page_no=1,
+                source_row_no=1,
+                transaction_on=date(2026, 7, 18),
+                description_raw="ATM Cash Outflow Leg",
+                amount=Decimal("150.00"),
+                currency="CNY",
+                direction="debit",
+                line_type="unknown"
+            )
+        ]
+        batch_id = self._upload_test_statement(lines, default_expense_category_id=False)
 
         conn = get_connection(self.test_schema)
         try:
@@ -431,35 +514,37 @@ class TestReconciliationReviewApiDb(BaseDbTestCase):
         finally:
             conn.close()
 
-        # Patch candidate with new category (Transport)
-        patch_res = self.client.patch(
+        # Resolve as valid debit transfer
+        res_resolve = self.client.post(
+            f"/api/v1/reconciliation-candidates/{cand_id}/resolve",
+            headers=self.headers,
+            json={"resolution_type": "transfer", "counter_account_id": str(self.acc_savings_id)}
+        )
+        self.assertEqual(res_resolve.status_code, 200)
+
+        # Accept candidate
+        res_accept = self.client.post(
+            f"/api/v1/reconciliation-candidates/{cand_id}/accept",
+            headers=self.headers,
+            json={}
+        )
+        self.assertEqual(res_accept.status_code, 200)
+
+        # Accepted transfer candidate -> PATCH account => 422
+        res_patch_acc = self.client.patch(
             f"/api/v1/reconciliation-candidates/{cand_id}",
             headers=self.headers,
-            json={"payload": {"transaction": {"category_id": str(self.cat_transport_id)}}}
+            json={"payload": {"transfer": {"to_account_id": str(self.acc_b_id)}}}
         )
-        self.assertEqual(patch_res.status_code, 200)
+        self.assertEqual(res_patch_acc.status_code, 422)
 
-        # Verify candidate payload in DB
-        conn = get_connection(self.test_schema)
-        try:
-            candidates = reconciliation_repo.list_candidates_for_batch(conn, batch_id)
-            cand = next(c for c in candidates if c["id"] == cand_id)
-            self.assertEqual(cand["payload"]["transaction"]["category_id"], str(self.cat_transport_id))
-        finally:
-            conn.close()
-
-        # Commit batch
-        commit_res = self.client.post(f"/api/v1/reconciliation-batches/{batch_id}/commit", headers=self.headers, json={})
-        self.assertEqual(commit_res.status_code, 200)
-
-        # Verify created transaction has Transport category
-        conn = get_connection(self.test_schema)
-        try:
-            txs, _ = tx_repo.list_transactions_with_filters(conn, self.household_id, account_id=self.acc_cny_id)
-            created_tx = next(t for t in txs if t["original_amount"] == Decimal("6.00"))
-            self.assertEqual(str(created_tx["category"]["id"]), str(self.cat_transport_id))
-        finally:
-            conn.close()
+        # Accepted transfer candidate -> PATCH amount => 422
+        res_patch_amt = self.client.patch(
+            f"/api/v1/reconciliation-candidates/{cand_id}",
+            headers=self.headers,
+            json={"payload": {"transfer": {"to_amount": "200.00"}}}
+        )
+        self.assertEqual(res_patch_amt.status_code, 422)
 
     def test_candidate_reject_workflow(self):
         lines = [

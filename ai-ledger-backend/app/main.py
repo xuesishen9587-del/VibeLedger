@@ -22,6 +22,8 @@ from app.api.routes.reconciliation import router as reconciliation_router, candi
 from app.api.routes.statements import router as statements_router
 from app.api.routes.investments import router as investments_router
 from app.api.routes.devices import router as devices_router
+from app.api.routes.work_queue import router as work_queue_router
+from app.api.routes.audit import router as audit_router
 
 def create_app() -> FastAPI:
     """
@@ -55,11 +57,17 @@ def create_app() -> FastAPI:
     app.include_router(statements_router)
     app.include_router(investments_router)
     app.include_router(devices_router)
+    app.include_router(work_queue_router)
+    app.include_router(audit_router)
 
-
+    @app.get("/health", tags=["Health"])
     @app.get("/api/v1/health", tags=["Health"])
     def health_check():
-        return {"status": "healthy", "service": "vibeledger-api", "version": "1.0.0"}
+        return {"status": "ok", "service": "vibeledger-api", "version": "1.0.0"}
+
+    @app.get("/ready", tags=["Health"])
+    def readiness_check():
+        return {"status": "ok", "database": "ok"}
 
     return app
 

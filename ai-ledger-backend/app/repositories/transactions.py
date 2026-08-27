@@ -492,7 +492,7 @@ def get_transaction_detail(conn, transaction_id: UUID, household_id: Optional[UU
                t.merchant, t.remarks,
                t.source, t.status, t.verification_status, t.confidence,
                t.source_request_id, t.statement_batch_id,
-               t.created_at, t.updated_at, t.deleted_at
+               t.created_at, t.updated_at, t.deleted_at, t.row_version
         FROM transactions t
         LEFT JOIN accounts fa ON fa.id = t.from_account_id
         LEFT JOIN accounts ta ON ta.id = t.to_account_id
@@ -564,6 +564,7 @@ def get_transaction_detail(conn, transaction_id: UUID, household_id: Optional[UU
             "created_at": r[31],
             "updated_at": r[32],
             "deleted_at": r[33],
+            "row_version": r[34],
             "links": links
         }
 

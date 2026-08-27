@@ -31,7 +31,7 @@ class TestArchitectureRegression(unittest.TestCase):
         self.assertIn("requests", content)
 
     def test_no_database_imports_or_credentials_in_python_files(self):
-        """Scan all dashboard python source files to ensure no forbidden DB tokens exist."""
+        """Recursively scan all dashboard python source files to ensure no forbidden DB tokens exist."""
         forbidden_tokens = [
             "psycopg2",
             "DATABASE_URL",
@@ -39,13 +39,19 @@ class TestArchitectureRegression(unittest.TestCase):
             "TABLE_SUFFIX",
             "get_db_connection",
             "apply_adjustment",
-            "get_credit_card_statement_info"
+            "get_credit_card_statement_info",
+            "SELECT ",
+            "INSERT INTO ",
+            "UPDATE transactions",
+            "DELETE FROM "
         ]
 
         py_files = [
-            p for p in self.dashboard_dir.glob("*.py")
-            if p.name != "__init__.py"
+            p for p in self.dashboard_dir.rglob("*.py")
+            if not any(part.startswith(".") or "venv" in part or "__pycache__" in part or part == "tests" for part in p.parts)
         ]
+
+        self.assertTrue(len(py_files) > 0, "Must find dashboard python source files to inspect.")
 
         for py_file in py_files:
             text = py_file.read_text(encoding="utf-8")
@@ -53,7 +59,7 @@ class TestArchitectureRegression(unittest.TestCase):
                 self.assertNotIn(
                     token,
                     text,
-                    f"Forbidden database token '{token}' found in {py_file.name}."
+                    f"Forbidden database token '{token}' found in {py_file.relative_to(self.dashboard_dir)}."
                 )
 
     def test_app_uses_api_client(self):

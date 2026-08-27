@@ -20,9 +20,9 @@ def insert_audit_event(
     """
     Inserts an immutable audit event. entity_type, entity_id, and action are strictly required.
     """
-    before_json = json.dumps(before_data) if before_data is not None else None
-    after_json = json.dumps(after_data) if after_data is not None else None
-    meta_json = json.dumps(metadata) if metadata is not None else None
+    before_json = json.dumps(before_data, default=str) if before_data is not None else None
+    after_json = json.dumps(after_data, default=str) if after_data is not None else None
+    meta_json = json.dumps(metadata, default=str) if metadata is not None else None
     
     with conn.cursor() as cur:
         cur.execute(

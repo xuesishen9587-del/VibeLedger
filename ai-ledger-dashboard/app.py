@@ -2,7 +2,6 @@ import os
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-import plotly.graph_objects as go
 from datetime import datetime, date
 from decimal import Decimal
 from typing import Optional, Dict, Any, List
@@ -19,6 +18,7 @@ from api_client import (
     BackendUnavailableError,
     TimeoutError
 )
+from time_utils import format_iso_timestamp
 
 # --- 页面全局设置 ---
 st.set_page_config(page_title="Vibe Finance Center", page_icon="🏦", layout="wide")
@@ -116,7 +116,7 @@ menu = st.sidebar.radio(
     ]
 )
 
-# 3. 侧边栏快捷余额校准
+# 3. 侧边栏快捷余额校准 (Item 1: Timezone-aware ISO as_of)
 st.sidebar.divider()
 st.sidebar.subheader("🎯 快速余额校准 (Snapshot)")
 st.sidebar.caption("向后端提交账户实际余额，由后端对账引擎自动核对校准。")
@@ -134,24 +134,22 @@ if active_accounts:
     with st.sidebar.form("quick_snapshot_form", clear_on_submit=True):
         sel_acc_label = st.selectbox("选择账户", options=list(acc_map.keys()))
         input_balance = st.number_input("当前权威真实余额", value=0.0, step=100.0, format="%.2f")
-        input_remarks = st.text_input("校准备注", value="侧边栏手动校准")
         submit_snap = st.form_submit_button("提交校准")
 
         if submit_snap:
             chosen_acc = acc_map[sel_acc_label]
             try:
-                today_iso = date.today().isoformat()
+                iso_as_of = format_iso_timestamp(date.today())
                 snap_res = client.create_account_snapshot(
                     account_id=chosen_acc["id"],
                     balance=Decimal(str(input_balance)),
-                    as_of=today_iso,
-                    currency=chosen_acc["currency"],
-                    remarks=input_remarks
+                    as_of=iso_as_of,
+                    currency=chosen_acc["currency"]
                 )
                 if snap_res.get("status") == "committed":
-                    st.sidebar.success(f"🎉 校准成功！账户已更新为 {chosen_acc['currency']} {input_balance:,.2f}")
+                    st.sidebar.success(f"🎉 校准成功！账户已确认为 {chosen_acc['currency']} {input_balance:,.2f}")
                 elif snap_res.get("status") == "needs_review":
-                    st.sidebar.warning("⚠️ 差额超过自动阈值，已创建对账工单等待人工复核。请前往「待办工单中心」查看。")
+                    st.sidebar.warning("⚠️ 差额超过自动平账阈值，已创建对账工单等待人工复核。请前往「待办工单中心」查看。")
                 else:
                     st.sidebar.info(f"对账结果: {snap_res.get('status')}")
                 st.rerun()
@@ -291,29 +289,28 @@ if menu == "💰 资产负债中心":
 
         st.divider()
 
-        # 5. 资产配置透视饼图
-        st.subheader("📊 家庭资产配置透视")
-        chart_data = []
-        for a in accounts_data:
-            bal_str = a.get("state", {}).get("ledger_balance", "0.00")
-            bal_dec = Decimal(str(bal_str))
-            if bal_dec > 0:
-                chart_data.append({
-                    "账户类型": "👛 活期资产" if a["account_type"] == "cash" else (
-                        "🛡️ 储蓄资产" if a["account_type"] == "savings" else (
-                            "📈 投资资产" if a["account_type"] == "investment" else "💳 信用溢缴款"
-                        )
-                    ),
-                    "金额": float(bal_dec)
+        # 5. 资产配置透视饼图 (Item 6: Consumes Backend Authoritative Reporting Currency asset_allocation)
+        st.subheader("📊 家庭资产配置透视 (本位币核算)")
+        asset_allocations = overview.get("asset_allocation", [])
+        chart_rows = []
+        for alloc in asset_allocations:
+            amt_dec = Decimal(str(alloc.get("amount", "0.00")))
+            if amt_dec > 0:
+                chart_rows.append({
+                    "资产类型": alloc.get("account_type_label", alloc.get("account_type")),
+                    "金额": float(amt_dec)
                 })
-        if chart_data:
-            df_chart = pd.DataFrame(chart_data).groupby("账户类型")["金额"].sum().reset_index()
+
+        if chart_rows:
+            df_chart = pd.DataFrame(chart_rows)
             fig = px.pie(
-                df_chart, values="金额", names="账户类型", hole=0.4,
+                df_chart, values="金额", names="资产类型", hole=0.4,
                 color_discrete_sequence=px.colors.qualitative.Pastel
             )
             fig.update_traces(textposition="outside", textinfo="percent+label")
             st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("当前无正资产配置数据。")
 
 
 # ==============================================================================
@@ -339,7 +336,7 @@ elif menu == "📊 收支统计中心":
 
     try:
         cf = client.get_cash_flow(from_date=from_str, to_date=to_str)
-        tx_resp = client.list_transactions(from_date=from_str, to_date=to_str, limit=200)
+        tx_resp = client.list_transactions(from_date=from_str, to_date=to_str, limit=100)
         transactions = tx_resp.get("items", [])
     except Exception as e:
         handle_api_error(e, "获取收支统计失败")
@@ -366,17 +363,16 @@ elif menu == "📊 收支统计中心":
 
         st.divider()
 
-        # 支出分类构成图
-        if transactions:
-            exp_items = [t for t in transactions if t["transaction_type"] in ("expense", "fee")]
-            if exp_items:
-                cat_rows = []
-                for t in exp_items:
-                    cat_name = t.get("category", {}).get("name") if t.get("category") else "未分类"
-                    amt = float(Decimal(str(t.get("reporting_amount") or t.get("from_amount") or t.get("original_amount") or "0")))
-                    cat_rows.append({"分类": cat_name, "金额": amt})
-                df_exp = pd.DataFrame(cat_rows).groupby("分类")["金额"].sum().reset_index()
-
+        # Item 7: 支出分类构成图 (Consumes Backend Authoritative expense_by_category)
+        expense_by_category = cf.get("expense_by_category", [])
+        if expense_by_category:
+            cat_rows = [
+                {"分类": item["category_name"], "金额": float(Decimal(str(item["amount"])))}
+                for item in expense_by_category
+                if Decimal(str(item["amount"])) > 0
+            ]
+            if cat_rows:
+                df_exp = pd.DataFrame(cat_rows)
                 c_pie1, c_pie2 = st.columns([1, 1])
                 with c_pie1:
                     st.subheader("🍕 本月支出构成 (按分类)")
@@ -424,7 +420,7 @@ elif menu == "📈 投资管理中心":
         inv_summary = {}
         accounts_data = []
 
-    # KPI
+    # Item 3: KPI Metrics using total_valuation from backend
     tot_val = Decimal(str(inv_summary.get("total_valuation", "0.00")))
     pnl = Decimal(str(inv_summary.get("total_pnl", "0.00")))
     rep_curr = inv_summary.get("reporting_currency", "CNY")
@@ -437,31 +433,31 @@ elif menu == "📈 投资管理中心":
 
     st.divider()
 
-    # 投资估值录入与校准
-    st.subheader("📝 投资账户估值快照录入 (Investment Snapshot)")
+    # Item 2: 投资估值录入与校准 (Aligned with Backend contract: total_asset_value, currency, as_of)
+    st.subheader("📝 投资账户估值快照录入 (Investment Valuation Snapshot)")
     if accounts_data:
         acc_dict = {a["name"]: a for a in accounts_data}
         with st.form("investment_snapshot_form", clear_on_submit=True):
             sel_inv_name = st.selectbox("选择投资账户", options=list(acc_dict.keys()))
-            inv_closing_val = st.number_input("期末权威估值 / 净资产", value=0.0, step=1000.0, format="%.2f")
+            inv_total_val = st.number_input("期末权威总资产估值", value=0.0, step=1000.0, format="%.2f")
             inv_as_of = st.date_input("估值基准日期", value=date.today())
-            inv_contrib = st.number_input("本期追加本金 (若有)", value=0.0, step=100.0, format="%.2f")
-            inv_withdr = st.number_input("本期赎回/出金 (若有)", value=0.0, step=100.0, format="%.2f")
-            inv_remarks = st.text_input("备注", value="定期估值校准")
             submit_inv = st.form_submit_button("提交投资估值")
 
             if submit_inv:
                 inv_acc = acc_dict[sel_inv_name]
                 try:
+                    iso_as_of = format_iso_timestamp(inv_as_of)
                     res = client.create_investment_snapshot(
                         account_id=inv_acc["id"],
-                        closing_value=Decimal(str(inv_closing_val)),
-                        as_of=inv_as_of.isoformat(),
-                        contributions=Decimal(str(inv_contrib)) if inv_contrib > 0 else None,
-                        withdrawals=Decimal(str(inv_withdr)) if inv_withdr > 0 else None,
-                        remarks=inv_remarks
+                        total_asset_value=Decimal(str(inv_total_val)),
+                        currency=inv_acc["currency"],
+                        as_of=iso_as_of
                     )
-                    st.success(f"🎉 投资估值已提交！计算确认投资盈亏: {res.get('currency', 'CNY')} {res.get('pnl_amount', '0.00')}")
+                    pnl_obj = res.get("investment_pnl")
+                    if pnl_obj is None:
+                        st.success(f"🎉 投资初始基准已成功建立！快照 ID: {res.get('snapshot_id')}")
+                    else:
+                        st.success(f"🎉 投资估值已提交！计算确认投资盈亏: {pnl_obj.get('currency', 'CNY')} {pnl_obj.get('pnl_amount', '0.00')}")
                     st.rerun()
                 except Exception as ex:
                     handle_api_error(ex, "投资估值提交失败")
@@ -503,65 +499,69 @@ elif menu == "⚖️ 账户校准与对账":
                     except Exception as ex:
                         handle_api_error(ex, "账单上传解析失败")
 
-        # 批次复核与提交展示
+        # Item 4 & Item 5: 批次复核与提交展示
         active_batch_id = st.session_state.get("active_batch_id")
         if active_batch_id:
             st.divider()
             st.subheader(f"2. 对账批次复核 (批次: {active_batch_id[:8]}...)")
             try:
                 preview = client.get_reconciliation_preview(active_batch_id)
-                stmt_lines_resp = client.get_statement_lines(active_batch_id)
-                stmt_lines = stmt_lines_resp.get("items", [])
-
                 summary = preview.get("summary", {})
+                batch_info = preview.get("batch", {})
+                candidates = preview.get("candidates", [])
+
                 p1, p2, p3, p4 = st.columns(4)
                 with p1:
                     st.metric("匹配交易数", summary.get("matched_count", 0))
                 with p2:
                     st.metric("新建流水数", summary.get("created_count", 0))
                 with p3:
-                    st.metric("待复核项", summary.get("pending_count", 0))
+                    st.metric("待复核候选", summary.get("pending_count", 0))
                 with p4:
-                    st.metric("自动平账差异", f"￥{summary.get('adjustment_amount', '0.00')}")
+                    st.metric("自动平账差异", f"￥{preview.get('adjustment_amount') or '0.00'}")
 
-                # 候选流水列表与操作
-                if stmt_lines:
-                    st.markdown("#### 对账单明细与匹配状态")
-                    for line in stmt_lines:
-                        l_col1, l_col2, l_col3 = st.columns([3, 2, 2])
-                        with l_col1:
-                            st.write(f"📅 **{line.get('transaction_on')}** · `{line.get('currency')} {line.get('amount')}` · {line.get('description')}")
-                        with l_col2:
-                            st.write(f"状态: `{line.get('match_status')}` | 类型: `{line.get('line_type')}`")
-                        with l_col3:
-                            cand_id = line.get("id")
-                            if line.get("match_status") in ("ambiguous", "unmatched"):
-                                c_btn1, c_btn2 = st.columns(2)
-                                with c_btn1:
-                                    if st.button("接受", key=f"acc_{cand_id}"):
+                # Item 4: Actionable Review Controls from preview["candidates"]
+                if candidates:
+                    st.markdown("#### 🔍 候选流水对账复核 (Actionable Candidates)")
+                    pending_cands = [c for c in candidates if c.get("status") in ("pending", "draft")]
+                    if not pending_cands:
+                        st.info("✅ 所有候选已完成复核决策。")
+                    else:
+                        for cand in pending_cands:
+                            c_id = cand["id"]
+                            sl = cand.get("statement_line") or {}
+                            c_col1, c_col2, c_col3 = st.columns([3, 2, 2])
+                            with c_col1:
+                                st.write(f"📅 **{sl.get('transaction_on', '-')}** · `{sl.get('currency', '')} {sl.get('amount', '')}` · {sl.get('description', '')}")
+                            with c_col2:
+                                st.write(f"类型: `{cand.get('candidate_type')}` | 置信度: `{cand.get('confidence', '-')}`")
+                            with c_col3:
+                                btn_c1, btn_c2 = st.columns(2)
+                                with btn_c1:
+                                    if st.button("接受", key=f"acc_cand_{c_id}"):
                                         try:
-                                            client.accept_reconciliation_candidate(cand_id)
-                                            st.success("已接受")
+                                            client.accept_reconciliation_candidate(c_id)
+                                            st.success("已接受该候选")
                                             st.rerun()
                                         except Exception as ex:
-                                            handle_api_error(ex)
-                                with c_btn2:
-                                    if st.button("忽略", key=f"rej_{cand_id}"):
+                                            handle_api_error(ex, "接受失败")
+                                with btn_c2:
+                                    if st.button("忽略", key=f"rej_cand_{c_id}"):
                                         try:
-                                            client.reject_reconciliation_candidate(cand_id, reason="用户手动忽略")
-                                            st.success("已忽略")
+                                            client.reject_reconciliation_candidate(c_id, reason="用户手动忽略")
+                                            st.success("已忽略该候选")
                                             st.rerun()
                                         except Exception as ex:
-                                            handle_api_error(ex)
+                                            handle_api_error(ex, "忽略失败")
 
-                # 原子提交按钮
+                # Item 5: Concurrency Safe Batch Commit using preview["batch"]["row_version"]
                 st.divider()
-                row_ver = preview.get("row_version", 0)
+                batch_row_ver = batch_info.get("row_version", 0)
                 if st.button("🚀 原子提交该对账批次 (Commit Ledger)", type="primary"):
                     try:
-                        commit_res = client.commit_reconciliation_batch(active_batch_id, row_version=row_ver)
+                        commit_res = client.commit_reconciliation_batch(active_batch_id, row_version=batch_row_ver)
                         if commit_res.get("status") == "committed":
-                            st.success(f"🎉 对账批次已原子提交入账！匹配: {commit_res.get('summary', {}).get('matched_count')} 笔")
+                            st.success(f"🎉 对账批次已原子提交入账！")
                             st.session_state.pop("active_batch_id", None)
                             st.rerun()
                         elif commit_res.get("status") == "needs_review":
@@ -581,18 +581,17 @@ elif menu == "⚖️ 账户校准与对账":
                 s_acc_label = st.selectbox("选择账户", options=list(m_acc_opts.keys()), key="man_snap_acc")
                 s_balance = st.number_input("账户当前真实余额", value=0.0, step=100.0, format="%.2f", key="man_snap_bal")
                 s_as_of = st.date_input("基准日期", value=date.today(), key="man_snap_date")
-                s_remarks = st.text_input("备注", value="手动校准", key="man_snap_rem")
                 s_submit = st.form_submit_button("提交余额并校准")
 
                 if s_submit:
                     target_a = m_acc_opts[s_acc_label]
                     try:
+                        iso_as_of = format_iso_timestamp(s_as_of)
                         res = client.create_account_snapshot(
                             account_id=target_a["id"],
                             balance=Decimal(str(s_balance)),
-                            as_of=s_as_of.isoformat(),
-                            currency=target_a["currency"],
-                            remarks=s_remarks
+                            as_of=iso_as_of,
+                            currency=target_a["currency"]
                         )
                         if res.get("status") == "committed":
                             st.success(f"🎉 校准成功！{target_a['name']} 当前余额已确认为 {target_a['currency']} {s_balance:,.2f}")
@@ -722,17 +721,19 @@ elif menu == "📋 交易明细与纠错/作废":
 
                     if btn_prev:
                         try:
-                            preview_payload = {
-                                "merchant": new_merchant if new_merchant else None,
-                                "remarks": new_remarks if new_remarks else None,
-                                "from_amount": Decimal(new_amt) if new_amt else None
-                            }
+                            preview_payload = {}
+                            if new_merchant.strip():
+                                preview_payload["merchant"] = new_merchant.strip()
+                            if new_remarks.strip():
+                                preview_payload["remarks"] = new_remarks.strip()
+                            if new_amt.strip():
+                                preview_payload["from_amount"] = Decimal(new_amt.strip())
+
                             prev_res = client.preview_transaction_correction(target_tx["id"], preview_payload)
                             st.session_state["active_corr_preview"] = prev_res
                             st.session_state["active_corr_changes"] = {
-                                "merchant": new_merchant,
-                                "remarks": new_remarks,
-                                "from_amount": new_amt
+                                k: str(v) if isinstance(v, Decimal) else v
+                                for k, v in preview_payload.items()
                             }
                             st.success("✅ 变更预览成功，请在下方确认账户余额投影影响！")
                         except Exception as ex:
@@ -766,7 +767,7 @@ elif menu == "📋 交易明细与纠错/作废":
                             handle_api_error(ex, "提交变更失败")
 
             with tab_void:
-                st.caption("作废交易将原子反向冲销账户余额投影，记录不可变审计日志，并软删除流水:")
+                st.caption("作废交易将原子反向冲销账户余额投影，记录不可变审计日志，并软删除流水 (需要乐观锁版本号):")
                 with st.form("void_form"):
                     void_reason = st.text_input("作废原因 (必填)", value="重复录入 / 错误流水")
                     btn_void = st.form_submit_button("⚠️ 确认作废此交易", type="secondary")
@@ -779,7 +780,7 @@ elif menu == "📋 交易明细与纠错/作废":
                                 v_res = client.void_transaction(
                                     transaction_id=target_tx["id"],
                                     delete_reason=void_reason.strip(),
-                                    expected_version=target_tx.get("row_version")
+                                    expected_version=target_tx.get("row_version", 0)
                                 )
                                 st.success(f"🎉 交易已作废！账户余额已恢复: {v_res.get('account_balance_restored')}")
                                 st.rerun()
@@ -818,7 +819,7 @@ elif menu == "📋 交易明细与纠错/作废":
 
 
 # ==============================================================================
-# 页面 7: ⚙️ 账户与分类管理
+# 页面 7: ⚙️ 账户与分类管理 (Item 12: Full parity for edit / deactivate)
 # ==============================================================================
 elif menu == "⚙️ 账户与分类管理":
     st.title("⚙️ 账户与分类管理")
@@ -851,8 +852,58 @@ elif menu == "⚙️ 账户与分类管理":
 
         st.divider()
 
-        # 创建新账户
-        st.subheader("2. 创建新账户")
+        # 2. 编辑或停用已有账户 (Item 12)
+        if acc_list:
+            st.subheader("2. 编辑或停用已有账户")
+            sel_edit_acc_id = st.selectbox(
+                "选择要修改的账户",
+                options=[a["id"] for a in acc_list],
+                format_func=lambda x: next((f"{a['name']} ({a['status']})" for a in acc_list if a["id"] == x), x)
+            )
+            target_edit_acc = next((a for a in acc_list if a["id"] == sel_edit_acc_id), None)
+
+            if target_edit_acc:
+                col_e1, col_e2 = st.columns([3, 1])
+                with col_e1:
+                    with st.form("edit_account_form"):
+                        e_name = st.text_input("修改账户名称", value=target_edit_acc["name"])
+                        e_billing = st.number_input("修改账单日", min_value=1, max_value=31, value=int(target_edit_acc.get("billing_day") or 1)) if target_edit_acc["account_type"] == "credit" else None
+                        e_due = st.number_input("修改还款日", min_value=1, max_value=31, value=int(target_edit_acc.get("due_day") or 25)) if target_edit_acc["account_type"] == "credit" else None
+                        btn_update_acc = st.form_submit_button("保存账户修改")
+
+                        if btn_update_acc:
+                            payload: Dict[str, Any] = {}
+                            if e_name.strip() and e_name.strip() != target_edit_acc["name"]:
+                                payload["name"] = e_name.strip()
+                            if e_billing is not None:
+                                payload["billing_day"] = int(e_billing)
+                            if e_due is not None:
+                                payload["due_day"] = int(e_due)
+
+                            if payload:
+                                try:
+                                    client.update_account(target_edit_acc["id"], payload)
+                                    st.success("🎉 账户信息已更新！")
+                                    st.rerun()
+                                except Exception as ex:
+                                    handle_api_error(ex, "更新账户失败")
+                with col_e2:
+                    st.write("**账户状态操作**")
+                    if target_edit_acc.get("status") == "active":
+                        if st.button("⛔ 停用该账户", key=f"deact_acc_{target_edit_acc['id']}"):
+                            try:
+                                client.deactivate_account(target_edit_acc["id"])
+                                st.success("账户已成功停用")
+                                st.rerun()
+                            except Exception as ex:
+                                handle_api_error(ex, "停用失败")
+                    else:
+                        st.info("已处于停用状态")
+
+        st.divider()
+
+        # 3. 创建新账户
+        st.subheader("3. 创建新账户")
         with st.form("create_account_form", clear_on_submit=True):
             n_name = st.text_input("账户名称 (如: 工行信用卡)")
             n_inst = st.text_input("金融机构 (如: ICBC)")
@@ -880,10 +931,10 @@ elif menu == "⚙️ 账户与分类管理":
                     except Exception as ex:
                         handle_api_error(ex, "创建账户失败")
 
-        # 账户别名管理
+        # 4. 账户别名管理
         if acc_list:
             st.divider()
-            st.subheader("3. 账户别名管理 (快捷指令截图多模态匹配)")
+            st.subheader("4. 账户别名管理 (快捷指令截图多模态匹配)")
             sel_alias_acc = st.selectbox("选择要管理别名的账户", options=[a["id"] for a in acc_list], format_func=lambda x: next((a["name"] for a in acc_list if a["id"] == x), x))
             try:
                 aliases = client.list_account_aliases(sel_alias_acc).get("items", [])
@@ -916,7 +967,7 @@ elif menu == "⚙️ 账户与分类管理":
     with tab_cat:
         st.subheader("🏷️ 收支分类列表")
         try:
-            cats = client.list_categories().get("items", [])
+            cats = client.list_categories(status=None).get("items", [])
         except Exception as e:
             handle_api_error(e, "加载分类失败")
             cats = []
@@ -924,6 +975,42 @@ elif menu == "⚙️ 账户与分类管理":
         if cats:
             cat_df = pd.DataFrame(cats)
             st.dataframe(cat_df, use_container_width=True, hide_index=True)
+
+        st.divider()
+
+        # 编辑或停用已有分类 (Item 12)
+        if cats:
+            st.subheader("编辑或停用分类")
+            sel_edit_cat_id = st.selectbox(
+                "选择分类",
+                options=[c["id"] for c in cats],
+                format_func=lambda x: next((f"{c['name']} ({c['category_type']}, {c['status']})" for c in cats if c["id"] == x), x)
+            )
+            target_edit_cat = next((c for c in cats if c["id"] == sel_edit_cat_id), None)
+            if target_edit_cat:
+                c_edit1, c_edit2 = st.columns([3, 1])
+                with c_edit1:
+                    with st.form("edit_cat_form"):
+                        new_cat_name = st.text_input("分类名称", value=target_edit_cat["name"])
+                        btn_update_cat = st.form_submit_button("重命名分类")
+                        if btn_update_cat and new_cat_name.strip() and new_cat_name.strip() != target_edit_cat["name"]:
+                            try:
+                                client.update_category(target_edit_cat["id"], new_cat_name.strip())
+                                st.success("分类名称已更新！")
+                                st.rerun()
+                            except Exception as ex:
+                                handle_api_error(ex, "重命名分类失败")
+                with c_edit2:
+                    if target_edit_cat.get("status") == "active":
+                        if st.button("⛔ 停用分类", key=f"deact_cat_{target_edit_cat['id']}"):
+                            try:
+                                client.deactivate_category(target_edit_cat["id"])
+                                st.success("分类已停用")
+                                st.rerun()
+                            except Exception as ex:
+                                handle_api_error(ex, "停用分类失败")
+                    else:
+                        st.info("已停用")
 
         st.divider()
         st.subheader("创建新分类")

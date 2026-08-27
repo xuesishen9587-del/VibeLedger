@@ -109,15 +109,78 @@ class TestApiClient(unittest.TestCase):
         self.client.create_account_snapshot(
             account_id="acc-123",
             balance=Decimal("1234.56"),
-            as_of="2026-08-27",
-            currency="CNY",
-            remarks="Unit test snapshot"
+            as_of="2026-08-27T12:00:00+08:00",
+            currency="CNY"
         )
         mock_request.assert_called_once()
         _, kwargs = mock_request.call_args
         self.assertEqual(kwargs["json"]["balance"], "1234.56")
-        self.assertEqual(kwargs["json"]["as_of"], "2026-08-27")
+        self.assertEqual(kwargs["json"]["as_of"], "2026-08-27T12:00:00+08:00")
         self.assertEqual(kwargs["json"]["currency"], "CNY")
+        self.assertEqual(kwargs["json"]["source"], "dashboard_manual")
+        self.assertNotIn("remarks", kwargs["json"])
+
+    @patch.object(requests.Session, "request")
+    def test_create_investment_snapshot_baseline(self, mock_request):
+        mock_request.return_value = self._mock_response(201, {
+            "status": "committed",
+            "snapshot_id": "snap-baseline-1",
+            "investment_pnl": None
+        })
+        res = self.client.create_investment_snapshot(
+            account_id="acc-inv-1",
+            total_asset_value=Decimal("50000.00"),
+            currency="CNY",
+            as_of="2026-08-27T14:00:00+08:00"
+        )
+        self.assertEqual(res["snapshot_id"], "snap-baseline-1")
+        self.assertIsNone(res["investment_pnl"])
+        mock_request.assert_called_once()
+        _, kwargs = mock_request.call_args
+        self.assertEqual(kwargs["json"]["total_asset_value"], "50000.00")
+        self.assertEqual(kwargs["json"]["currency"], "CNY")
+        self.assertEqual(kwargs["json"]["as_of"], "2026-08-27T14:00:00+08:00")
+        self.assertEqual(kwargs["json"]["source"], "dashboard_manual")
+        self.assertNotIn("closing_value", kwargs["json"])
+        self.assertNotIn("contributions", kwargs["json"])
+
+    @patch.object(requests.Session, "request")
+    def test_create_investment_snapshot_with_pnl(self, mock_request):
+        mock_request.return_value = self._mock_response(201, {
+            "status": "committed",
+            "snapshot_id": "snap-pnl-2",
+            "investment_pnl": {
+                "period_id": "period-1",
+                "pnl_amount": "2500.00",
+                "currency": "CNY",
+                "status": "confirmed"
+            }
+        })
+        res = self.client.create_investment_snapshot(
+            account_id="acc-inv-1",
+            total_asset_value=Decimal("52500.00"),
+            currency="CNY",
+            as_of="2026-08-27T15:00:00+08:00"
+        )
+        self.assertIsNotNone(res["investment_pnl"])
+        self.assertEqual(res["investment_pnl"]["pnl_amount"], "2500.00")
+
+    @patch.object(requests.Session, "request")
+    def test_candidate_accept_reject_patch(self, mock_request):
+        mock_request.return_value = self._mock_response(200, {"status": "accepted"})
+        cand_id = "cand-uuid-1234"
+        self.client.accept_reconciliation_candidate(cand_id, target_transaction_id="tx-uuid-5678")
+        mock_request.assert_called_once()
+        kwargs = mock_request.call_args.kwargs
+        self.assertIn(f"/reconciliation-candidates/{cand_id}/accept", kwargs["url"])
+        self.assertEqual(kwargs["json"]["target_transaction_id"], "tx-uuid-5678")
+
+        mock_request.reset_mock()
+        mock_request.return_value = self._mock_response(200, {"status": "rejected"})
+        self.client.reject_reconciliation_candidate(cand_id, reason="User ignore")
+        kwargs = mock_request.call_args.kwargs
+        self.assertIn(f"/reconciliation-candidates/{cand_id}/reject", kwargs["url"])
+        self.assertEqual(kwargs["json"]["reason"], "User ignore")
 
     @patch.object(requests.Session, "request")
     def test_upload_statement_multipart(self, mock_request):
@@ -169,3 +232,14 @@ class TestApiClient(unittest.TestCase):
         _, kwargs = mock_request.call_args
         self.assertEqual(kwargs["json"]["delete_reason"], "Duplicate")
         self.assertEqual(kwargs["json"]["expected_version"], 0)
+
+    @patch.object(requests.Session, "request")
+    def test_account_and_category_management(self, mock_request):
+        mock_request.return_value = self._mock_response(200, {"status": "ok"})
+        self.client.update_account("acc-1", {"name": "New Name"})
+        self.client.deactivate_account("acc-1")
+        self.client.update_category("cat-1", "Dining Out")
+        self.client.deactivate_category("cat-1")
+        self.client.create_account_alias("acc-1", "Alias 1")
+        self.client.delete_account_alias("acc-1", "al-1")
+        self.assertEqual(mock_request.call_count, 6)

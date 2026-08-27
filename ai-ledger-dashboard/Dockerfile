@@ -11,7 +11,7 @@ RUN apt-get update && apt-get install -y \
 COPY requirements.txt ./
 RUN pip3 install --no-cache-dir -r requirements.txt
 
-COPY api_client.py app.py ./
+COPY api_client.py app.py time_utils.py ./
 
 EXPOSE 8501
 

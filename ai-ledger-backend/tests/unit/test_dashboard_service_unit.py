@@ -48,13 +48,24 @@ class TestDashboardServiceUnit(unittest.TestCase):
             )
         ]
 
-        summary = get_investments_summary(
-            conn=mock_conn,
-            household_id=self.household_id,
-            from_date=date(2026, 8, 1),
-            to_date=date(2026, 8, 31),
-            fx_service=self.mock_fx
-        )
+        with unittest.mock.patch("app.services.dashboard_service.list_accounts") as mock_list_accs:
+            mock_list_accs.return_value = [
+                {
+                    "id": uuid4(),
+                    "name": "Invest CNY",
+                    "account_type": "investment",
+                    "currency": "CNY",
+                    "ledger_balance": Decimal("50000.00")
+                }
+            ]
+
+            summary = get_investments_summary(
+                conn=mock_conn,
+                household_id=self.household_id,
+                from_date=date(2026, 8, 1),
+                to_date=date(2026, 8, 31),
+                fx_service=self.mock_fx
+            )
 
         # 100.00 CNY + 100.00 USD * 7.20 = 820.00 CNY
         self.assertEqual(summary["reporting_currency"], "CNY")
@@ -160,14 +171,15 @@ class TestDashboardServiceUnit(unittest.TestCase):
         # refund           =  100 CNY
         # cash_income      = 5000 CNY
         # Excluded transactions: transfer, opening_balance, reconciliation_adjustment
+        cat_shop_id = uuid4()
         mock_cur.fetchall.return_value = [
-            (uuid4(), "expense", date(2026, 8, 5), Decimal("1000.00"), "CNY", None, None, Decimal("1000.00"), "CNY", Decimal("1000.00"), "CNY"),
-            (uuid4(), "fee", date(2026, 8, 6), Decimal("20.00"), "CNY", None, None, Decimal("20.00"), "CNY", Decimal("20.00"), "CNY"),
-            (uuid4(), "refund", date(2026, 8, 10), None, None, Decimal("100.00"), "CNY", Decimal("100.00"), "CNY", Decimal("100.00"), "CNY"),
-            (uuid4(), "cash_income", date(2026, 8, 15), None, None, Decimal("5000.00"), "CNY", Decimal("5000.00"), "CNY", Decimal("5000.00"), "CNY"),
-            (uuid4(), "transfer", date(2026, 8, 18), Decimal("2000.00"), "CNY", Decimal("2000.00"), "CNY", Decimal("2000.00"), "CNY", None, None),
-            (uuid4(), "opening_balance", date(2026, 8, 1), None, None, Decimal("10000.00"), "CNY", Decimal("10000.00"), "CNY", None, None),
-            (uuid4(), "reconciliation_adjustment", date(2026, 8, 20), Decimal("50.00"), "CNY", None, None, Decimal("50.00"), "CNY", None, None)
+            (uuid4(), "expense", date(2026, 8, 5), Decimal("1000.00"), "CNY", None, None, Decimal("1000.00"), "CNY", Decimal("1000.00"), "CNY", cat_shop_id, "Shopping"),
+            (uuid4(), "fee", date(2026, 8, 6), Decimal("20.00"), "CNY", None, None, Decimal("20.00"), "CNY", Decimal("20.00"), "CNY", None, None),
+            (uuid4(), "refund", date(2026, 8, 10), None, None, Decimal("100.00"), "CNY", Decimal("100.00"), "CNY", Decimal("100.00"), "CNY", cat_shop_id, "Shopping"),
+            (uuid4(), "cash_income", date(2026, 8, 15), None, None, Decimal("5000.00"), "CNY", Decimal("5000.00"), "CNY", Decimal("5000.00"), "CNY", None, None),
+            (uuid4(), "transfer", date(2026, 8, 18), Decimal("2000.00"), "CNY", Decimal("2000.00"), "CNY", Decimal("2000.00"), "CNY", None, None, None, None),
+            (uuid4(), "opening_balance", date(2026, 8, 1), None, None, Decimal("10000.00"), "CNY", Decimal("10000.00"), "CNY", None, None, None, None),
+            (uuid4(), "reconciliation_adjustment", date(2026, 8, 20), Decimal("50.00"), "CNY", None, None, Decimal("50.00"), "CNY", None, None, None, None)
         ]
 
         cf = get_cash_flow(

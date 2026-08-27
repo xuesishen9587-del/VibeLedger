@@ -285,6 +285,12 @@ class TestDashboardApiDb(BaseDbTestCase):
         self.assertEqual(data["total_liabilities"], "8000.00")
         self.assertEqual(data["net_worth"], "56400.00")
 
+        # Authoritative Asset Allocation in Reporting Currency
+        self.assertIn("asset_allocation", data)
+        alloc_map = {item["account_type"]: item for item in data["asset_allocation"]}
+        self.assertEqual(alloc_map["cash"]["amount"], "50000.00")
+        self.assertEqual(alloc_map["savings"]["amount"], "14400.00")
+
         # Freshness:
         # Accounts: 4 total (ICBC Checking, CMB Credit, BOC Credit No Snap, Chase USD)
         # <= 30d: ICBC Checking (5d) -> 1/4 = 0.2500
@@ -308,6 +314,13 @@ class TestDashboardApiDb(BaseDbTestCase):
         self.assertEqual(data["net_cash_flow"], "4080.00")
         self.assertEqual(data["reporting_currency"], "CNY")
 
+        # expense_by_category
+        self.assertIn("expense_by_category", data)
+        exp_by_cat = data["expense_by_category"]
+        self.assertGreaterEqual(len(exp_by_cat), 1)
+        self.assertEqual(exp_by_cat[0]["category_name"], "Shopping")
+        self.assertEqual(exp_by_cat[0]["amount"], "1000.00")
+
     def test_dashboard_investments_endpoint(self):
         res = self.client.get("/api/v1/dashboard/investments?from=2026-08-01&to=2026-08-31", headers=self.headers)
         self.assertEqual(res.status_code, 200)
@@ -315,6 +328,7 @@ class TestDashboardApiDb(BaseDbTestCase):
         self.assertEqual(data["reporting_currency"], "CNY")
         # 100.00 CNY + 100.00 USD * 7.20 = 820.00 CNY
         self.assertEqual(data["total_pnl"], "820.00")
+        self.assertIn("total_valuation", data)
         self.assertEqual(len(data["items"]), 2)
 
         items_by_curr = {it["currency"]: it for it in data["items"]}

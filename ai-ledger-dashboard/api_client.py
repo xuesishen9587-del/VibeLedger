@@ -3,6 +3,8 @@ import requests
 from typing import Optional, Dict, Any, List, Union
 from decimal import Decimal
 
+from time_utils import format_iso_timestamp
+
 
 # --- Structured API Error Exceptions ---
 
@@ -325,36 +327,48 @@ class ApiClient:
         balance: Union[str, Decimal, float],
         as_of: Optional[str] = None,
         currency: Optional[str] = None,
-        remarks: Optional[str] = None
+        idempotency_key: Optional[str] = None
     ) -> Dict[str, Any]:
-        """POST /api/v1/accounts/{account_id}/snapshots"""
-        payload = {
+        """
+        POST /api/v1/accounts/{account_id}/snapshots
+        Authoritative observation timestamp requires timezone-aware ISO string.
+        """
+        iso_as_of = as_of or format_iso_timestamp()
+        payload: Dict[str, Any] = {
             "balance": f"{Decimal(str(balance)):.2f}",
-            "as_of": as_of,
-            "currency": currency,
-            "remarks": remarks
+            "as_of": iso_as_of,
+            "source": "dashboard_manual"
         }
+        if currency:
+            payload["currency"] = currency
+        if idempotency_key:
+            payload["idempotency_key"] = idempotency_key
+
         return self.request("POST", f"/api/v1/accounts/{account_id}/snapshots", json_data=payload)
 
     def create_investment_snapshot(
         self,
         account_id: str,
-        closing_value: Union[str, Decimal, float],
+        total_asset_value: Union[str, Decimal, float],
+        currency: str,
         as_of: Optional[str] = None,
-        contributions: Optional[Union[str, Decimal, float]] = None,
-        withdrawals: Optional[Union[str, Decimal, float]] = None,
-        unverified_capital_flows: bool = False,
-        remarks: Optional[str] = None
+        source: str = "dashboard_manual",
+        idempotency_key: Optional[str] = None
     ) -> Dict[str, Any]:
-        """POST /api/v1/investment-accounts/{account_id}/snapshots"""
-        payload = {
-            "closing_value": f"{Decimal(str(closing_value)):.2f}",
-            "as_of": as_of,
-            "contributions": f"{Decimal(str(contributions)):.2f}" if contributions is not None else None,
-            "withdrawals": f"{Decimal(str(withdrawals)):.2f}" if withdrawals is not None else None,
-            "unverified_capital_flows": unverified_capital_flows,
-            "remarks": remarks
+        """
+        POST /api/v1/investment-accounts/{account_id}/snapshots
+        Conforms strictly to backend contract: total_asset_value, currency, as_of (timezone-aware), source.
+        """
+        iso_as_of = as_of or format_iso_timestamp()
+        payload: Dict[str, Any] = {
+            "total_asset_value": f"{Decimal(str(total_asset_value)):.2f}",
+            "currency": currency,
+            "as_of": iso_as_of,
+            "source": source
         }
+        if idempotency_key:
+            payload["idempotency_key"] = idempotency_key
+
         return self.request("POST", f"/api/v1/investment-accounts/{account_id}/snapshots", json_data=payload)
 
     def get_investment_performance(
@@ -529,9 +543,9 @@ class ApiClient:
         self,
         transaction_id: str,
         delete_reason: str,
-        expected_version: Optional[int] = None
+        expected_version: int
     ) -> Dict[str, Any]:
-        """POST /api/v1/transactions/{transaction_id}/void"""
+        """POST /api/v1/transactions/{transaction_id}/void (expected_version is required)"""
         payload = {
             "delete_reason": delete_reason,
             "expected_version": expected_version

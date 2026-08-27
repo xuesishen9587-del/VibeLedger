@@ -568,3 +568,47 @@ def get_transaction_detail(conn, transaction_id: UUID, household_id: Optional[UU
             "links": links
         }
 
+def update_transaction_fields(
+    conn,
+    transaction_id: UUID,
+    occurred_on: Optional[date] = None,
+    category_id: Optional[UUID] = None,
+    merchant: Optional[str] = None,
+    merchant_normalized: Optional[str] = None,
+    remarks: Optional[str] = None,
+    from_amount: Optional[Decimal] = None,
+    to_amount: Optional[Decimal] = None,
+    reporting_amount: Optional[Decimal] = None
+) -> None:
+    """
+    Updates the specified fields on a transaction and increments row_version.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE transactions
+            SET occurred_on = COALESCE(%(occurred_on)s, occurred_on),
+                category_id = COALESCE(%(category_id)s, category_id),
+                merchant = COALESCE(%(merchant)s, merchant),
+                merchant_normalized = COALESCE(%(merchant_normalized)s, merchant_normalized),
+                remarks = COALESCE(%(remarks)s, remarks),
+                from_amount = COALESCE(%(from_amount)s, from_amount),
+                to_amount = COALESCE(%(to_amount)s, to_amount),
+                reporting_amount = COALESCE(%(reporting_amount)s, reporting_amount),
+                row_version = row_version + 1,
+                updated_at = now()
+            WHERE id = %(transaction_id)s;
+            """,
+            {
+                "occurred_on": occurred_on,
+                "category_id": category_id,
+                "merchant": merchant,
+                "merchant_normalized": merchant_normalized,
+                "remarks": remarks,
+                "from_amount": from_amount,
+                "to_amount": to_amount,
+                "reporting_amount": reporting_amount,
+                "transaction_id": transaction_id
+            }
+        )
+

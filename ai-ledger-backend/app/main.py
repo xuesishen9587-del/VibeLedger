@@ -1,7 +1,12 @@
-from fastapi import FastAPI, HTTPException
+import os
+from typing import Any
+from fastapi import FastAPI, HTTPException, Depends
 from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+
 from app.domain.transactions import LedgerDomainError
 from app.domain.auth import AuthError
+from app.api.deps import get_db_connection
 from app.api.errors import (
     ledger_domain_exception_handler,
     auth_domain_exception_handler,
@@ -66,8 +71,47 @@ def create_app() -> FastAPI:
         return {"status": "ok", "service": "vibeledger-api", "version": "1.0.0"}
 
     @app.get("/ready", tags=["Health"])
-    def readiness_check():
-        return {"status": "ok", "database": "ok"}
+    def readiness_check(conn: Any = Depends(get_db_connection)):
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1;")
+                cur.execute(
+                    """
+                    SELECT EXISTS (
+                        SELECT 1 FROM information_schema.tables 
+                        WHERE table_schema = current_schema() AND table_name = 'schema_migrations'
+                    );
+                    """
+                )
+                has_migrations = cur.fetchone()[0]
+                if not has_migrations:
+                    return JSONResponse(
+                        status_code=503,
+                        content={
+                            "status": "unavailable",
+                            "database": "schema_not_ready",
+                            "schema": "missing_migrations_table"
+                        }
+                    )
+        except Exception as e:
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "status": "unavailable",
+                    "database": "error",
+                    "error": str(e)
+                }
+            )
+
+        gemini_api_key = os.environ.get("GEMINI_API_KEY")
+        gemini_status = "ok" if (gemini_api_key and gemini_api_key.strip()) else "unavailable"
+        overall_status = "ok" if gemini_status == "ok" else "degraded"
+
+        return {
+            "status": overall_status,
+            "database": "ok",
+            "gemini": gemini_status
+        }
 
     return app
 

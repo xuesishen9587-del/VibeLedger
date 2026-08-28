@@ -231,7 +231,7 @@ curl -X POST https://<STAGING_BACKEND_HOST>/api/v1/devices \
 2. Save the returned `token` string into:
    `On My iPhone/VibeLedger/device-token.txt`
 3. In Phase 12, the iOS Shortcut reads the token dynamically from this file, keeping tokens isolated per device and preventing hardcoding secrets in Shortcuts.
-4. The Shortcut pending idempotency state is also maintained locally in `On My iPhone/VibeLedger/pending-request.json`.
+4. The Shortcut pending idempotency state is also maintained locally in `On My iPhone/VibeLedger/pending-key.json`.
 
 ### Step 14: Test Device Bearer Authentication
 Verify the provisioned device token on a safe read-only target endpoint:

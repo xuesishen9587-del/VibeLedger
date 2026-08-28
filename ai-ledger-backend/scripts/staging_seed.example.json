@@ -1,0 +1,67 @@
+{
+  "household": {
+    "name": "Staging Household",
+    "reporting_currency": "CNY"
+  },
+  "owner": {
+    "display_name": "Staging Owner",
+    "email": "staging_owner@example.com",
+    "default_currency": "CNY"
+  },
+  "accounts": [
+    {
+      "name": "招商银行储蓄卡",
+      "institution": "招商银行",
+      "account_type": "savings",
+      "currency": "CNY"
+    },
+    {
+      "name": "招商银行信用卡",
+      "institution": "招商银行",
+      "account_type": "credit",
+      "currency": "CNY",
+      "billing_day": 5,
+      "due_day": 25,
+      "linked_cash_account_name": "招商银行储蓄卡"
+    },
+    {
+      "name": "Chase Sapphire Credit Card",
+      "institution": "Chase",
+      "account_type": "credit",
+      "currency": "USD",
+      "billing_day": 10,
+      "due_day": 30
+    },
+    {
+      "name": "富途证券美股账户",
+      "institution": "富途证券",
+      "account_type": "investment",
+      "currency": "USD"
+    },
+    {
+      "name": "现金钱包",
+      "institution": "现金",
+      "account_type": "cash",
+      "currency": "CNY"
+    }
+  ],
+  "aliases": {
+    "招商银行储蓄卡": ["招行储蓄卡", "招商储蓄", "CMB Debit"],
+    "招商银行信用卡": ["招行信用卡", "招商信用卡", "CMB Credit"],
+    "Chase Sapphire Credit Card": ["Chase Sapphire", "Chase CC", "CSP"],
+    "现金钱包": ["现金", "Cash", "零钱"]
+  },
+  "categories": [
+    {"name": "餐饮美食", "category_type": "expense"},
+    {"name": "日用百货", "category_type": "expense"},
+    {"name": "交通出行", "category_type": "expense"},
+    {"name": "休闲娱乐", "category_type": "expense"},
+    {"name": "数码科技", "category_type": "expense"},
+    {"name": "医疗健康", "category_type": "expense"},
+    {"name": "住房物业", "category_type": "expense"},
+    {"name": "金融手续费", "category_type": "expense"},
+    {"name": "工资收入", "category_type": "income"},
+    {"name": "投资收益", "category_type": "income"},
+    {"name": "其他收入", "category_type": "income"}
+  ]
+}

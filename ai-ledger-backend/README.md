@@ -10,16 +10,27 @@ license: mit
 
 # VibeLedger Backend
 
-Check out the configuration reference at https://huggingface.co/docs/hub/spaces-config-reference
+VibeLedger Backend provides the target REST API (`/api/v1/*`), health & readiness probes (`/health`, `/ready`), background statement processing, Gemini multimodal expense ingestion, and deterministic ledger accounting.
 
 ---
 
-## Current Status & Legacy Implementation
+## Target FastAPI Application
 
-> **NOTICE**: The code currently in this directory represents the **legacy prototype implementation** (FastAPI with single `/api/record` endpoint, two-table schema, and startup `init_db()` DDL).
-> 
-> **Do not use this README or legacy codebase as the target business specification.**  
-> Target architecture has been frozen and will be implemented incrementally per the roadmap.
+The target backend application is implemented in `app/` and exposed via `app.main:app`:
+- **API Version**: `v1` (`/api/v1/*`)
+- **Probes**:
+  - `GET /health` — Service identity and status (`vibeledger-api`)
+  - `GET /ready` — Database connection, schema migration status, SHA256 checksum verification, and Gemini client status
+- **Container Definition**: `Dockerfile.target` (`uvicorn app.main:app --host 0.0.0.0 --port 7860`)
+
+> **Note on Legacy Runtime**: `Dockerfile` and `main.py` remain preserved for the legacy prototype (`/api/record`) until Phase 13 production fresh cutover.
+
+---
+
+## Deployment & Staging Runbook
+
+For complete instructions on configuring, migrating, bootstrapping, and deploying the target backend in an isolated staging environment, refer to:
+- [`docs/deployment/STAGING_DEPLOYMENT.md`](../docs/deployment/STAGING_DEPLOYMENT.md)
 
 ---
 

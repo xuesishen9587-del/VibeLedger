@@ -20,9 +20,9 @@ FORBIDDEN_TARGET_SCHEMAS = {
 }
 
 class Settings(BaseSettings):
-    ENVIRONMENT: Literal["development", "test", "production"] = Field(
+    ENVIRONMENT: Literal["development", "test", "staging", "production"] = Field(
         ...,
-        description="The running environment. Must be explicitly set to 'development', 'test', or 'production'."
+        description="The running environment. Must be explicitly set to 'development', 'test', 'staging', or 'production'."
     )
     DATABASE_URL: str = Field(
         ...,

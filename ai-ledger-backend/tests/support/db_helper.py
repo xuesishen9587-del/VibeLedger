@@ -1,4 +1,6 @@
+import atexit
 import os
+import threading
 import uuid
 import psycopg2
 from psycopg2 import sql
@@ -41,6 +43,22 @@ ALL_BUSINESS_TABLES = [
     "households",
 ]
 
+_SHARED_SCHEMA_ENV = "VIBELEDGER_TEST_SHARED_SCHEMA"
+_shared_schema_lock = threading.RLock()
+_shared_schema_name: str | None = None
+_truncate_statements: dict[str, sql.Composed] = {}
+
+
+def _shared_schema_enabled() -> bool:
+    return os.environ.get(_SHARED_SCHEMA_ENV, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _create_isolated_test_schema() -> str:
+    schema_name = f"vibeledger_test_{uuid.uuid4().hex[:12]}"
+    config.validate_test_schema(schema_name)
+    runner.run_migrations(schema_name)
+    return schema_name
+
 def create_test_schema() -> str:
     """
     Creates a new isolated test schema and runs migrations 0001-0009 ONCE inside it.
@@ -49,10 +67,14 @@ def create_test_schema() -> str:
     if not config.is_safe_for_testing():
         raise PermissionError("Destructive test operations are only allowed when ENVIRONMENT='test'.")
     
-    schema_name = f"vibeledger_test_{uuid.uuid4().hex[:12]}"
-    config.validate_test_schema(schema_name)
-    runner.run_migrations(schema_name)
-    return schema_name
+    if not _shared_schema_enabled():
+        return _create_isolated_test_schema()
+
+    global _shared_schema_name
+    with _shared_schema_lock:
+        if _shared_schema_name is None:
+            _shared_schema_name = _create_isolated_test_schema()
+        return _shared_schema_name
 
 def drop_test_schema(schema_name: str) -> None:
     """
@@ -74,6 +96,18 @@ def drop_test_schema(schema_name: str) -> None:
         print(f"Warning: failed to drop test schema {schema_name}: {e}")
     finally:
         conn.close()
+        with _shared_schema_lock:
+            _truncate_statements.pop(schema_name, None)
+
+
+def cleanup_shared_test_schema() -> None:
+    """Drop the opt-in process-wide test schema, if one was created."""
+    global _shared_schema_name
+    with _shared_schema_lock:
+        schema_name = _shared_schema_name
+        _shared_schema_name = None
+    if schema_name:
+        drop_test_schema(schema_name)
 
 def truncate_business_tables(conn, schema_name: str) -> None:
     """
@@ -89,26 +123,33 @@ def truncate_business_tables(conn, schema_name: str) -> None:
         conn.rollback()
 
     with conn.cursor() as cur:
-        # Verify and fetch tables present in schema
-        cur.execute(
-            """
-            SELECT table_name 
-            FROM information_schema.tables 
-            WHERE table_schema = %s 
-              AND table_type = 'BASE TABLE' 
-              AND table_name != 'schema_migrations';
-            """,
-            (schema_name,)
-        )
-        tables = [row[0] for row in cur.fetchall()]
-        if tables:
-            quoted_tables = [sql.SQL("{schema}.{tbl}").format(
-                schema=sql.Identifier(schema_name),
-                tbl=sql.Identifier(t)
-            ) for t in tables]
-            truncate_stmt = sql.SQL("TRUNCATE TABLE {tables} RESTART IDENTITY CASCADE;").format(
-                tables=sql.SQL(", ").join(quoted_tables)
+        with _shared_schema_lock:
+            truncate_stmt = _truncate_statements.get(schema_name)
+        if truncate_stmt is None:
+            # Migrations are immutable for a schema during an integration run,
+            # so the safely quoted table list only needs to be discovered once.
+            cur.execute(
+                """
+                SELECT table_name
+                FROM information_schema.tables
+                WHERE table_schema = %s
+                  AND table_type = 'BASE TABLE'
+                  AND table_name != 'schema_migrations';
+                """,
+                (schema_name,)
             )
+            tables = [row[0] for row in cur.fetchall()]
+            if tables:
+                quoted_tables = [sql.SQL("{schema}.{tbl}").format(
+                    schema=sql.Identifier(schema_name),
+                    tbl=sql.Identifier(t)
+                ) for t in tables]
+                truncate_stmt = sql.SQL("TRUNCATE TABLE {tables} RESTART IDENTITY CASCADE;").format(
+                    tables=sql.SQL(", ").join(quoted_tables)
+                )
+                with _shared_schema_lock:
+                    _truncate_statements[schema_name] = truncate_stmt
+        if truncate_stmt is not None:
             cur.execute(truncate_stmt)
     conn.commit()
 
@@ -146,7 +187,11 @@ class BaseDbTestCase(unittest.TestCase):
     def tearDownClass(cls):
         if hasattr(cls, "conn") and cls.conn and not cls.conn.closed:
             cls.conn.close()
-        if hasattr(cls, "test_schema") and cls.test_schema:
+        if (
+            hasattr(cls, "test_schema")
+            and cls.test_schema
+            and not _shared_schema_enabled()
+        ):
             drop_test_schema(cls.test_schema)
 
     def setUp(self):
@@ -168,3 +213,6 @@ class BaseDbTestCase(unittest.TestCase):
     def seed_test_data(self):
         """Hook for test-specific deterministic fixtures."""
         pass
+
+
+atexit.register(cleanup_shared_test_schema)

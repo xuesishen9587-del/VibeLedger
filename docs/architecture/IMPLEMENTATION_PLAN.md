@@ -1457,6 +1457,52 @@ must contain zero direct PostgreSQL business access.
 
 ---
 
+# 17.5. Phase 11.5 — Pre-production Deployment & Runtime Readiness
+
+## Goal
+
+Deploy the target system (`Dockerfile.target`) to an isolated, non-authoritative staging environment (`ENVIRONMENT=staging`), apply target migrations, bootstrap initial staging identity and accounts, and verify runtime readiness before Phase 12 real-device testing.
+
+## Staging Architecture
+
+```text
+Target FastAPI Backend (Dockerfile.target -> app.main:app)
+        ↓
+Isolated Staging PostgreSQL Database / Schema (vibeledger_staging)
+        ↓
+Target Migrations (0001 -> 0009 with SHA256 checksums)
+        ↓
+Staging Bootstrap (bootstrap_staging.py, account_state.initialized_at=NULL)
+        ↓
+Staging Browser Auth (generate_staging_browser_token.py, HS256 HMAC signing)
+        ↓
+Staging iPhone Device Token (POST /api/v1/devices)
+        ↓
+Staging Dashboard (BACKEND_URL only, zero direct DB access)
+```
+
+## Key Deliverables
+
+1. `ai-ledger-backend/Dockerfile.target` — Dedicated target application container definition booting `uvicorn app.main:app --port 7860`. (Legacy `ai-ledger-backend/Dockerfile` remains unchanged).
+2. `ai-ledger-backend/app/config.py` — Support for `ENVIRONMENT=staging` (permits migrations, strictly restricts destructive cleanups to `ENVIRONMENT=test`).
+3. `ai-ledger-backend/scripts/bootstrap_staging.py` & `staging_seed.example.json` — Idempotent staging data setup using natural keys and consistency verification.
+4. `ai-ledger-backend/scripts/generate_staging_browser_token.py` — Staging-only HS256 HMAC-signed Browser JWT generation.
+5. `docs/deployment/STAGING_DEPLOYMENT.md` — 15-step staging operational runbook.
+
+## Acceptance Criteria
+
+1. Target container boots `app.main:app`.
+2. `GET /health` returns HTTP 200 with target service identity.
+3. `GET /ready` returns HTTP 200 with `database=ok` AND `gemini=ok`.
+4. Target migrations applied and checksums verified on `vibeledger_staging`.
+5. Staging bootstrap executes idempotently and sets `account_state.initialized_at = NULL`.
+6. Staging Browser JWT authenticates against `POST /api/v1/devices` and provisions a staging iPhone device token.
+7. Provisioned device token authenticates against target `/api/v1/*` endpoints.
+8. Dashboard connects to staging Backend without `DATABASE_URL`.
+9. Zero production data or legacy production endpoints modified.
+
+---
+
 # 18. Phase 12 — iPhone Shortcut v2 Cutover
 
 ## Goal
@@ -1547,7 +1593,8 @@ credit-card behavior
 investment
 Dashboard API migration
 auth/device tokens
-real Shortcut test
+Phase 11.5 staging runtime readiness passed
+Phase 12 real-device Shortcut acceptance passed
 ```
 
 ## Cutover
@@ -1703,11 +1750,14 @@ Read APIs       Snapshot Reconciliation
                 Phase 10
                 Auth Hardening
                    ↓
-                Phase 11
-                Dashboard Migration
-                   ↓
-                Phase 12
-                Shortcut v2
+                 Phase 11
+                 Dashboard Migration
+                    ↓
+                 Phase 11.5
+                 Pre-production Staging & Readiness
+                    ↓
+                 Phase 12
+                 Shortcut v2
                    ↓
                 Phase 13
                 Production Cutover

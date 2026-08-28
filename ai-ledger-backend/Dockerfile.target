@@ -1,0 +1,21 @@
+FROM python:3.10-slim
+
+# System dependencies for psycopg2 and build tools
+RUN apt-get update && apt-get install -y libpq-dev gcc && rm -rf /var/lib/apt/lists/*
+
+# Non-root user required by standard container environments (e.g. Hugging Face Spaces)
+RUN useradd -m -u 1000 user
+USER user
+ENV HOME=/home/user \
+    PATH=/home/user/.local/bin:$PATH
+
+WORKDIR $HOME/app
+
+# Copy application source code into container
+COPY --chown=user . $HOME/app
+
+# Install Python dependencies
+RUN pip install --no-cache-dir --upgrade -r requirements.txt
+
+# Boot the target FastAPI application on port 7860
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "7860"]

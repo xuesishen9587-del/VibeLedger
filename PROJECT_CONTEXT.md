@@ -1,9 +1,10 @@
 # VibeLedger Project Context & Agent Handoff
 
 > Current stage:  
-> **Target architecture is frozen.**  
-> **Implementation has not started.**  
-> **Repository is preparing for Implementation Phase 0/1.**
+> **Phases 0–11 implemented, verified, reviewed, and merged to `main`.**  
+> **Phase 11.5 (Pre-production Deployment & Runtime Readiness) in progress.**  
+> **Phase 12 (Real iPhone Shortcut v2 acceptance) ready to execute once Staging is deployed.**  
+> **Phase 13 (Production Fresh Cutover) scheduled after Phase 12 verification.**
 
 ---
 
@@ -103,5 +104,6 @@ All future development must follow this strict reading and authority order:
 
 ## 6. Current Next Steps
 
-1. **Architecture Consistency Review**: Complete (All target architecture documents frozen and 100% synchronized).
-2. **Next Action**: Proceed to **Implementation Phase 0** (Architecture freeze & test safety guards) and **Implementation Phase 1** (Target database foundation migrations & repositories) as defined in [`docs/architecture/IMPLEMENTATION_PLAN.md`](./docs/architecture/IMPLEMENTATION_PLAN.md).
+1. **Phase 11.5 (Pre-production Deployment & Runtime Readiness)**: Setup isolated staging environment (`ENVIRONMENT=staging`, `vibeledger_staging`), execute target migrations, bootstrap initial staging identity and accounts via `bootstrap_staging.py`, generate staging HS256 Browser JWT, verify `/health` and `/ready` (`database=ok`, `gemini=ok`), and provision staging iPhone device token.
+2. **Phase 12 (iPhone Shortcut v2 Cutover)**: Test real-device Shortcut captures, draft confirmations, and recovery workflows against live staging HTTPS backend.
+3. **Phase 13 (Production Fresh Cutover)**: Deploy target backend and database to production, establish real opening balances, provision production devices, switch daily Shortcut, and archive legacy systems.

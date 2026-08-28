@@ -20,9 +20,9 @@ FORBIDDEN_TARGET_SCHEMAS = {
 }
 
 class Settings(BaseSettings):
-    ENVIRONMENT: Literal["development", "test", "production"] = Field(
+    ENVIRONMENT: Literal["development", "test", "staging", "production"] = Field(
         ...,
-        description="The running environment. Must be explicitly set to 'development', 'test', or 'production'."
+        description="The running environment. Must be explicitly set to 'development', 'test', 'staging', or 'production'."
     )
     DATABASE_URL: str = Field(
         ...,
@@ -100,8 +100,14 @@ else:
     settings_load_error = None
 
 def get_settings() -> Settings:
+    global settings, settings_load_error
     if settings is None:
-        raise ValueError(f"Failed to initialize configuration settings. Details: {settings_load_error}")
+        try:
+            settings = Settings()
+            settings_load_error = None
+        except Exception as e:
+            settings_load_error = e
+            raise ValueError(f"Failed to initialize configuration settings. Details: {settings_load_error}")
     return settings
 
 def validate_safety() -> None:

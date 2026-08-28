@@ -12,8 +12,10 @@ This document provides the complete, copy-pasteable operational runbook to deplo
 
 1. **Zero Production Contamination**: Staging must NEVER connect to production PostgreSQL instances, production schemas (`vibeledger_target`, `public`), or production identity providers.
 2. **Strangler Docker Boundary**: Legacy production uses `Dockerfile` (`uvicorn main:app`). Staging uses `Dockerfile.target` (`uvicorn app.main:app`).
-3. **HS256 HMAC Signing for Staging Auth**: Staging uses a symmetric shared secret for Browser JWT signing/verification (`AUTH_ALGORITHMS=["HS256"]`). Production authentication architecture remains untouched.
+3. **HS256 HMAC Signing for Staging Auth**: Staging uses a symmetric shared secret for Browser JWT signing/verification (`AUTH_ALGORITHMS=["HS256"]`, secret min 32 chars). Production authentication architecture remains untouched.
 4. **No Historical / Opening Balance Ingestion**: Staging bootstrap sets `account_state.initialized_at = NULL` and creates zero fake transactions.
+5. **Private Staging Config Isolation**: Never put private account details in tracked Git files. Use uncommitted `scripts/staging_seed.local.json`.
+6. **Device-Local Token Storage**: Staging device token and pending idempotency state are stored exclusively in device-local storage (`On My iPhone/VibeLedger/`). Never use iCloud Drive.
 
 ---
 
@@ -33,8 +35,8 @@ DATABASE_URL=postgresql://postgres.staging:<PASSWORD>@aws-1-region.pooler.supaba
 DB_SCHEMA=vibeledger_staging
 GEMINI_API_KEY=<STAGING_GEMINI_API_KEY>
 
-# HS256 HMAC Signing Configuration for Staging Browser Auth
-AUTH_PUBLIC_KEY=<HIGH_ENTROPY_STAGING_SHARED_SECRET_32_CHARS>
+# HS256 HMAC Signing Configuration for Staging Browser Auth (Min 32 characters)
+AUTH_PUBLIC_KEY=<HIGH_ENTROPY_STAGING_SHARED_SECRET_AT_LEAST_32_CHARS>
 AUTH_ALGORITHMS=["HS256"]
 AUTH_ISSUER=vibeledger-staging
 AUTH_AUDIENCE=vibeledger-api
@@ -45,7 +47,7 @@ MAX_STATEMENT_PDF_BYTES=20971520
 FX_API_BASE_URL=https://api.frankfurter.app
 FX_HTTP_TIMEOUT_SECONDS=5.0
 
-# Staging Bootstrap Identity (Single source of truth)
+# Staging Bootstrap Identity (Single source of truth in environment)
 STAGING_LEDGER_START_DATE=2026-08-01
 STAGING_OWNER_AUTH_SUBJECT=staging_owner_user
 EOF
@@ -86,11 +88,15 @@ SKIP: Migration '0009_indexes.sql' is already applied (checksum verified).
 ```
 
 ### Step 5: Bootstrap Staging Identity, Accounts & Categories
-Run the staging bootstrap script using the sanitized seed template:
-
-```bash
-python scripts/bootstrap_staging.py --config scripts/staging_seed.example.json
-```
+1. Copy the sanitized example seed template to a local, untracked configuration file:
+   ```bash
+   cp scripts/staging_seed.example.json scripts/staging_seed.local.json
+   ```
+2. Edit `scripts/staging_seed.local.json` to customize account names, currencies, and categories for your staging testing.
+3. Run the bootstrap tool pointing to your local configuration:
+   ```bash
+   python scripts/bootstrap_staging.py --config scripts/staging_seed.local.json
+   ```
 
 *Expected Output*:
 ```json
@@ -108,7 +114,7 @@ python scripts/bootstrap_staging.py --config scripts/staging_seed.example.json
 *Note: Rerunning this command validates natural keys and verifies consistency without creating duplicate entities.*
 
 ### Step 6: Generate Staging Browser JWT
-Generate an HS256 HMAC-signed staging Browser JWT for the staging owner:
+Generate an HS256 HMAC-signed staging Browser JWT for the staging owner (reads `STAGING_OWNER_AUTH_SUBJECT` and `AUTH_PUBLIC_KEY` directly from environment):
 
 ```bash
 python scripts/generate_staging_browser_token.py --exp-hours 168
@@ -219,9 +225,13 @@ curl -X POST https://<STAGING_BACKEND_HOST>/api/v1/devices \
 }
 ```
 
-### Step 13: Securely Store One-Time Device Token
-- Save the returned `token` directly into the staging iPhone Shortcut configuration.
-- **Never** commit, log, or print this raw token again.
+### Step 13: Store Device Token in Device-Local Storage
+1. On the test iPhone, create the directory `VibeLedger` under local storage:
+   `On My iPhone/VibeLedger/` (do NOT use iCloud Drive).
+2. Save the returned `token` string into:
+   `On My iPhone/VibeLedger/device-token.txt`
+3. In Phase 12, the iOS Shortcut reads the token dynamically from this file, keeping tokens isolated per device and preventing hardcoding secrets in Shortcuts.
+4. The Shortcut pending idempotency state is also maintained locally in `On My iPhone/VibeLedger/pending-request.json`.
 
 ### Step 14: Test Device Bearer Authentication
 Verify the provisioned device token on a safe read-only target endpoint:

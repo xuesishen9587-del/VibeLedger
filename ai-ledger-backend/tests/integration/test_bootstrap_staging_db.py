@@ -15,7 +15,8 @@ class TestBootstrapStagingDb(BaseDbTestCase):
     Integration tests proving:
     1. Bootstrap idempotency and zero opening balance/transaction creation.
     2. Consistency verification on existing entities (fail loudly on attribute mismatch).
-    3. account_state projection initialization with initialized_at=NULL.
+    3. Failure on unresolved linked cash account or unknown alias account.
+    4. account_state projection verification (initialized_at must be NULL).
     """
 
     def setUp(self):
@@ -196,6 +197,103 @@ class TestBootstrapStagingDb(BaseDbTestCase):
                         owner_auth_subject=self.owner_sub
                     )
             self.assertIn("currency mismatch", str(ctx_acc.exception))
+
+            # Test C: Conflicting linked_cash_account_id (refuses silent update)
+            bad_link_seed = dict(self.sample_seed)
+            bad_link_seed["accounts"] = [
+                {
+                    "name": "招商银行储蓄卡",
+                    "institution": "招商银行",
+                    "account_type": "savings",
+                    "currency": "CNY"
+                },
+                {
+                    "name": "招商银行信用卡",
+                    "institution": "招商银行",
+                    "account_type": "credit",
+                    "currency": "CNY",
+                    "billing_day": 5,
+                    "due_day": 25,
+                    "linked_cash_account_name": None  # Changed from linked to unlinked
+                }
+            ]
+            with self.assertRaises(BootstrapConsistencyError) as ctx_link:
+                with transaction(conn):
+                    bootstrap_staging_environment(
+                        conn=conn,
+                        seed_data=bad_link_seed,
+                        ledger_start_date=self.ledger_start_date,
+                        owner_auth_subject=self.owner_sub
+                    )
+            self.assertIn("linked_cash_account_id mismatch", str(ctx_link.exception))
+
+    def test_bootstrap_fails_on_unresolved_linked_cash_account(self):
+        bad_seed = dict(self.sample_seed)
+        bad_seed["accounts"] = [
+            {
+                "name": "信用卡",
+                "institution": "Bank",
+                "account_type": "credit",
+                "currency": "CNY",
+                "linked_cash_account_name": "不存在的储蓄卡"
+            }
+        ]
+        with get_connection(self.test_schema) as conn:
+            with self.assertRaises(BootstrapConsistencyError) as ctx:
+                with transaction(conn):
+                    bootstrap_staging_environment(
+                        conn=conn,
+                        seed_data=bad_seed,
+                        ledger_start_date=self.ledger_start_date,
+                        owner_auth_subject=self.owner_sub
+                    )
+            self.assertIn("not in seed accounts", str(ctx.exception))
+
+    def test_bootstrap_fails_on_unknown_account_in_aliases(self):
+        bad_seed = dict(self.sample_seed)
+        bad_seed["aliases"] = {
+            "未定义账户名": ["别名1", "别名2"]
+        }
+        with get_connection(self.test_schema) as conn:
+            with self.assertRaises(BootstrapConsistencyError) as ctx:
+                with transaction(conn):
+                    bootstrap_staging_environment(
+                        conn=conn,
+                        seed_data=bad_seed,
+                        ledger_start_date=self.ledger_start_date,
+                        owner_auth_subject=self.owner_sub
+                    )
+            self.assertIn("unknown account '未定义账户名'", str(ctx.exception))
+
+    def test_bootstrap_fails_if_existing_account_state_has_initialized_at(self):
+        with get_connection(self.test_schema) as conn:
+            with transaction(conn):
+                res = bootstrap_staging_environment(
+                    conn=conn,
+                    seed_data=self.sample_seed,
+                    ledger_start_date=self.ledger_start_date,
+                    owner_auth_subject=self.owner_sub
+                )
+            hh_id = UUID(res["household_id"])
+
+            # Manually simulate established opening balance / baseline
+            with transaction(conn):
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE account_state SET initialized_at = now() WHERE account_id IN (SELECT id FROM accounts WHERE household_id = %s LIMIT 1);",
+                        (hh_id,)
+                    )
+
+            # Rerun bootstrap must fail loudly and refuse to overwrite authoritative baseline
+            with self.assertRaises(BootstrapConsistencyError) as ctx:
+                with transaction(conn):
+                    bootstrap_staging_environment(
+                        conn=conn,
+                        seed_data=self.sample_seed,
+                        ledger_start_date=self.ledger_start_date,
+                        owner_auth_subject=self.owner_sub
+                    )
+            self.assertIn("already has initialized_at", str(ctx.exception))
 
 
 if __name__ == "__main__":

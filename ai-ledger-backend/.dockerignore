@@ -1,0 +1,32 @@
+# Environment and secrets
+.env
+.env.*
+*.env
+*.local.json
+scripts/staging_seed.local.json
+
+# Virtual environments
+venv/
+venv_backend/
+venv_dashboard/
+.venv/
+env/
+
+# Python cache and bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Version control and editor files
+.git/
+.gitignore
+.dockerignore
+.DS_Store
+**/.DS_Store
+.idea/
+.vscode/
+
+# Test outputs and caches
+.pytest_cache/
+.coverage
+htmlcov/

@@ -25,9 +25,12 @@ def generate_staging_jwt(
     """
     Generates a valid PyJWT signed Browser JWT for staging access using HS256 HMAC signing.
     Embeds required standard claims (sub, iat, exp) and optional iss/aud.
+    Enforces minimum 32-character high-entropy secret.
     """
     if not secret_key or not secret_key.strip():
         raise ValueError("Signing secret_key cannot be empty.")
+    if len(secret_key.strip()) < 32:
+        raise ValueError("Staging HS256 shared secret (AUTH_PUBLIC_KEY) must be at least 32 characters long for cryptographic safety.")
     if not sub or not sub.strip():
         raise ValueError("Subject (sub) cannot be empty.")
 
@@ -59,22 +62,10 @@ def run_token_generator_cli():
         description="VibeLedger Staging Browser JWT Generator (Staging-only HS256 HMAC signing)"
     )
     parser.add_argument(
-        "--sub",
-        type=str,
-        default=None,
-        help="Subject claim matching users.auth_subject (defaults to STAGING_OWNER_AUTH_SUBJECT env)."
-    )
-    parser.add_argument(
         "--exp-hours",
         type=int,
         default=168,
         help="Token expiration lifetime in hours (default: 168 hours / 7 days)."
-    )
-    parser.add_argument(
-        "--secret",
-        type=str,
-        default=None,
-        help="HS256 signing secret key (defaults to AUTH_PUBLIC_KEY env)."
     )
 
     args = parser.parse_args()
@@ -85,28 +76,34 @@ def run_token_generator_cli():
         print(f"ERROR: Operator CLI execution is strictly restricted to ENVIRONMENT='staging'. Current: '{settings.ENVIRONMENT}'.")
         sys.exit(1)
 
-    sub = args.sub or os.environ.get("STAGING_OWNER_AUTH_SUBJECT")
+    # Subject must come from STAGING_OWNER_AUTH_SUBJECT environment variable only
+    sub = os.environ.get("STAGING_OWNER_AUTH_SUBJECT")
     if not sub or not sub.strip():
-        print("ERROR: Subject must be provided via STAGING_OWNER_AUTH_SUBJECT env or --sub.")
+        print("ERROR: Subject must be provided via STAGING_OWNER_AUTH_SUBJECT environment variable.")
         sys.exit(1)
 
-    secret = args.secret or settings.AUTH_PUBLIC_KEY
+    # Secret must come from AUTH_PUBLIC_KEY environment / settings only
+    secret = settings.AUTH_PUBLIC_KEY
     if not secret or not secret.strip():
-        print("ERROR: HS256 signing secret must be provided via AUTH_PUBLIC_KEY env or --secret.")
+        print("ERROR: HS256 signing secret must be configured via AUTH_PUBLIC_KEY environment variable.")
         sys.exit(1)
 
-    token = generate_staging_jwt(
-        secret_key=secret,
-        sub=sub,
-        exp_hours=args.exp_hours,
-        issuer=settings.AUTH_ISSUER,
-        audience=settings.AUTH_AUDIENCE,
-    )
+    try:
+        token = generate_staging_jwt(
+            secret_key=secret,
+            sub=sub.strip(),
+            exp_hours=args.exp_hours,
+            issuer=settings.AUTH_ISSUER,
+            audience=settings.AUTH_AUDIENCE,
+        )
+    except ValueError as ve:
+        print(f"ERROR: {ve}")
+        sys.exit(1)
 
     print("================================================================================")
     print("  VIBELEDGER STAGING BROWSER JWT (HS256 HMAC SIGNED — STAGING ONLY)             ")
     print("================================================================================")
-    print(f"Subject (sub) : {sub}")
+    print(f"Subject (sub) : {sub.strip()}")
     print(f"Expires In    : {args.exp_hours} hours")
     if settings.AUTH_ISSUER:
         print(f"Issuer (iss)  : {settings.AUTH_ISSUER}")

@@ -4,9 +4,12 @@ venv_dashboard/
 **/venv_backend/
 **/venv_dashboard/
 
-# Environment secrets (CRITICAL: Do not upload credentials)
+# Environment secrets and local configurations (CRITICAL: Do not upload credentials)
 .env
 **/.env
+*.env
+*.local.json
+**/*.local.json
 
 # Python caching & system files
 __pycache__/
@@ -20,3 +23,6 @@ __pycache__/
 **/.gemini/
 .idea/
 .vscode/
+.pytest_cache/
+.coverage
+htmlcov/

@@ -5,6 +5,7 @@ import argparse
 from typing import Dict, Any, Optional, List
 from uuid import UUID, uuid4
 from datetime import date, datetime
+from decimal import Decimal
 
 # Ensure project root is on sys.path
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -35,8 +36,8 @@ def bootstrap_staging_environment(
 ) -> Dict[str, Any]:
     """
     Idempotently sets up initial staging configuration using household-scoped natural keys.
-    Validates consistency if an entity already exists and raises BootstrapConsistencyError on conflict.
-    Initializes account_state with initialized_at=NULL (does not establish opening balances).
+    Validates strict consistency if an entity already exists and raises BootstrapConsistencyError on conflict.
+    Initializes account_state with initialized_at=NULL (does not establish opening balances or baselines).
     """
     summary: Dict[str, Any] = {
         "household_id": None,
@@ -50,7 +51,7 @@ def bootstrap_staging_environment(
     }
 
     # -------------------------------------------------------------
-    # 1. Household
+    # 1. Household (Natural Key: lower(name))
     # -------------------------------------------------------------
     hh_config = seed_data.get("household", {})
     hh_name = hh_config.get("name", "Staging Household").strip()
@@ -69,6 +70,10 @@ def bootstrap_staging_environment(
 
     if existing_hh:
         hh_id, db_name, db_currency, db_start_date, db_status = existing_hh
+        if db_status != "active":
+            raise BootstrapConsistencyError(
+                f"Household '{hh_name}' exists but status is '{db_status}' (expected 'active')"
+            )
         if db_start_date != ledger_start_date:
             raise BootstrapConsistencyError(
                 f"Household '{hh_name}' exists but ledger_start_date mismatch: "
@@ -114,10 +119,24 @@ def bootstrap_staging_environment(
 
     if existing_user:
         u_id, u_sub, u_email, u_dname, u_curr, u_status = existing_user
+        if u_status != "active":
+            raise BootstrapConsistencyError(
+                f"User with auth_subject '{owner_auth_subject}' exists but status is '{u_status}' (expected 'active')"
+            )
         if u_curr != default_currency:
             raise BootstrapConsistencyError(
                 f"User with auth_subject '{owner_auth_subject}' exists but default_currency mismatch: "
                 f"existing '{u_curr}' != expected '{default_currency}'"
+            )
+        if u_dname != display_name:
+            raise BootstrapConsistencyError(
+                f"User with auth_subject '{owner_auth_subject}' exists but display_name mismatch: "
+                f"existing '{u_dname}' != expected '{display_name}'"
+            )
+        if normalize_str(u_email) != normalize_str(email):
+            raise BootstrapConsistencyError(
+                f"User with auth_subject '{owner_auth_subject}' exists but email mismatch: "
+                f"existing '{u_email}' != expected '{email}'"
             )
         owner_user_id = u_id
     else:
@@ -163,10 +182,22 @@ def bootstrap_staging_environment(
     # -------------------------------------------------------------
     # 4. Accounts (Natural Key: (household_id, lower(name)))
     # -------------------------------------------------------------
+    raw_accounts = seed_data.get("accounts", [])
+    raw_account_names = {a["name"].strip() for a in raw_accounts}
+
+    # Validate linked_cash_account_name references
+    for acc in raw_accounts:
+        linked_name = acc.get("linked_cash_account_name")
+        if linked_name:
+            if linked_name.strip() not in raw_account_names:
+                raise BootstrapConsistencyError(
+                    f"Account '{acc['name']}' specifies linked_cash_account_name '{linked_name}' which is not in seed accounts."
+                )
+
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT id, name, institution, account_type, currency, billing_day, due_day, linked_cash_account_id, status
+            SELECT id, name, institution, account_type, currency, billing_day, due_day, linked_cash_account_id, owner_user_id, status
             FROM accounts
             WHERE household_id = %s;
             """,
@@ -185,14 +216,27 @@ def bootstrap_staging_environment(
             "billing_day": r[5],
             "due_day": r[6],
             "linked_cash_account_id": r[7],
-            "status": r[8],
+            "owner_user_id": r[8],
+            "status": r[9],
         }
 
-    raw_accounts = seed_data.get("accounts", [])
     account_id_map: Dict[str, UUID] = {}
-
-    # Pass 1: Create or verify accounts
+    # Build complete account ID map for new and existing accounts
     for acc in raw_accounts:
+        a_name = acc["name"].strip()
+        a_key = a_name.lower()
+        if a_key in acc_by_name:
+            account_id_map[a_name] = acc_by_name[a_key]["id"]
+        else:
+            account_id_map[a_name] = uuid4()
+
+    # Sort accounts so unlinked accounts are created before linked accounts
+    sorted_accounts = sorted(
+        raw_accounts,
+        key=lambda a: 1 if a.get("linked_cash_account_name") else 0
+    )
+
+    for acc in sorted_accounts:
         a_name = acc["name"].strip()
         a_key = a_name.lower()
         a_type = acc["account_type"].strip()
@@ -200,10 +244,21 @@ def bootstrap_staging_environment(
         a_inst = normalize_str(acc.get("institution"))
         a_bday = acc.get("billing_day")
         a_dday = acc.get("due_day")
+        expected_linked_name = acc.get("linked_cash_account_name")
+        expected_linked_id = account_id_map[expected_linked_name.strip()] if expected_linked_name else None
 
         if a_key in acc_by_name:
             curr_acc = acc_by_name[a_key]
-            # Consistency checks
+            # Strict consistency verification
+            if curr_acc["status"] != "active":
+                raise BootstrapConsistencyError(
+                    f"Account '{a_name}' exists but status is '{curr_acc['status']}' (expected 'active')"
+                )
+            if curr_acc["owner_user_id"] != owner_user_id:
+                raise BootstrapConsistencyError(
+                    f"Account '{a_name}' exists but owner_user_id mismatch: "
+                    f"existing '{curr_acc['owner_user_id']}' != expected '{owner_user_id}'"
+                )
             if curr_acc["account_type"] != a_type:
                 raise BootstrapConsistencyError(
                     f"Account '{a_name}' exists but account_type mismatch: "
@@ -229,72 +284,89 @@ def bootstrap_staging_environment(
                     f"Account '{a_name}' exists but institution mismatch: "
                     f"existing '{curr_acc['institution']}' != expected '{a_inst}'"
                 )
+            if curr_acc["linked_cash_account_id"] != expected_linked_id:
+                raise BootstrapConsistencyError(
+                    f"Account '{a_name}' exists but linked_cash_account_id mismatch: "
+                    f"existing '{curr_acc['linked_cash_account_id']}' != expected '{expected_linked_id}'. "
+                    f"Bootstrap refuses to silently modify existing account relationships."
+                )
 
-            # Ensure account_state row exists with initialized_at=NULL
+            # Ensure account_state row exists and has initialized_at IS NULL and ledger_balance == 0
             state = accounts_repo.get_account_state(conn, curr_acc["id"])
             if not state:
                 raise BootstrapConsistencyError(f"Account '{a_name}' exists but missing account_state projection row.")
+            if state["initialized_at"] is not None:
+                raise BootstrapConsistencyError(
+                    f"Account '{a_name}' already has initialized_at='{state['initialized_at']}'. "
+                    f"Phase 11.5 staging bootstrap requires initialized_at=NULL and must not overwrite an authoritative baseline."
+                )
+            if Decimal(str(state["ledger_balance"])) != Decimal("0.000000"):
+                raise BootstrapConsistencyError(
+                    f"Account '{a_name}' has non-zero ledger_balance '{state['ledger_balance']}'. "
+                    f"Staging bootstrap requires clean zero balance."
+                )
 
-            account_id_map[a_name] = curr_acc["id"]
             summary["accounts_verified"] += 1
         else:
-            new_id = uuid4()
+            acc_id = account_id_map[a_name]
             accounts_repo.create_account(
                 conn=conn,
-                account_id=new_id,
+                account_id=acc_id,
                 household_id=household_id,
                 name=a_name,
                 account_type=a_type,
                 currency=a_curr,
                 institution=a_inst,
                 owner_user_id=owner_user_id,
-                linked_cash_account_id=None,
+                linked_cash_account_id=expected_linked_id,
                 billing_day=a_bday,
                 due_day=a_dday,
                 status="active"
             )
-            account_id_map[a_name] = new_id
             summary["accounts_created"] += 1
-
-    # Pass 2: Link cash account for credit cards if specified
-    for acc in raw_accounts:
-        linked_cash_name = acc.get("linked_cash_account_name")
-        if linked_cash_name and acc["name"] in account_id_map and linked_cash_name in account_id_map:
-            card_id = account_id_map[acc["name"]]
-            cash_id = account_id_map[linked_cash_name]
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    UPDATE accounts
-                    SET linked_cash_account_id = %s, updated_at = now()
-                    WHERE id = %s AND (linked_cash_account_id IS NULL OR linked_cash_account_id <> %s);
-                    """,
-                    (cash_id, card_id, cash_id)
-                )
 
     # -------------------------------------------------------------
     # 5. Account Aliases (Natural Key: (account_id, normalized_alias))
     # -------------------------------------------------------------
     aliases_dict = seed_data.get("aliases", {})
     for acc_name, alias_list in aliases_dict.items():
-        if acc_name not in account_id_map:
-            continue
-        target_acc_id = account_id_map[acc_name]
+        clean_acc_name = acc_name.strip()
+        if clean_acc_name not in account_id_map:
+            raise BootstrapConsistencyError(
+                f"Alias configuration references unknown account '{clean_acc_name}'"
+            )
+        target_acc_id = account_id_map[clean_acc_name]
 
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT normalized_alias FROM account_aliases
-                WHERE account_id = %s AND deleted_at IS NULL;
+                SELECT id, alias_text, normalized_alias, status, deleted_at
+                FROM account_aliases
+                WHERE account_id = %s;
                 """,
                 (target_acc_id,)
             )
-            existing_aliases = {row[0] for row in cur.fetchall()}
+            existing_alias_rows = cur.fetchall()
+
+        alias_by_norm: Dict[str, Dict[str, Any]] = {}
+        for r in existing_alias_rows:
+            alias_by_norm[r[2]] = {
+                "id": r[0],
+                "alias_text": r[1],
+                "normalized_alias": r[2],
+                "status": r[3],
+                "deleted_at": r[4]
+            }
 
         for alias_text in alias_list:
             raw_alias = alias_text.strip()
             norm_alias = raw_alias.lower()
-            if norm_alias in existing_aliases:
+            if norm_alias in alias_by_norm:
+                ex_a = alias_by_norm[norm_alias]
+                if ex_a["status"] != "active" or ex_a["deleted_at"] is not None:
+                    raise BootstrapConsistencyError(
+                        f"Alias '{raw_alias}' for account '{clean_acc_name}' exists in inactive/deleted state."
+                    )
                 summary["aliases_verified"] += 1
             else:
                 accounts_repo.create_account_alias(
@@ -305,7 +377,13 @@ def bootstrap_staging_environment(
                     normalized_alias=norm_alias,
                     status="active"
                 )
-                existing_aliases.add(norm_alias)
+                alias_by_norm[norm_alias] = {
+                    "id": target_acc_id,
+                    "alias_text": raw_alias,
+                    "normalized_alias": norm_alias,
+                    "status": "active",
+                    "deleted_at": None
+                }
                 summary["aliases_created"] += 1
 
     # -------------------------------------------------------------
@@ -365,19 +443,7 @@ def run_bootstrap_cli():
         "--config",
         type=str,
         default=os.path.join(SCRIPT_DIR, "staging_seed.example.json"),
-        help="Path to staging seed JSON configuration file."
-    )
-    parser.add_argument(
-        "--owner-auth-subject",
-        type=str,
-        default=None,
-        help="Explicit auth_subject for the staging owner (overrides STAGING_OWNER_AUTH_SUBJECT env)."
-    )
-    parser.add_argument(
-        "--ledger-start-date",
-        type=str,
-        default=None,
-        help="Explicit ledger start date YYYY-MM-DD (overrides STAGING_LEDGER_START_DATE env)."
+        help="Path to staging seed JSON configuration file (e.g. scripts/staging_seed.local.json)."
     )
 
     args = parser.parse_args()
@@ -388,19 +454,20 @@ def run_bootstrap_cli():
         print(f"ERROR: Operator CLI execution is strictly restricted to ENVIRONMENT='staging'. Current: '{settings.ENVIRONMENT}'.")
         sys.exit(1)
 
-    owner_sub = args.owner_auth_subject or os.environ.get("STAGING_OWNER_AUTH_SUBJECT")
+    # Single source of truth from environment variables ONLY
+    owner_sub = os.environ.get("STAGING_OWNER_AUTH_SUBJECT")
     if not owner_sub or not owner_sub.strip():
-        print("ERROR: STAGING_OWNER_AUTH_SUBJECT must be set in environment or passed via --owner-auth-subject.")
+        print("ERROR: STAGING_OWNER_AUTH_SUBJECT environment variable must be set.")
         sys.exit(1)
 
-    start_date_str = args.ledger_start_date or os.environ.get("STAGING_LEDGER_START_DATE")
+    start_date_str = os.environ.get("STAGING_LEDGER_START_DATE")
     if not start_date_str or not start_date_str.strip():
-        print("ERROR: STAGING_LEDGER_START_DATE must be set in environment or passed via --ledger-start-date.")
+        print("ERROR: STAGING_LEDGER_START_DATE environment variable must be set (expected YYYY-MM-DD).")
         sys.exit(1)
 
     try:
         ledger_start_date = datetime.strptime(start_date_str.strip(), "%Y-%m-%d").date()
-    except ValueError as e:
+    except ValueError:
         print(f"ERROR: Invalid STAGING_LEDGER_START_DATE format '{start_date_str}': expected YYYY-MM-DD.")
         sys.exit(1)
 

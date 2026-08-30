@@ -7,7 +7,42 @@ from datetime import date
 from pydantic import BaseModel, Field
 from app.domain.transactions import GeminiDependencyError
 
+class ExpenseFieldConfidenceTransport(BaseModel):
+    """
+    Explicit fixed-field transport model for field-level confidence scores.
+    Uses static fields to eliminate dynamic dictionary schema extensions.
+    """
+    amount: Optional[float] = None
+    currency: Optional[float] = None
+    account: Optional[float] = None
+    category: Optional[float] = None
+    date: Optional[float] = None
+    total_periods: Optional[float] = None
+
+
+class ExpenseExtractionTransportSchema(BaseModel):
+    """
+    Strict transport schema passed as response_schema to Google Gemini Developer API.
+    Contains only explicit, static fields supported across all Gemini API modes.
+    """
+    occurred_on: Optional[date] = None
+    merchant: Optional[str] = None
+    original_amount: Optional[Decimal] = None
+    original_currency: Optional[str] = None  # MUST NOT default to "CNY"
+    from_account: Optional[str] = None
+    category: Optional[str] = None
+    payment_mode: Optional[str] = None  # MUST NOT default to "one_off"; defaults to None
+    total_amount: Optional[Decimal] = None
+    total_periods: Optional[int] = None
+    confidence: Optional[float] = 1.0
+    field_confidence: Optional[ExpenseFieldConfidenceTransport] = None
+
+
 class ExpenseExtractionResult(BaseModel):
+    """
+    Internal domain extraction result consumed by expense_service.py.
+    Retains field_confidence as Dict[str, float] for flexible downstream .get(...) lookups.
+    """
     occurred_on: Optional[date] = None
     merchant: Optional[str] = None
     original_amount: Optional[Decimal] = None
@@ -20,6 +55,35 @@ class ExpenseExtractionResult(BaseModel):
     confidence: float = 1.0
     field_confidence: Dict[str, float] = Field(default_factory=dict)
     raw_response: Optional[Dict[str, Any]] = None
+
+    @classmethod
+    def from_transport(
+        cls,
+        transport: ExpenseExtractionTransportSchema,
+        raw_response: Optional[Dict[str, Any]] = None
+    ) -> "ExpenseExtractionResult":
+        field_conf: Dict[str, float] = {}
+        if transport.field_confidence is not None:
+            fc = transport.field_confidence
+            for k in ("amount", "currency", "account", "category", "date", "total_periods"):
+                v = getattr(fc, k, None)
+                if v is not None:
+                    field_conf[k] = float(v)
+
+        return cls(
+            occurred_on=transport.occurred_on,
+            merchant=transport.merchant,
+            original_amount=transport.original_amount,
+            original_currency=transport.original_currency,
+            from_account=transport.from_account,
+            category=transport.category,
+            payment_mode=transport.payment_mode,
+            total_amount=transport.total_amount,
+            total_periods=transport.total_periods,
+            confidence=float(transport.confidence) if transport.confidence is not None else 0.0,
+            field_confidence=field_conf,
+            raw_response=raw_response
+        )
 
 class GeminiService:
     """
@@ -66,7 +130,7 @@ EXTRACTION RULES:
    - merchant: Merchant name.
    - from_account: Paying credit card account name.
 9. confidence: Overall extraction confidence score between 0.0 and 1.0.
-10. field_confidence: Dictionary of confidence scores for individual fields: amount, currency, account, category, date, total_periods.
+10. field_confidence: Object containing confidence scores (0.0 to 1.0) for individual fields: amount, currency, account, category, date, total_periods.
 """
 
     def extract_expense(
@@ -101,13 +165,14 @@ EXTRACTION RULES:
                 config=types.GenerateContentConfig(
                     system_instruction=system_prompt,
                     response_mime_type="application/json",
-                    response_schema=ExpenseExtractionResult,
+                    response_schema=ExpenseExtractionTransportSchema,
                     temperature=0.1
                 )
             )
 
             data = json.loads(response.text, parse_float=Decimal)
-            return ExpenseExtractionResult(**data)
+            transport = ExpenseExtractionTransportSchema.model_validate(data)
+            return ExpenseExtractionResult.from_transport(transport, raw_response=data)
         except Exception as e:
             raise GeminiDependencyError(f"AI extraction service failed: {e}")
 

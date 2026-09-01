@@ -1501,3 +1501,51 @@ class TestExpenseApiDb(BaseDbTestCase):
         self.assertIsNone(rev_data["draft"]["from_account"])
         codes = {w["code"] for w in rev_data["warnings"]}
         self.assertIn("ACCOUNT_UNRESOLVED", codes)
+
+    def test_55_revise_canonicalizes_payment_mode_and_confirms_successfully(self):
+        """
+        Regression test: Draft has payment_mode=' ONE_OFF '.
+        Revision canonicalizes payment_mode to 'one_off', warnings=[], and explicit Confirm succeeds.
+        """
+        self.mock_gemini.set_next_result(ExpenseExtractionResult(
+            occurred_on=date(2026, 8, 20),
+            merchant="超市",
+            original_amount=Decimal("66.00"),
+            original_currency="CNY",
+            from_account="招商银行储蓄卡",
+            category=None,
+            payment_mode=" ONE_OFF ",
+            confidence=0.8,
+            field_confidence={"amount": 1.0, "currency": 1.0, "account": 1.0, "category": 0.0, "date": 1.0}
+        ))
+
+        res_init = self.client.post(
+            "/api/v1/expenses",
+            headers={"Authorization": f"Bearer {self.raw_token_1}"},
+            json={
+                "idempotency_key": "test-key-55-canonicalize-pm-confirm",
+                "captured_at": "2026-08-20T12:00:00+08:00",
+                "image": self._sample_jpeg_payload()
+            }
+        )
+        req_id = res_init.json()["request_id"]
+
+        # Revise category
+        res_rev = self.client.post(
+            f"/api/v1/ingestion-requests/{req_id}/revise",
+            headers={"Authorization": f"Bearer {self.raw_token_1}"},
+            json={"category_id": str(self.cat_food)}
+        )
+        self.assertEqual(res_rev.status_code, 200)
+        rev_data = res_rev.json()
+        self.assertEqual(rev_data["draft"]["payment_mode"], "one_off")
+        self.assertEqual(rev_data["warnings"], [])
+
+        # Confirm must succeed because payment_mode is exact canonical "one_off"
+        res_conf = self.client.post(
+            f"/api/v1/ingestion-requests/{req_id}/confirm",
+            headers={"Authorization": f"Bearer {self.raw_token_1}"}
+        )
+        self.assertEqual(res_conf.status_code, 200)
+        self.assertEqual(res_conf.json()["status"], "committed")
+        self.assertEqual(res_conf.json()["payment_mode"], "one_off")

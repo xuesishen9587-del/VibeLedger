@@ -588,6 +588,102 @@ class TestExpenseServiceReviseUnit(unittest.TestCase):
         self.assertIn("未知账户", summary)
         self.assertIn("未分类", summary)
 
+    def test_recompute_warnings_invalid_occurred_on_produces_warning(self):
+        """
+        Regression test: Fully valid one-off draft except occurred_on='not-a-date'.
+        Warnings must be non-empty and include INVALID_OCCURRED_ON.
+        """
+        draft = {
+            "occurred_on": "not-a-date",
+            "merchant": "星巴克",
+            "original_amount": "38.00",
+            "original_currency": "CNY",
+            "from_account": {"id": str(self.acc_checking["id"]), "name": self.acc_checking["name"]},
+            "category": {"id": str(self.cat_dining["id"]), "name": self.cat_dining["name"]},
+            "payment_mode": "one_off",
+            "total_periods": None
+        }
+
+        warnings = recompute_draft_warnings(draft, self.active_accounts, self.active_categories)
+        self.assertGreater(len(warnings), 0)
+        codes = {w["code"] for w in warnings}
+        self.assertIn("INVALID_OCCURRED_ON", codes)
+
+    def test_recompute_warnings_null_occurred_on_is_allowed(self):
+        """
+        Null or empty occurred_on is allowed according to existing Confirm fallback behavior.
+        """
+        draft = {
+            "occurred_on": None,
+            "merchant": "星巴克",
+            "original_amount": "38.00",
+            "original_currency": "CNY",
+            "from_account": {"id": str(self.acc_checking["id"]), "name": self.acc_checking["name"]},
+            "category": {"id": str(self.cat_dining["id"]), "name": self.cat_dining["name"]},
+            "payment_mode": "one_off",
+            "total_periods": None
+        }
+
+        warnings = recompute_draft_warnings(draft, self.active_accounts, self.active_categories)
+        self.assertEqual(warnings, [])
+
+    @patch("app.repositories.accounts.list_accounts")
+    @patch("app.repositories.accounts.list_categories")
+    @patch("app.repositories.ingestion.lock_ingestion_request")
+    @patch("app.repositories.ingestion.update_ingestion_request_status")
+    def test_revise_canonicalizes_whitespace_payment_mode(
+        self,
+        mock_update_status,
+        mock_lock_request,
+        mock_list_categories,
+        mock_list_accounts
+    ):
+        """
+        Regression test: Draft has payment_mode=' ONE_OFF '.
+        Revision canonicalizes it to exact 'one_off', warnings is [], and confirm would succeed.
+        """
+        req_id = uuid4()
+        initial_draft = {
+            "occurred_on": "2026-08-20",
+            "merchant": "盒马鲜生",
+            "original_amount": "158.00",
+            "original_currency": "CNY",
+            "from_account": {"id": str(self.acc_checking["id"]), "name": self.acc_checking["name"]},
+            "category": {"id": str(self.cat_dining["id"]), "name": self.cat_dining["name"]},
+            "payment_mode": " ONE_OFF ",
+            "total_periods": None
+        }
+
+        mock_lock_request.return_value = {
+            "id": req_id,
+            "device_id": self.device_id,
+            "status": "needs_confirmation",
+            "draft_payload": initial_draft,
+            "response_payload": None
+        }
+        mock_list_accounts.return_value = self.active_accounts
+        mock_list_categories.return_value = self.active_categories
+
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_cursor.fetchall.return_value = []
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+
+        mock_gemini = MockGeminiService()
+        mock_gemini.set_next_revision_result(ExpenseRevisionResult())
+
+        res = revise_ingestion_request(
+            conn=mock_conn,
+            request_id=req_id,
+            device=self.device,
+            correction_note="确认无误",
+            gemini_service=mock_gemini
+        )
+
+        draft = res["draft"]
+        self.assertEqual(draft["payment_mode"], "one_off")
+        self.assertEqual(res["warnings"], [])
+
 
 if __name__ == "__main__":
     unittest.main()

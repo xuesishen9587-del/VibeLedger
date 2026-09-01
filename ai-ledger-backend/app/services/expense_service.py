@@ -938,7 +938,18 @@ def recompute_draft_warnings(
     """
     warnings: List[Dict[str, str]] = []
 
-    # 1. Payment mode validation
+    # 1. Occurred on date validation (null/empty allowed via confirm fallback; non-null must be valid ISO YYYY-MM-DD)
+    raw_date = draft.get("occurred_on")
+    if raw_date is not None and str(raw_date).strip() != "":
+        try:
+            date.fromisoformat(str(raw_date).strip())
+        except Exception:
+            warnings.append({
+                "code": "INVALID_OCCURRED_ON",
+                "message": f"交易日期格式无效: '{raw_date}'，期望格式为 YYYY-MM-DD。"
+            })
+
+    # 2. Payment mode validation
     pm = draft.get("payment_mode")
     if not pm or not isinstance(pm, str) or pm.strip().lower() not in ("one_off", "installment"):
         warnings.append({
@@ -949,7 +960,7 @@ def recompute_draft_warnings(
     else:
         normalized_pm = pm.strip().lower()
 
-    # 2. Account resolution and validation
+    # 3. Account resolution and validation
     acc_info = draft.get("from_account")
     matched_acc = None
     if not acc_info or not isinstance(acc_info, dict) or not acc_info.get("id"):
@@ -972,7 +983,7 @@ def recompute_draft_warnings(
                 "message": "支付账户格式无效，请手动选择。"
             })
 
-    # 3. Currency validation
+    # 4. Currency validation
     raw_curr = draft.get("original_currency")
     valid_curr = None
     if not raw_curr or not isinstance(raw_curr, str) or not raw_curr.strip():
@@ -989,7 +1000,7 @@ def recompute_draft_warnings(
                 "message": f"无效的币种代码: '{raw_curr}'。"
             })
 
-    # 4. Amount validation
+    # 5. Amount validation
     raw_amt = draft.get("original_amount")
     if raw_amt is None or str(raw_amt).strip() == "":
         warnings.append({
@@ -1010,7 +1021,7 @@ def recompute_draft_warnings(
                 "message": "消费金额格式无效或必须为正数。"
             })
 
-    # 5. Installment-specific validations
+    # 6. Installment-specific validations
     if normalized_pm == "installment":
         if matched_acc and matched_acc.get("account_type") != "credit":
             warnings.append({
@@ -1038,7 +1049,7 @@ def recompute_draft_warnings(
                     "message": "分期期数缺失或无效（支持 2-120 期），请手动确认。"
                 })
 
-    # 6. One-off specific validations (also applies when payment_mode is missing/unresolved)
+    # 7. One-off specific validations (also applies when payment_mode is missing/unresolved)
     if normalized_pm != "installment":
         cat_info = draft.get("category")
         if not cat_info or not isinstance(cat_info, dict) or not cat_info.get("id"):
@@ -1236,7 +1247,13 @@ def revise_ingestion_request(
             except (ValueError, TypeError):
                 raise InvalidInstallmentPeriodsError(f"Invalid total_periods: {structured_fields['total_periods']}")
 
-    # 3. Recompute warnings from FINAL revised draft
+    # 3. Canonicalize semantically valid payment_mode to exact "one_off" or "installment"
+    if draft.get("payment_mode") is not None and isinstance(draft["payment_mode"], str):
+        cleaned_pm = draft["payment_mode"].strip().lower()
+        if cleaned_pm in ("one_off", "installment"):
+            draft["payment_mode"] = cleaned_pm
+
+    # 4. Recompute warnings from FINAL revised draft
     warnings = recompute_draft_warnings(draft, active_accounts, active_expense_categories)
 
     # 4. Format display summary cleanly without "None" tokens

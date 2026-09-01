@@ -85,6 +85,55 @@ class ExpenseExtractionResult(BaseModel):
             raw_response=raw_response
         )
 
+class ExpenseRevisionTransportSchema(BaseModel):
+    """
+    Strict transport schema passed as response_schema to Google Gemini Developer API
+    for natural-language draft revisions.
+    Contains only explicit, static optional fields.
+    """
+    occurred_on: Optional[date] = None
+    merchant: Optional[str] = None
+    original_amount: Optional[Decimal] = None
+    original_currency: Optional[str] = None
+    from_account: Optional[str] = None
+    category: Optional[str] = None
+    payment_mode: Optional[str] = None
+    total_periods: Optional[int] = None
+
+
+class ExpenseRevisionResult(BaseModel):
+    """
+    Internal domain revision result consumed by expense_service.py.
+    """
+    occurred_on: Optional[date] = None
+    merchant: Optional[str] = None
+    original_amount: Optional[Decimal] = None
+    original_currency: Optional[str] = None
+    from_account: Optional[str] = None
+    category: Optional[str] = None
+    payment_mode: Optional[str] = None
+    total_periods: Optional[int] = None
+    raw_response: Optional[Dict[str, Any]] = None
+
+    @classmethod
+    def from_transport(
+        cls,
+        transport: ExpenseRevisionTransportSchema,
+        raw_response: Optional[Dict[str, Any]] = None
+    ) -> "ExpenseRevisionResult":
+        return cls(
+            occurred_on=transport.occurred_on,
+            merchant=transport.merchant,
+            original_amount=transport.original_amount,
+            original_currency=transport.original_currency,
+            from_account=transport.from_account,
+            category=transport.category,
+            payment_mode=transport.payment_mode,
+            total_periods=transport.total_periods,
+            raw_response=raw_response
+        )
+
+
 class GeminiService:
     """
     Expense-only extraction service interface.
@@ -176,6 +225,84 @@ EXTRACTION RULES:
         except Exception as e:
             raise GeminiDependencyError(f"AI extraction service failed: {e}")
 
+    def build_revision_system_prompt(
+        self,
+        accounts: List[Dict[str, Any]],
+        categories: List[Dict[str, Any]]
+    ) -> str:
+        acc_descriptions = []
+        for a in accounts:
+            aliases_str = f" (aliases: {', '.join(a.get('aliases', []))})" if a.get('aliases') else ""
+            acc_descriptions.append(f"- {a['name']} [{a['account_type']}, {a['currency']}]{aliases_str}")
+
+        cat_descriptions = [f"- {c['name']}" for c in categories if c.get("category_type") == "expense"]
+
+        return f"""You are an expert personal finance expense draft revision assistant.
+Your SOLE task is to revise or supplement an existing expense draft based on the user's natural language correction note.
+
+AVAILABLE HOUSEHOLD ACCOUNTS:
+{chr(10).join(acc_descriptions) if acc_descriptions else "No specific accounts configured."}
+
+AVAILABLE EXPENSE CATEGORIES:
+{chr(10).join(cat_descriptions) if cat_descriptions else "No specific categories configured."}
+
+STRICT REVISION RULES:
+1. ONLY return a value for a field if the user's note EXPLICITLY mentions, corrects, or supplements that information.
+2. For any field NOT explicitly mentioned or corrected by the user in the note, you MUST output null.
+3. DO NOT guess or infer unmentioned fields. DO NOT fill fields from imagination.
+4. A null value means the existing draft value should remain untouched.
+5. occurred_on: Transaction date in YYYY-MM-DD if explicitly mentioned or updated.
+6. merchant: Store, payee, or vendor name if explicitly mentioned or updated.
+7. original_amount: Number or decimal representing the transaction amount if explicitly mentioned or updated.
+8. original_currency: 3-letter currency code (e.g. CNY, USD, JPY, EUR, HKD, SGD) if explicitly mentioned or updated.
+9. from_account: Paying account name if explicitly mentioned or updated. Match closely with available household accounts or aliases.
+10. category: Expense category name if explicitly mentioned or updated. Match closely with available categories.
+11. payment_mode: "one_off" or "installment" if explicitly stated or clearly implied by installment terms. Otherwise null.
+12. total_periods: Integer (2 to 120) indicating installment months/periods if explicitly mentioned. Otherwise null.
+"""
+
+    def revise_expense_draft(
+        self,
+        current_draft: Dict[str, Any],
+        correction_note: str,
+        accounts: List[Dict[str, Any]],
+        categories: List[Dict[str, Any]]
+    ) -> ExpenseRevisionResult:
+        if not self.api_key:
+            raise GeminiDependencyError("GEMINI_API_KEY is not configured.")
+
+        try:
+            from google import genai
+            from google.genai import types
+
+            client = genai.Client(api_key=self.api_key)
+            system_prompt = self.build_revision_system_prompt(accounts, categories)
+
+            prompt_text = (
+                f"CURRENT DRAFT STATE:\n"
+                f"{json.dumps(current_draft, ensure_ascii=False, default=str)}\n\n"
+                f"USER CORRECTION NOTE:\n"
+                f"\"{correction_note}\"\n\n"
+                f"Extract only the explicitly corrected or supplemented fields."
+            )
+
+            response = client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=prompt_text,
+                config=types.GenerateContentConfig(
+                    system_instruction=system_prompt,
+                    response_mime_type="application/json",
+                    response_schema=ExpenseRevisionTransportSchema,
+                    temperature=0.1
+                )
+            )
+
+            data = json.loads(response.text, parse_float=Decimal)
+            transport = ExpenseRevisionTransportSchema.model_validate(data)
+            return ExpenseRevisionResult.from_transport(transport, raw_response=data)
+        except Exception as e:
+            raise GeminiDependencyError(f"AI revision service failed: {e}")
+
 
 class MockGeminiService(GeminiService):
     """
@@ -195,11 +322,16 @@ class MockGeminiService(GeminiService):
             field_confidence={"amount": 1.0, "currency": 1.0, "account": 1.0, "category": 1.0, "date": 1.0}
         )
         self._custom_responses: List[ExpenseExtractionResult] = []
+        self._custom_revision_responses: List[ExpenseRevisionResult] = []
         self.call_count: int = 0
+        self.revision_call_count: int = 0
         self.should_raise: Optional[Exception] = None
 
     def set_next_result(self, result: ExpenseExtractionResult) -> None:
         self._custom_responses.append(result)
+
+    def set_next_revision_result(self, result: ExpenseRevisionResult) -> None:
+        self._custom_revision_responses.append(result)
 
     def extract_expense(
         self,
@@ -216,3 +348,18 @@ class MockGeminiService(GeminiService):
         if self._custom_responses:
             return self._custom_responses.pop(0)
         return self.default_result
+
+    def revise_expense_draft(
+        self,
+        current_draft: Dict[str, Any],
+        correction_note: str,
+        accounts: List[Dict[str, Any]],
+        categories: List[Dict[str, Any]]
+    ) -> ExpenseRevisionResult:
+        self.call_count += 1
+        self.revision_call_count += 1
+        if self.should_raise:
+            raise self.should_raise
+        if self._custom_revision_responses:
+            return self._custom_revision_responses.pop(0)
+        return ExpenseRevisionResult()

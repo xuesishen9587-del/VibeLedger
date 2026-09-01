@@ -10,7 +10,9 @@ from datetime import date
 from app.services.gemini_service import (
     GeminiService,
     MockGeminiService,
-    ExpenseExtractionResult
+    ExpenseExtractionResult,
+    ExpenseRevisionTransportSchema,
+    ExpenseRevisionResult
 )
 from app.domain.transactions import GeminiDependencyError
 
@@ -244,3 +246,113 @@ class TestGeminiServiceUnit(unittest.TestCase):
             self.assertEqual(result.field_confidence.get("category", 0.0), 0.85)
             self.assertEqual(result.field_confidence.get("date", 0.0), 0.95)
             self.assertEqual(result.field_confidence.get("total_periods", 0.0), 0.0)
+
+    def test_gemini_revision_response_schema_has_no_additional_properties(self):
+        """
+        Verify that ExpenseRevisionTransportSchema generates strict JSON schema
+        without additionalProperties, adhering to Gemini Developer API constraints.
+        """
+        # 1. Inspect Pydantic JSON Schema
+        pydantic_schema = ExpenseRevisionTransportSchema.model_json_schema()
+        pydantic_schema_str = json.dumps(pydantic_schema)
+        self.assertNotIn("additionalProperties", pydantic_schema_str)
+
+        # 2. Inspect Google GenAI SDK transformed Schema
+        try:
+            from google.genai import _transformers
+            sdk_schema = _transformers.t_schema(None, ExpenseRevisionTransportSchema)
+            sdk_dump = json.dumps(sdk_schema.model_dump(by_alias=True, exclude_none=True) if hasattr(sdk_schema, "model_dump") else str(sdk_schema))
+            self.assertNotIn("additionalProperties", sdk_dump)
+            self.assertNotIn("additional_properties", sdk_dump)
+        except ImportError:
+            pass
+
+    def test_build_revision_system_prompt_includes_accounts_and_aliases(self):
+        service = GeminiService(api_key="mock_key")
+        accounts = [
+            {"name": "Checking", "account_type": "cash", "currency": "CNY", "aliases": ["CMB", "Payroll Card"]},
+            {"name": "Visa", "account_type": "credit", "currency": "USD", "aliases": []}
+        ]
+        categories = [
+            {"name": "Dining", "category_type": "expense"},
+            {"name": "Salary", "category_type": "income"}
+        ]
+
+        prompt = service.build_revision_system_prompt(accounts, categories)
+
+        self.assertIn("Checking [cash, CNY] (aliases: CMB, Payroll Card)", prompt)
+        self.assertIn("Visa [credit, USD]", prompt)
+        self.assertIn("- Dining", prompt)
+        self.assertNotIn("- Salary", prompt)
+        self.assertIn("STRICT REVISION RULES", prompt)
+
+    def test_mock_gemini_service_revision_queue_and_exceptions(self):
+        mock_service = MockGeminiService()
+
+        # 1. Default result (empty revision)
+        res1 = mock_service.revise_expense_draft({}, "test note", [], [])
+        self.assertIsNone(res1.original_amount)
+        self.assertEqual(mock_service.revision_call_count, 1)
+
+        # 2. Queued custom result
+        custom = ExpenseRevisionResult(
+            occurred_on=date(2026, 8, 25),
+            merchant="Apple Store",
+            original_amount=Decimal("599.00"),
+            original_currency="USD",
+            from_account="Visa",
+            category="Electronics",
+            payment_mode="one_off"
+        )
+        mock_service.set_next_revision_result(custom)
+        res2 = mock_service.revise_expense_draft({}, "updated note", [], [])
+        self.assertEqual(res2.merchant, "Apple Store")
+        self.assertEqual(res2.original_amount, Decimal("599.00"))
+        self.assertEqual(res2.from_account, "Visa")
+        self.assertEqual(mock_service.revision_call_count, 2)
+
+        # 3. Exception simulation
+        mock_service.should_raise = GeminiDependencyError("Rate limit")
+        with self.assertRaises(GeminiDependencyError):
+            mock_service.revise_expense_draft({}, "note", [], [])
+        self.assertEqual(mock_service.revision_call_count, 3)
+
+    def test_gemini_service_revise_expense_draft_with_mocked_client(self):
+        from unittest.mock import MagicMock, patch
+
+        service = GeminiService(api_key="test_api_key")
+        mock_response = MagicMock()
+        mock_response.text = json.dumps({
+            "occurred_on": "2026-08-25",
+            "merchant": "Target",
+            "original_amount": "88.50",
+            "original_currency": "USD",
+            "from_account": "Checking",
+            "category": "Groceries",
+            "payment_mode": "one_off",
+            "total_periods": None
+        })
+
+        with patch("google.genai.Client") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client.models.generate_content.return_value = mock_response
+            mock_client_cls.return_value = mock_client
+
+            result = service.revise_expense_draft(
+                current_draft={"merchant": None, "original_amount": None},
+                correction_note="Change merchant to Target, amount 88.50 USD from Checking",
+                accounts=[{"name": "Checking", "account_type": "cash", "currency": "USD", "aliases": []}],
+                categories=[{"name": "Groceries", "category_type": "expense"}]
+            )
+
+            self.assertTrue(mock_client.models.generate_content.called)
+            call_kwargs = mock_client.models.generate_content.call_args[1]
+            config = call_kwargs["config"]
+            self.assertEqual(config.response_schema, ExpenseRevisionTransportSchema)
+
+            self.assertEqual(result.merchant, "Target")
+            self.assertEqual(result.original_amount, Decimal("88.50"))
+            self.assertEqual(result.original_currency, "USD")
+            self.assertEqual(result.from_account, "Checking")
+            self.assertEqual(result.category, "Groceries")
+            self.assertEqual(result.payment_mode, "one_off")

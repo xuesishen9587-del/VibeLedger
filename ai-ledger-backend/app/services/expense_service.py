@@ -926,6 +926,163 @@ def confirm_ingestion_request(
     )
     return response_payload
 
+def recompute_draft_warnings(
+    draft: Dict[str, Any],
+    active_accounts: List[Dict[str, Any]],
+    active_expense_categories: List[Dict[str, Any]]
+) -> List[Dict[str, str]]:
+    """
+    Recomputes validation warnings from the current state of an ingestion draft.
+    warnings=[] is only possible when all required draft fields and their
+    deterministic relationships are valid enough for explicit Confirm.
+    """
+    warnings: List[Dict[str, str]] = []
+
+    # 1. Occurred on date validation (null/empty allowed via confirm fallback; non-null must be valid ISO YYYY-MM-DD)
+    raw_date = draft.get("occurred_on")
+    if raw_date is not None and str(raw_date).strip() != "":
+        try:
+            date.fromisoformat(str(raw_date).strip())
+        except Exception:
+            warnings.append({
+                "code": "INVALID_OCCURRED_ON",
+                "message": f"交易日期格式无效: '{raw_date}'，期望格式为 YYYY-MM-DD。"
+            })
+
+    # 2. Payment mode validation
+    pm = draft.get("payment_mode")
+    if not pm or not isinstance(pm, str) or pm.strip().lower() not in ("one_off", "installment"):
+        warnings.append({
+            "code": "INVALID_PAYMENT_MODE",
+            "message": f"未识别或缺失支付模式: '{pm}'，请手动确认。"
+        })
+        normalized_pm = None
+    else:
+        normalized_pm = pm.strip().lower()
+
+    # 3. Account resolution and validation
+    acc_info = draft.get("from_account")
+    matched_acc = None
+    if not acc_info or not isinstance(acc_info, dict) or not acc_info.get("id"):
+        warnings.append({
+            "code": "ACCOUNT_UNRESOLVED",
+            "message": "未能识别支付账户，请手动选择。"
+        })
+    else:
+        try:
+            target_id = UUID(str(acc_info["id"]))
+            matched_acc = next((a for a in active_accounts if a["id"] == target_id), None)
+            if not matched_acc:
+                warnings.append({
+                    "code": "ACCOUNT_UNRESOLVED",
+                    "message": "支付账户无效或未激活，请重新选择。"
+                })
+        except Exception:
+            warnings.append({
+                "code": "ACCOUNT_UNRESOLVED",
+                "message": "支付账户格式无效，请手动选择。"
+            })
+
+    # 4. Currency validation
+    raw_curr = draft.get("original_currency")
+    valid_curr = None
+    if not raw_curr or not isinstance(raw_curr, str) or not raw_curr.strip():
+        warnings.append({
+            "code": "CURRENCY_UNCLEAR",
+            "message": "未能识别有效币种，请手动确认。"
+        })
+    else:
+        try:
+            valid_curr = validate_currency_code(raw_curr.strip().upper())
+        except Exception:
+            warnings.append({
+                "code": "CURRENCY_UNCLEAR",
+                "message": f"无效的币种代码: '{raw_curr}'。"
+            })
+
+    # 5. Amount validation
+    raw_amt = draft.get("original_amount")
+    if raw_amt is None or str(raw_amt).strip() == "":
+        warnings.append({
+            "code": "AMOUNT_UNCLEAR",
+            "message": "未能识别消费金额。"
+        })
+    else:
+        try:
+            dec_amt = parse_decimal(str(raw_amt))
+            if dec_amt <= 0:
+                warnings.append({
+                    "code": "AMOUNT_UNCLEAR",
+                    "message": "消费金额格式无效或必须为正数。"
+                })
+        except Exception:
+            warnings.append({
+                "code": "AMOUNT_UNCLEAR",
+                "message": "消费金额格式无效或必须为正数。"
+            })
+
+    # 6. Installment-specific validations
+    if normalized_pm == "installment":
+        if matched_acc and matched_acc.get("account_type") != "credit":
+            warnings.append({
+                "code": "NON_CREDIT_INSTALLMENT_ACCOUNT",
+                "message": f"分期计划仅支持信用卡账户，'{matched_acc['name']}' 不是信用卡账户。"
+            })
+
+        raw_periods = draft.get("total_periods")
+        if raw_periods is None:
+            warnings.append({
+                "code": "INVALID_INSTALLMENT_PERIODS",
+                "message": "分期期数缺失或无效（支持 2-120 期），请手动确认。"
+            })
+        else:
+            try:
+                t_periods = int(raw_periods)
+                if t_periods < 2 or t_periods > 120:
+                    warnings.append({
+                        "code": "INVALID_INSTALLMENT_PERIODS",
+                        "message": "分期期数缺失或无效（支持 2-120 期），请手动确认。"
+                    })
+            except (ValueError, TypeError):
+                warnings.append({
+                    "code": "INVALID_INSTALLMENT_PERIODS",
+                    "message": "分期期数缺失或无效（支持 2-120 期），请手动确认。"
+                })
+
+    # 7. One-off specific validations (also applies when payment_mode is missing/unresolved)
+    if normalized_pm != "installment":
+        cat_info = draft.get("category")
+        if not cat_info or not isinstance(cat_info, dict) or not cat_info.get("id"):
+            warnings.append({
+                "code": "CATEGORY_UNRESOLVED",
+                "message": "未能识别消费分类，请手动选择。"
+            })
+        else:
+            try:
+                target_cat_id = UUID(str(cat_info["id"]))
+                matched_cat = next((c for c in active_expense_categories if c["id"] == target_cat_id), None)
+                if not matched_cat:
+                    warnings.append({
+                        "code": "CATEGORY_UNRESOLVED",
+                        "message": "消费分类无效或未激活，请手动选择。"
+                    })
+            except Exception:
+                warnings.append({
+                    "code": "CATEGORY_UNRESOLVED",
+                    "message": "消费分类格式无效，请手动选择。"
+                })
+
+        # Deterministic Confirm compatibility: Non-credit account cannot pay mismatched currency
+        if matched_acc and valid_curr:
+            if matched_acc.get("account_type") != "credit" and valid_curr != matched_acc.get("currency"):
+                warnings.append({
+                    "code": "CURRENCY_MISMATCH",
+                    "message": f"非信用卡账户 '{matched_acc['name']}' ({matched_acc['currency']}) 不支持外币消费 ({valid_curr})。"
+                })
+
+    return warnings
+
+
 def revise_ingestion_request(
     conn,
     request_id: UUID,
@@ -965,38 +1122,123 @@ def revise_ingestion_request(
         raise InvalidRequestStateError(f"Cannot revise request in status '{row['status']}'.")
 
     draft = dict(row["draft_payload"] or {})
+
+    # Load active household accounts and categories
     accounts = accounts_repo.list_accounts(conn, household_id)
     active_accounts = [a for a in accounts if a["status"] == "active"]
+
+    # Explicitly load active household-scoped account aliases
+    all_aliases = []
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT aa.id, aa.account_id, aa.alias_text, aa.normalized_alias, aa.status
+            FROM account_aliases aa
+            JOIN accounts a ON a.id = aa.account_id
+            WHERE a.household_id = %s
+              AND a.status = 'active'
+              AND aa.status = 'active'
+              AND aa.deleted_at IS NULL;
+            """,
+            (household_id,)
+        )
+        for r in cur.fetchall():
+            all_aliases.append({
+                "id": r[0],
+                "account_id": r[1],
+                "alias_text": r[2],
+                "normalized_alias": r[3],
+                "status": r[4]
+            })
+
+    # Enrich active accounts with their active aliases for Gemini revision prompt
+    for a in active_accounts:
+        a["aliases"] = [al["alias_text"] for al in all_aliases if al["account_id"] == a["id"]]
+
     categories = accounts_repo.list_categories(conn, household_id)
     active_expense_categories = [c for c in categories if c["category_type"] == "expense" and c["status"] == "active"]
 
+    # 1. Natural Language Revision via Gemini
+    if correction_note and correction_note.strip():
+        svc = gemini_service or GeminiService()
+        revised = svc.revise_expense_draft(
+            current_draft=draft,
+            correction_note=correction_note.strip(),
+            accounts=active_accounts,
+            categories=active_expense_categories
+        )
+
+        # Conservative merge: null/missing revision field leaves current draft value unchanged
+        if revised.occurred_on is not None:
+            draft["occurred_on"] = revised.occurred_on.isoformat()
+
+        if revised.merchant is not None and revised.merchant.strip():
+            draft["merchant"] = revised.merchant.strip()
+
+        if revised.original_amount is not None:
+            draft["original_amount"] = str(revised.original_amount)
+
+        if revised.original_currency is not None and revised.original_currency.strip():
+            c_candidate = revised.original_currency.strip().upper()
+            try:
+                draft["original_currency"] = validate_currency_code(c_candidate)
+            except Exception:
+                draft["original_currency"] = c_candidate
+
+        if revised.from_account is not None and revised.from_account.strip():
+            resolved_acc, _ = _resolve_account(revised.from_account, active_accounts, all_aliases)
+            if resolved_acc:
+                draft["from_account"] = {"id": str(resolved_acc["id"]), "name": resolved_acc["name"]}
+            else:
+                # Explicit correction attempted but unresolved: clear draft field to null and warn
+                draft["from_account"] = None
+
+        if revised.category is not None and revised.category.strip():
+            resolved_cat, _ = _resolve_category(revised.category, active_expense_categories)
+            if resolved_cat:
+                draft["category"] = {"id": str(resolved_cat["id"]), "name": resolved_cat["name"]}
+            else:
+                # Explicit correction attempted but unresolved: clear draft field to null and warn
+                draft["category"] = None
+
+        if revised.payment_mode is not None and revised.payment_mode.strip():
+            draft["payment_mode"] = revised.payment_mode.strip().lower()
+
+        if revised.total_periods is not None:
+            draft["total_periods"] = revised.total_periods
+
+    # 2. Structured Fields Revision (precedence over natural-language interpretation)
     if structured_fields:
-        if "merchant" in structured_fields:
+        if "merchant" in structured_fields and structured_fields["merchant"] is not None:
             draft["merchant"] = structured_fields["merchant"]
-        if "occurred_on" in structured_fields:
+        if "occurred_on" in structured_fields and structured_fields["occurred_on"] is not None:
             draft["occurred_on"] = structured_fields["occurred_on"]
-        if "original_amount" in structured_fields:
-            draft["original_amount"] = structured_fields["original_amount"]
-        if "original_currency" in structured_fields:
-            draft["original_currency"] = structured_fields["original_currency"]
-        if "from_account_id" in structured_fields:
+        if "original_amount" in structured_fields and structured_fields["original_amount"] is not None:
+            draft["original_amount"] = str(structured_fields["original_amount"])
+        if "original_currency" in structured_fields and structured_fields["original_currency"] is not None:
+            raw_curr = str(structured_fields["original_currency"]).strip().upper()
+            try:
+                draft["original_currency"] = validate_currency_code(raw_curr)
+            except Exception:
+                draft["original_currency"] = raw_curr
+        if "from_account_id" in structured_fields and structured_fields["from_account_id"] is not None:
             target_acc_id = UUID(structured_fields["from_account_id"]) if isinstance(structured_fields["from_account_id"], str) else structured_fields["from_account_id"]
             acc = next((a for a in active_accounts if a["id"] == target_acc_id), None)
             if not acc:
                 raise AccountNotFoundError(f"Account {target_acc_id} not found or inactive for household.")
             draft["from_account"] = {"id": str(acc["id"]), "name": acc["name"]}
-        if "category_id" in structured_fields:
+        if "category_id" in structured_fields and structured_fields["category_id"] is not None:
             target_cat_id = UUID(structured_fields["category_id"]) if isinstance(structured_fields["category_id"], str) else structured_fields["category_id"]
             cat = next((c for c in active_expense_categories if c["id"] == target_cat_id), None)
             if not cat:
                 raise CategoryNotFoundError(f"Expense category {target_cat_id} not found or inactive.")
             draft["category"] = {"id": str(cat["id"]), "name": cat["name"]}
-        if "payment_mode" in structured_fields:
+        if "payment_mode" in structured_fields and structured_fields["payment_mode"] is not None:
             p_mode = structured_fields["payment_mode"]
             if p_mode not in ("one_off", "installment"):
                 raise InvalidPaymentModeError(f"Invalid payment_mode '{p_mode}'. Must be 'one_off' or 'installment'.")
             draft["payment_mode"] = p_mode
-        if "total_periods" in structured_fields:
+        if "total_periods" in structured_fields and structured_fields["total_periods"] is not None:
             try:
                 t_periods = int(structured_fields["total_periods"])
                 if t_periods < 2 or t_periods > 120:
@@ -1005,27 +1247,36 @@ def revise_ingestion_request(
             except (ValueError, TypeError):
                 raise InvalidInstallmentPeriodsError(f"Invalid total_periods: {structured_fields['total_periods']}")
 
-    if correction_note:
-        note_lower = correction_note.lower()
-        for acc in active_accounts:
-            if acc["name"].lower() in note_lower:
-                draft["from_account"] = {"id": str(acc["id"]), "name": acc["name"]}
-                break
-        for cat in active_expense_categories:
-            if cat["name"].lower() in note_lower:
-                draft["category"] = {"id": str(cat["id"]), "name": cat["name"]}
-                break
+    # 3. Canonicalize semantically valid payment_mode to exact "one_off" or "installment"
+    if draft.get("payment_mode") is not None and isinstance(draft["payment_mode"], str):
+        cleaned_pm = draft["payment_mode"].strip().lower()
+        if cleaned_pm in ("one_off", "installment"):
+            draft["payment_mode"] = cleaned_pm
 
+    # 4. Recompute warnings from FINAL revised draft
+    warnings = recompute_draft_warnings(draft, active_accounts, active_expense_categories)
+
+    # 4. Format display summary cleanly without "None" tokens
     acc_name_disp = draft.get("from_account", {}).get("name") if draft.get("from_account") else "未知账户"
     cat_name_disp = draft.get("category", {}).get("name") if draft.get("category") else "未分类"
-    amt_disp = f"{draft.get('original_amount')} {draft.get('original_currency', '')}".strip()
-    display_summary = f"⚠️ 请确认 (已修订)\n{amt_disp} · {draft.get('merchant') or '未知商户'}\n{acc_name_disp} · {cat_name_disp}"
+    amt = draft.get("original_amount")
+    curr = draft.get("original_currency")
+    if amt and curr:
+        amt_disp = f"{amt} {curr}"
+    elif amt:
+        amt_disp = f"{amt} (币种未知)"
+    elif curr:
+        amt_disp = f"未知金额 ({curr})"
+    else:
+        amt_disp = "未知金额"
+    merchant_disp = draft.get("merchant") or "未知商户"
+    display_summary = f"⚠️ 请确认 (已修订)\n{amt_disp} · {merchant_disp}\n{acc_name_disp} · {cat_name_disp}"
 
     response_payload = {
         "status": "needs_confirmation",
         "request_id": str(request_id),
         "draft": draft,
-        "warnings": [],
+        "warnings": warnings,
         "display_summary": display_summary
     }
 

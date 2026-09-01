@@ -19,7 +19,7 @@ from app.repositories import ingestion as ingestion_repo
 from app.repositories import installments as installments_repo
 from app.repositories import devices as devices_repo
 from app.services import ledger_service
-from app.services.gemini_service import ExpenseExtractionResult, MockGeminiService
+from app.services.gemini_service import ExpenseExtractionResult, ExpenseRevisionResult, MockGeminiService
 from app.services.reference_fx_service import ReferenceFxService, FxRateProvider
 from app.domain.transactions import GeminiDependencyError, FxProviderUnavailableError
 try:
@@ -1277,3 +1277,275 @@ class TestExpenseApiDb(BaseDbTestCase):
         with self.conn.cursor() as cur:
             cur.execute("SELECT COUNT(*) FROM transactions WHERE merchant = 'Cafe';")
             self.assertEqual(cur.fetchone()[0], 0)
+
+    def test_51_natural_language_revision_and_confirm_lifecycle(self):
+        """
+        Integration test: Natural language revision populates draft, preserves request_id,
+        leaves status needs_confirmation, and then confirms successfully into a committed transaction.
+        """
+        # Initial submission produces needs_confirmation draft (account & category unresolved)
+        self.mock_gemini.set_next_result(ExpenseExtractionResult(
+            occurred_on=date(2026, 8, 20),
+            merchant=None,
+            original_amount=None,
+            original_currency=None,
+            from_account=None,
+            category=None,
+            payment_mode="one_off",
+            confidence=0.5
+        ))
+
+        res_init = self.client.post(
+            "/api/v1/expenses",
+            headers={"Authorization": f"Bearer {self.raw_token_1}"},
+            json={
+                "idempotency_key": "test-key-51-nl-revision-lifecycle",
+                "captured_at": "2026-08-20T12:00:00+08:00",
+                "image": self._sample_jpeg_payload()
+            }
+        )
+        self.assertEqual(res_init.status_code, 200)
+        self.assertEqual(res_init.json()["status"], "needs_confirmation")
+        req_id = res_init.json()["request_id"]
+        # Initial draft has warnings
+        self.assertGreater(len(res_init.json()["warnings"]), 0)
+
+        # Queue natural-language revision result
+        self.mock_gemini.set_next_revision_result(ExpenseRevisionResult(
+            occurred_on=date(2026, 8, 20),
+            merchant="优衣库",
+            original_amount=Decimal("199.00"),
+            original_currency="CNY",
+            from_account="招商银行储蓄卡",
+            category="餐饮美食",
+            payment_mode="one_off"
+        ))
+
+        # Call POST /revise with natural-language note
+        res_rev = self.client.post(
+            f"/api/v1/ingestion-requests/{req_id}/revise",
+            headers={"Authorization": f"Bearer {self.raw_token_1}"},
+            json={
+                "correction_note": "在优衣库花了199元，用招商银行储蓄卡支付，分类餐饮美食"
+            }
+        )
+        self.assertEqual(res_rev.status_code, 200)
+        rev_data = res_rev.json()
+        self.assertEqual(rev_data["status"], "needs_confirmation")
+        self.assertEqual(rev_data["request_id"], str(req_id))
+        self.assertEqual(rev_data["draft"]["merchant"], "优衣库")
+        self.assertEqual(rev_data["draft"]["original_amount"], "199.00")
+        self.assertEqual(rev_data["draft"]["original_currency"], "CNY")
+        self.assertEqual(rev_data["draft"]["from_account"]["id"], str(self.acc_cny_checking))
+        self.assertEqual(rev_data["draft"]["category"]["id"], str(self.cat_food))
+        self.assertEqual(rev_data["warnings"], [])
+        self.assertNotIn("None", rev_data["display_summary"])
+
+        # Explicit confirm boundary
+        res_conf = self.client.post(
+            f"/api/v1/ingestion-requests/{req_id}/confirm",
+            headers={"Authorization": f"Bearer {self.raw_token_1}"}
+        )
+        self.assertEqual(res_conf.status_code, 200)
+        self.assertEqual(res_conf.json()["status"], "committed")
+        self.assertEqual(res_conf.json()["request_id"], str(req_id))
+
+        # Exactly 1 transaction recorded in DB
+        with self.conn.cursor() as cur:
+            cur.execute("SELECT original_amount, original_currency, merchant FROM transactions WHERE source_request_id = %s;", (UUID(req_id),))
+            tx_row = cur.fetchone()
+            self.assertIsNotNone(tx_row)
+            self.assertEqual(tx_row[0], Decimal("199.00"))
+            self.assertEqual(tx_row[1], "CNY")
+            self.assertEqual(tx_row[2], "优衣库")
+
+    def test_52_revise_with_gemini_dependency_failure_rolls_back(self):
+        """
+        Integration test: If Gemini service fails during revision, endpoint returns 503,
+        database transaction rolls back, and existing draft remains completely uncorrupted.
+        """
+        self.mock_gemini.set_next_result(ExpenseExtractionResult(
+            occurred_on=date(2026, 8, 20),
+            merchant="咖啡厅",
+            original_amount=Decimal("35.00"),
+            original_currency="CNY",
+            from_account=None,
+            category=None,
+            payment_mode="one_off",
+            confidence=0.8
+        ))
+
+        res_init = self.client.post(
+            "/api/v1/expenses",
+            headers={"Authorization": f"Bearer {self.raw_token_1}"},
+            json={
+                "idempotency_key": "test-key-52-gemini-fail-rollback",
+                "captured_at": "2026-08-20T12:00:00+08:00",
+                "image": self._sample_jpeg_payload()
+            }
+        )
+        req_id = res_init.json()["request_id"]
+        original_draft = res_init.json()["draft"]
+
+        # Simulate Gemini dependency outage
+        self.mock_gemini.should_raise = GeminiDependencyError("Gemini API 503 Overloaded")
+
+        res_rev = self.client.post(
+            f"/api/v1/ingestion-requests/{req_id}/revise",
+            headers={"Authorization": f"Bearer {self.raw_token_1}"},
+            json={"correction_note": "把金额改成40元"}
+        )
+        self.assertEqual(res_rev.status_code, 503)
+        self.assertEqual(res_rev.json()["error"]["code"], "GEMINI_SERVICE_UNAVAILABLE")
+
+        # Reset mock
+        self.mock_gemini.should_raise = None
+
+        # Verify draft in DB is uncorrupted and still in needs_confirmation
+        row = ingestion_repo.get_ingestion_request(self.conn, UUID(req_id))
+        self.assertEqual(row["status"], "needs_confirmation")
+        self.assertEqual(row["draft_payload"]["original_amount"], original_draft["original_amount"])
+        self.assertEqual(row["draft_payload"]["merchant"], original_draft["merchant"])
+
+    def test_53_natural_language_revision_with_account_alias(self):
+        """
+        Integration test: Revising draft using an account alias resolves to the canonical account ID.
+        '招行信用卡' alias resolves to self.acc_cny_credit.
+        """
+        self.mock_gemini.set_next_result(ExpenseExtractionResult(
+            occurred_on=date(2026, 8, 20),
+            merchant="餐厅",
+            original_amount=Decimal("150.00"),
+            original_currency="CNY",
+            from_account=None,
+            category=None,
+            payment_mode="one_off",
+            confidence=0.8
+        ))
+
+        res_init = self.client.post(
+            "/api/v1/expenses",
+            headers={"Authorization": f"Bearer {self.raw_token_1}"},
+            json={
+                "idempotency_key": "test-key-53-alias-resolution",
+                "captured_at": "2026-08-20T12:00:00+08:00",
+                "image": self._sample_jpeg_payload()
+            }
+        )
+        req_id = res_init.json()["request_id"]
+
+        # Gemini returns alias string '招行信用卡'
+        self.mock_gemini.set_next_revision_result(ExpenseRevisionResult(
+            from_account="招行信用卡",
+            category="餐饮美食"
+        ))
+
+        res_rev = self.client.post(
+            f"/api/v1/ingestion-requests/{req_id}/revise",
+            headers={"Authorization": f"Bearer {self.raw_token_1}"},
+            json={"correction_note": "用招行信用卡付的，选餐饮美食"}
+        )
+        self.assertEqual(res_rev.status_code, 200)
+        draft = res_rev.json()["draft"]
+        self.assertIsNotNone(draft["from_account"])
+        self.assertEqual(draft["from_account"]["id"], str(self.acc_cny_credit))
+        self.assertEqual(draft["from_account"]["name"], "招商银行信用卡")
+        self.assertEqual(draft["category"]["id"], str(self.cat_food))
+        self.assertEqual(res_rev.json()["warnings"], [])
+
+    def test_54_natural_language_unresolved_account_clears_field_and_warns(self):
+        """
+        Integration test for clarification 2:
+        When an explicit natural-language correction specifies an unknown account,
+        from_account MUST be cleared to null and produce an ACCOUNT_UNRESOLVED warning.
+        Previous account must NOT be silently retained.
+        """
+        # Initially resolved with checking card, but category is None -> needs_confirmation
+        self.mock_gemini.set_next_result(ExpenseExtractionResult(
+            occurred_on=date(2026, 8, 20),
+            merchant="药房",
+            original_amount=Decimal("45.00"),
+            original_currency="CNY",
+            from_account="招商银行储蓄卡",
+            category=None,
+            payment_mode="one_off",
+            confidence=0.8,
+            field_confidence={"amount": 1.0, "currency": 1.0, "account": 1.0, "category": 0.0, "date": 1.0}
+        ))
+
+        res_init = self.client.post(
+            "/api/v1/expenses",
+            headers={"Authorization": f"Bearer {self.raw_token_1}"},
+            json={
+                "idempotency_key": "test-key-54-unresolved-clears-account",
+                "captured_at": "2026-08-20T12:00:00+08:00",
+                "image": self._sample_jpeg_payload()
+            }
+        )
+        req_id = res_init.json()["request_id"]
+        # In this initial draft, account was resolved
+        self.assertIsNotNone(res_init.json()["draft"]["from_account"])
+
+        # Now user explicitly says to change to non-existent account
+        self.mock_gemini.set_next_revision_result(ExpenseRevisionResult(
+            from_account="火星虚拟银行卡"
+        ))
+
+        res_rev = self.client.post(
+            f"/api/v1/ingestion-requests/{req_id}/revise",
+            headers={"Authorization": f"Bearer {self.raw_token_1}"},
+            json={"correction_note": "改成火星虚拟银行卡"}
+        )
+        self.assertEqual(res_rev.status_code, 200)
+        rev_data = res_rev.json()
+        self.assertIsNone(rev_data["draft"]["from_account"])
+        codes = {w["code"] for w in rev_data["warnings"]}
+        self.assertIn("ACCOUNT_UNRESOLVED", codes)
+
+    def test_55_revise_canonicalizes_payment_mode_and_confirms_successfully(self):
+        """
+        Regression test: Draft has payment_mode=' ONE_OFF '.
+        Revision canonicalizes payment_mode to 'one_off', warnings=[], and explicit Confirm succeeds.
+        """
+        self.mock_gemini.set_next_result(ExpenseExtractionResult(
+            occurred_on=date(2026, 8, 20),
+            merchant="超市",
+            original_amount=Decimal("66.00"),
+            original_currency="CNY",
+            from_account="招商银行储蓄卡",
+            category=None,
+            payment_mode=" ONE_OFF ",
+            confidence=0.8,
+            field_confidence={"amount": 1.0, "currency": 1.0, "account": 1.0, "category": 0.0, "date": 1.0}
+        ))
+
+        res_init = self.client.post(
+            "/api/v1/expenses",
+            headers={"Authorization": f"Bearer {self.raw_token_1}"},
+            json={
+                "idempotency_key": "test-key-55-canonicalize-pm-confirm",
+                "captured_at": "2026-08-20T12:00:00+08:00",
+                "image": self._sample_jpeg_payload()
+            }
+        )
+        req_id = res_init.json()["request_id"]
+
+        # Revise category
+        res_rev = self.client.post(
+            f"/api/v1/ingestion-requests/{req_id}/revise",
+            headers={"Authorization": f"Bearer {self.raw_token_1}"},
+            json={"category_id": str(self.cat_food)}
+        )
+        self.assertEqual(res_rev.status_code, 200)
+        rev_data = res_rev.json()
+        self.assertEqual(rev_data["draft"]["payment_mode"], "one_off")
+        self.assertEqual(rev_data["warnings"], [])
+
+        # Confirm must succeed because payment_mode is exact canonical "one_off"
+        res_conf = self.client.post(
+            f"/api/v1/ingestion-requests/{req_id}/confirm",
+            headers={"Authorization": f"Bearer {self.raw_token_1}"}
+        )
+        self.assertEqual(res_conf.status_code, 200)
+        self.assertEqual(res_conf.json()["status"], "committed")
+        self.assertEqual(res_conf.json()["payment_mode"], "one_off")

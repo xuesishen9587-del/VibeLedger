@@ -227,6 +227,11 @@ Test:
 ```text
 invalid account_type rejected
 invalid currency rejected
+invalid risk_level rejected
+credit account with non-null risk_level rejected
+credit account with NULL risk_level accepted
+asset account with valid risk_level accepted
+asset account with NULL risk_level accepted
 billing_day 0 rejected
 billing_day 32 rejected
 non-credit billing_day rejected
@@ -243,6 +248,20 @@ Test:
 duplicate active category rejected
 same name different type allowed
 inactive category preserved
+category description persisted and retrieved
+category description nullable
+no priority column exists
+```
+
+## Ingestion Requests
+
+Test:
+
+```text
+request_kind asset_capture accepted
+request_kind expense/transfer/snapshot accepted
+invalid request_kind rejected
+unique device_id + idempotency_key enforced
 ```
 
 ## Transactions
@@ -849,6 +868,89 @@ Expected:
 ```text
 request -> rejected
 no financial write
+```
+
+---
+
+# 13.5 Asset Capture API Tests
+
+## Static Gemini Transport Schema Invariants
+Verify that `AssetCaptureExtractionTransport` and `AssetObservationTransport`:
+```text
+contain no dynamic Dict[str, ...] fields
+generate no additionalProperties in JSON schema
+pass google.genai._transformers.t_schema validation
+strictly adhere to Gemini Developer API constraints
+```
+
+## High-Confidence Multi-Account Asset Capture
+Mock Gemini output:
+```text
+observations:
+  ABC_Debit: 25,391.20 CNY
+  ABC_Term: 200,000.00 CNY
+  ABC_Wealth: 130,458.11 CNY
+displayed_total: 355,849.31 CNY
+```
+Expected:
+```text
+status = committed
+account_state rows locked in ascending UUID order
+snapshots created for ABC_Debit (balance), ABC_Term (balance), ABC_Wealth (investment_valuation)
+investment_pnl calculated for ABC_Wealth (excluded from cash income)
+reconciliation adjustments created if residuals <= 200 CNY
+no snapshot created for displayed_total (anti-double-counting verified)
+account_state projections updated atomically
+```
+
+## Aggregate Total Mismatch
+Mock Gemini output:
+```text
+observations sum = 345,849.31 CNY
+displayed_total = 355,849.31 CNY
+```
+Expected:
+```text
+status = needs_confirmation
+failure_code = ASSET_TOTAL_MISMATCH
+draft stored on ingestion_request
+zero snapshots created
+zero account_state mutations
+```
+
+## Ambiguous / Generic Alias Guard
+Input:
+```text
+section label "活期存款", but household has multiple active cash accounts (e.g. ABC_Debit and CMB_Debit)
+without conclusive whole-screen context
+```
+Expected:
+```text
+status = needs_confirmation
+draft stored
+no auto-commit
+```
+
+## Multi-Account Atomicity and Rollback
+Test:
+```text
+3 observations in payload; 1 triggers DB constraint failure or validation error
+Expected:
+entire transaction rolls back (ROLLBACK ALL)
+zero snapshots created across all 3 accounts
+ingestion_request status remains needs_confirmation or failed
+no partial writes
+```
+
+## Dashboard Risk Distribution Calculation
+Test:
+```text
+positive cash balances included
+positive savings balances included
+positive investment valuations included
+credit accounts strictly excluded (regardless of balance)
+accounts with risk_level = NULL grouped as 'unclassified' (未分类)
+reference FX conversion applied for non-reporting currencies
 ```
 
 ---
@@ -2250,6 +2352,22 @@ recover
 confirm
 revise
 reject
+```
+
+## Phase 12.5
+
+Required automated and manual acceptance:
+
+```text
+Account risk_level validation (credit must have NULL risk_level)
+Category description persistence and prompt injection
+Gemini static transport schema verification (no dynamic dicts, no additionalProperties)
+Multi-account asset capture API (POST /api/v1/asset-captures)
+Multi-account atomicity and deterministic locking order (UUID order)
+Aggregate total cross-check math (sum match vs ASSET_TOTAL_MISMATCH)
+Dashboard risk allocation calculation (positive cash/savings/investment, exclude credit, NULL as unclassified)
+Dedicated Asset Capture Shortcut verification
+Staging runtime acceptance before Phase 13
 ```
 
 ## Phase 13

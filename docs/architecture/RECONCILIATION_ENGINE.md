@@ -203,9 +203,9 @@ Therefore the parser already knows:
 
 ```text
 account_id
+account_name
 account_type
 account_currency
-institution
 ```
 
 The parser MUST NOT ask AI to guess the destination account.
@@ -1547,6 +1547,8 @@ needs_review
 
 Snapshot batches contain no Statement lines.
 
+## 31.1 Single-Account Snapshot Reconciliation
+
 Input:
 
 ```text
@@ -1587,6 +1589,84 @@ upload Statement to investigate
 ```
 
 The system does not require Statement collection.
+
+---
+
+## 31.2 Multi-Account Asset Capture Reconciliation
+
+Multi-Account Asset Capture allows capturing balances across multiple canonical accounts from a single overview screenshot (e.g. mobile banking homepage, brokerage portfolio overview).
+
+### 31.2.1 Pipeline & Persistence Semantics
+
+Asset capture **MUST NOT** directly overwrite `account_state`.
+
+Pipeline:
+$$\text{Screenshot} \rightarrow \text{AI Observations} \rightarrow \text{Canonical Account Resolution} \rightarrow \text{Authoritative Snapshots} \rightarrow \text{Reconciliation / Investment Valuation} \rightarrow \text{account\_state Projection}$$
+
+1. **Snapshot Creation**:
+   - `cash` / `savings` accounts: `snapshot_type = 'balance'`.
+   - `investment` accounts: `snapshot_type = 'investment_valuation'`.
+2. **Investment P&L Calculation**:
+   - Preserves standard rule:
+     $$\text{investment\_pnl} = \text{closing valuation} - \text{opening valuation} - \text{net contributions}$$
+   - Creates records in `investment_pnl_periods`.
+   - **Investment valuation changes update net worth but NEVER become household cash income.**
+3. **Reconciliation Calibration**:
+   - For `cash` / `savings` accounts, compares authoritative observed balance with current projected ledger balance.
+   - If $| \text{residual} | \le 200\text{ CNY}$: auto-creates `reconciliation_adjustment` on commit.
+   - If $| \text{residual} | > 200\text{ CNY}$: requires explicit user confirmation before committing.
+
+### 31.2.2 Aggregate Total Anti-Double-Counting Rule
+
+Fields representing aggregate totals (such as "Total Assets", "总资产", "资产合计", "总市值", "Portfolio Total"):
+1. **Serve strictly as cross-check data**.
+2. **THEY NEVER CREATE AN ACCOUNT SNAPSHOT** (strictly avoiding double-counting against constituent accounts).
+3. When constituent observations and the displayed total share the same currency, the engine cross-checks:
+   $$\text{delta} = |\sum \text{observation.balance} - \text{displayed\_total}|$$
+4. If a material mismatch exists:
+   - Sets `failure_code = 'ASSET_TOTAL_MISMATCH'`.
+   - The entire batch enters `needs_confirmation` and will not auto-commit.
+
+### 31.2.3 Account Resolution & Ambiguity Guards
+
+1. Matches candidate accounts by canonical `name` and active `AccountAlias`.
+2. **Generic Aliases Guard**: Generic aliases such as "活期", "定期", "理财" are ambiguous globally across different institutions. In the presence of multiple active candidates, generic aliases alone **MUST NOT** resolve deterministically without conclusive full-screen context verified by backend.
+3. Backend validates:
+   - Account exists and is `active`.
+   - Belongs to the authenticated household.
+   - Unique canonical resolution.
+   - Currency matches account definition.
+4. Any ambiguity or unresolved observation forces the workflow into `needs_confirmation`.
+5. AI MUST NOT create new accounts.
+
+### 31.2.4 Multi-Account Atomicity
+
+One Asset Capture is one atomic workflow:
+1. **ALL OR NOTHING**: Either all observations are validated and committed, or none are committed.
+2. Before writing:
+   - Resolve all accounts and validate all observations.
+   - Sort all affected canonical `account_id`s in ascending UUID order.
+   - Acquire `SELECT ... FOR UPDATE` locks on `account_state` strictly in sorted order (preventing deadlocks).
+3. Inside a single database transaction:
+   - Insert all snapshots (`account_snapshots`).
+   - Create any required reconciliation adjustments (`reconciliation_adjustment`).
+   - Compute and record investment P&L (`investment_pnl_periods`).
+   - Update `account_state` projections and `last_authoritative_snapshot_at`.
+   - Update `ingestion_requests` status to `committed`.
+4. Any failure: **ROLLBACK ALL**. No partial screenshot application.
+
+### 31.2.5 Auto-Commit vs Confirmation
+
+A high-confidence asset capture may auto-commit only when:
+1. All account mappings uniquely resolve.
+2. All currencies validate.
+3. All balances validate.
+4. Aggregate cross-check passes (or currencies differ).
+5. All ordinary account residuals are within the $\le 200\text{ CNY}$ auto-adjustment threshold.
+
+If any check fails, or residuals are large/unexplained:
+- Request status becomes `needs_confirmation`.
+- User confirmation represents explicit approval of the authoritative observed balances and commits the corresponding reconciliation effects atomically.
 
 ---
 

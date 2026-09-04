@@ -1577,6 +1577,79 @@ reject
 
 ---
 
+# 18.5. Phase 12.5 — Account / Asset Model & Multi-Account Asset Capture
+
+## Goal
+
+Refactor the account model, add account risk-level classification, add semantic category descriptions, and introduce dedicated multi-account asset screenshot capture (`POST /api/v1/asset-captures`) with atomic multi-account reconciliation, before fresh production cutover.
+
+## Scope & Gating
+
+> **CRITICAL GATING**: Phase 13 (Production Fresh Cutover) **MUST remain strictly blocked** until Phase 12.5 implementation and staging acceptance are fully complete.
+
+Phase 12.5 spans six sub-phases:
+
+### 18.5.1 Phase 12.5A — Architecture Re-Freeze & Documentation (Current)
+- Freeze updated `TARGET_DOMAIN_MODEL.md` (Account semantics: cash/savings/credit/investment, risk_level, Category description, Asset Capture, Risk distribution).
+- Freeze `PHYSICAL_SCHEMA.md` (accounts table, categories table, ingestion_requests request_kind, multi-account locking order).
+- Freeze `API_CONTRACT.md` (POST /api/v1/asset-captures, static Gemini transport, Dashboard risk distribution, Accounts & Categories API updates).
+- Freeze `RECONCILIATION_ENGINE.md` (multi-account asset capture reconciliation, aggregate total cross-check, atomicity).
+- Freeze `IMPLEMENTATION_PLAN.md` & `TEST_PLAN.md`.
+
+### 18.5.2 Phase 12.5B — Database Schema Migration
+- Migration `0010_asset_model_freeze.sql`:
+  - `ALTER TABLE accounts ADD COLUMN risk_level TEXT;`
+  - Add check constraints: `risk_level IN ('very_low', 'low', 'medium', 'high')`, `account_type <> 'credit' OR risk_level IS NULL`.
+  - Add index `ix_accounts_household_risk`.
+  - `ALTER TABLE categories ADD COLUMN description TEXT;`
+  - Update `chk_ingestion_kind` on `ingestion_requests` to include `'asset_capture'`.
+  - Remove legacy `institution` column from target physical schema expectations.
+
+### 18.5.3 Phase 12.5C — Backend Domain, Repositories, & APIs
+- Update Account domain entities, repositories, and API endpoints to validate and persist `risk_level`.
+- Update Category domain entities, repositories, and API endpoints to persist `description`.
+- Update Gemini service system prompt to receive category `name` and `description` for expense classification.
+- Define static Gemini transport schemas `AssetObservationTransport` and `AssetCaptureExtractionTransport` (strictly compatible with Gemini Developer API, no dynamic dicts, no `additionalProperties`).
+- Implement `POST /api/v1/asset-captures` endpoint:
+  - Device bearer authentication.
+  - Idempotency handling via `ingestion_requests` (`request_kind = 'asset_capture'`).
+  - Gemini asset extraction invocation.
+  - Deterministic aggregate total cross-check (`ASSET_TOTAL_MISMATCH`).
+  - Canonical account resolution with ambiguity protection for generic aliases.
+  - Multi-account atomic locking: sort affected `account_id`s in ascending UUID order, acquire `account_state FOR UPDATE`, commit snapshots and reconciliation/P&L in a single DB transaction. Rollback all on failure.
+  - Auto-commit for high-confidence/unambiguous matches; `needs_confirmation` for mismatches/ambiguities.
+  - Support confirm, reject, and recover endpoints for `asset_capture`.
+
+### 18.5.4 Phase 12.5D — Dashboard UI Enhancement
+- Risk Distribution Chart and Breakdown Table:
+  - Displays portfolio risk breakdown (`very_low`, `low`, `medium`, `high`, `NULL` as unclassified).
+  - Strictly excludes all credit accounts.
+  - Converts non-reporting currencies using Reference FX.
+- Category Management UI: Add and edit category `description`.
+- Asset Capture Review / Confirmation UI: Review, adjust, confirm, or reject draft asset captures.
+
+### 18.5.5 Phase 12.5E — Dedicated iOS Asset Capture Shortcut
+- Dedicated `ios-shortcut-asset-1.0` Shortcut (distinct from Expense Shortcut).
+- Captures bank/brokerage asset overview screenshot.
+- Calls `POST /api/v1/asset-captures`.
+- Displays confirmed balances or informs user to confirm on Dashboard.
+
+### 18.5.6 Phase 12.5F — Automated Testing & Staging Acceptance
+- Unit tests: schema invariants, risk_level rules, category descriptions, static Gemini asset transport schema, aggregate cross-check math, risk distribution calculation.
+- Integration tests: database migrations, multi-account row locking and atomicity, deadlock avoidance, idempotency replay, API endpoints.
+- Staging acceptance: deploy to staging (`ENVIRONMENT=staging`), execute real asset capture with dedicated Shortcut, verify atomic snapshot creation, reconciliation adjustments, and Dashboard risk distribution.
+
+## Acceptance Criteria
+1. Automated unit test suite passes 100%.
+2. Integration test suite passes 100%.
+3. Static Gemini asset extraction schema verified free of dynamic dicts and `additionalProperties`.
+4. Multi-account asset capture commits all accounts atomically or rolls back completely.
+5. Aggregate total mismatch prevents auto-commit and triggers `needs_confirmation`.
+6. Credit accounts cannot have risk_level and are excluded from risk distribution.
+7. Category descriptions successfully guide Gemini expense classification.
+
+---
+
 # 19. Phase 13 — Production Fresh Cutover
 
 ## Preconditions
@@ -1595,6 +1668,7 @@ Dashboard API migration
 auth/device tokens
 Phase 11.5 staging runtime readiness passed
 Phase 12 real-device Shortcut acceptance passed
+Phase 12.5 Account / Asset Model & Multi-Account Asset Capture passed
 ```
 
 ## Cutover
@@ -1756,11 +1830,14 @@ Read APIs       Snapshot Reconciliation
                  Phase 11.5
                  Pre-production Staging & Readiness
                     ↓
-                 Phase 12
-                 Shortcut v2
-                   ↓
-                Phase 13
-                Production Cutover
+                  Phase 12
+                  Shortcut v2
+                    ↓
+                  Phase 12.5
+                  Asset Model & Multi-Account Asset Capture
+                    ↓
+                 Phase 13
+                 Production Cutover
                    ↓
                 Phase 14
                 Legacy Removal

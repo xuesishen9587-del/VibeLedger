@@ -317,7 +317,9 @@ Do not convert HTTP errors into HTTP 200 with an `"error"` body.
 
 # 4. Shared Workflow Statuses
 
-## 4.1 Ingestion request status
+## 4.1 Ingestion request status and kinds
+
+Status values:
 
 ```text
 received
@@ -326,6 +328,15 @@ needs_confirmation
 committed
 rejected
 failed
+```
+
+Request kinds (`request_kind`):
+
+```text
+expense
+transfer
+snapshot
+asset_capture
 ```
 
 ## 4.2 Reconciliation batch status
@@ -772,6 +783,219 @@ If one side of a cross-currency transfer is missing:
 ```
 
 Fee creates a separate `fee` transaction within the same DB transaction.
+
+---
+
+# 8.5 Multi-Account Asset Capture API
+
+Dedicated Product v1 business intent for extracting balances across multiple canonical accounts from a single banking, brokerage, or platform asset overview screenshot.
+
+Strictly separated from single expense capture.
+
+```http
+POST /api/v1/asset-captures
+```
+
+### Authentication & Headers
+
+```http
+Authorization: Bearer <OPAQUE_DEVICE_TOKEN>
+Content-Type: application/json
+Accept: application/json
+```
+
+### Request Payload
+
+```json
+{
+  "idempotency_key": "asset-20260904-7a8f9b0c",
+  "captured_at": "2026-09-04T12:30:00+08:00",
+  "client_version": "ios-shortcut-asset-1.0",
+  "image": {
+    "mime_type": "image/jpeg",
+    "base64": "<base64_encoded_jpeg_bytes>"
+  }
+}
+```
+
+Rules:
+- `account_id` MUST NOT be supplied in the request. One image may observe multiple canonical accounts.
+- `idempotency_key` is strictly scoped to `(device_id, idempotency_key)`.
+- Same key + identical payload => idempotent replay of existing request and results.
+- Same key + different payload => `409 Conflict` (`IDEMPOTENCY_KEY_REUSE`).
+
+---
+
+### Gemini Structured Extraction Transport Schema
+
+To strictly comply with the Gemini Developer API constraints, the extraction transport schema uses static nested Pydantic models with **no dynamic dicts** and **no `additionalProperties`**:
+
+```python
+class AssetObservationTransport(BaseModel):
+    account_name: Optional[str] = None
+    balance: Optional[Decimal] = None
+    currency: Optional[str] = None
+    confidence: Optional[float] = None
+
+class AssetCaptureExtractionTransport(BaseModel):
+    observations: List[AssetObservationTransport] = Field(default_factory=list)
+    displayed_total: Optional[Decimal] = None
+    displayed_total_currency: Optional[str] = None
+```
+
+AI Invariants:
+- Gemini prompt receives all active canonical accounts for the household (name, `account_type`, currency, active aliases).
+- Gemini may use whole-screen context (e.g. "中国农业银行" logo/header + "活期储蓄" / "定期存款" / "理财产品" sections) to map observations.
+- Gemini MUST NOT create new accounts.
+- Backend performs deterministic validation and reconciliation after AI extraction.
+
+---
+
+### Aggregate Total Anti-Double-Counting Rule
+
+Fields representing aggregate totals (such as "Total Assets", "总资产", "资产合计", "总市值", "Portfolio Total"):
+1. **Never create an Account Snapshot** (strictly avoids double-counting against constituent accounts).
+2. **Serve as cross-check data only**.
+3. When constituent observations and `displayed_total` share the same currency, backend computes:
+   $$\text{residual} = |\sum \text{observation.balance} - \text{displayed\_total}|$$
+4. If a material mismatch exists:
+   - Sets `failure_code = 'ASSET_TOTAL_MISMATCH'`.
+   - Forces the workflow into `status = 'needs_confirmation'`.
+
+---
+
+### Account Resolution & Deterministic Validation
+
+1. Canonical mapping relies on canonical `Account` name and `AccountAlias`.
+2. **Generic Aliases Guard**: Generic aliases such as "活期", "定期", "理财" are ambiguous globally across different institutions. In the presence of multiple active candidates, generic aliases alone **MUST NOT** resolve deterministically without conclusive full-screen context verified by backend.
+3. Backend validation checks:
+   - Account exists and is `active`.
+   - Belongs to the authenticated household.
+   - Unique canonical match.
+   - Currency matches the account's defined currency.
+4. Any ambiguity or unresolved observation forces `status = 'needs_confirmation'`.
+
+---
+
+### Multi-Account Atomicity & Persistence Semantics
+
+1. Asset capture **MUST NOT** directly mutate `account_state.ledger_balance`.
+2. Write Pipeline:
+   $$\text{Screenshot} \rightarrow \text{AI Observations} \rightarrow \text{Canonical Resolution} \rightarrow \text{Authoritative Snapshots} \rightarrow \text{Reconciliation / Investment Valuation} \rightarrow \text{account\_state Projection}$$
+3. Snapshot Types:
+   - `cash` / `savings` accounts: `snapshot_type = 'balance'`.
+   - `investment` accounts: `snapshot_type = 'investment_valuation'`. Computes:
+     $$\text{Investment P\&L} = \text{Closing Valuation} - \text{Opening Valuation} - \text{Contributions} + \text{Withdrawals}$$
+     Investment valuation changes update net worth and investment analytics, but **never become household cash income**.
+4. **ALL OR NOTHING**:
+   - Before writing, all affected canonical `account_id`s are sorted in ascending UUID order and locked (`account_state FOR UPDATE`) to prevent deadlocks.
+   - All snapshots, reconciliation adjustments, and investment P&L records are written in **one single database transaction**.
+   - If any account fails validation or unexpected error occurs: `ROLLBACK ALL`. No partial snapshot application.
+
+---
+
+### Response: High-Confidence Auto-Committed (`200 OK` / `201 Created`)
+
+Returned when all accounts uniquely resolve, all currencies and balances validate, aggregate cross-check passes, and ordinary account residuals permit auto-adjustment:
+
+```json
+{
+  "status": "committed",
+  "request_id": "8a7c6b5d-4e3f-2a1b-0c9d-8e7f6a5b4c3d",
+  "captured_at": "2026-09-04T12:30:00+08:00",
+  "displayed_total": "355849.31",
+  "displayed_total_currency": "CNY",
+  "results": [
+    {
+      "account_id": "11111111-1111-1111-1111-111111111111",
+      "account_name": "ABC_Debit",
+      "account_type": "cash",
+      "snapshot_id": "aaaa1111-2222-3333-4444-555566667777",
+      "snapshot_type": "balance",
+      "observed_balance": "25391.20",
+      "currency": "CNY",
+      "residual_amount": "0.00",
+      "adjustment_transaction_id": null
+    },
+    {
+      "account_id": "22222222-2222-2222-2222-222222222222",
+      "account_name": "ABC_Term",
+      "account_type": "savings",
+      "snapshot_id": "bbbb2222-3333-4444-5555-666677778888",
+      "snapshot_type": "balance",
+      "observed_balance": "200000.00",
+      "currency": "CNY",
+      "residual_amount": "0.00",
+      "adjustment_transaction_id": null
+    },
+    {
+      "account_id": "33333333-3333-3333-3333-333333333333",
+      "account_name": "ABC_Wealth",
+      "account_type": "investment",
+      "snapshot_id": "cccc3333-4444-5555-6666-777788889999",
+      "snapshot_type": "investment_valuation",
+      "observed_balance": "130458.11",
+      "currency": "CNY",
+      "investment_pnl": "1458.11",
+      "pnl_period_id": "dddd4444-5555-6666-7777-888899990000"
+    }
+  ]
+}
+```
+
+---
+
+### Response: Ambiguous / Mismatch Needs Confirmation (`200 OK`)
+
+Returned when account mapping is ambiguous, aggregate total mismatch occurs, or ordinary account residual exceeds auto-threshold. No snapshots or balances are committed:
+
+```json
+{
+  "status": "needs_confirmation",
+  "request_id": "8a7c6b5d-4e3f-2a1b-0c9d-8e7f6a5b4c3d",
+  "failure_code": "ASSET_TOTAL_MISMATCH",
+  "display_summary": "资产总计核对存在差额（分项和 ¥345,849.31 ≠ 显示总额 ¥355,849.31），需在 Dashboard 确认",
+  "draft": {
+    "displayed_total": "355849.31",
+    "displayed_total_currency": "CNY",
+    "observations": [
+      {
+        "account_id": "11111111-1111-1111-1111-111111111111",
+        "account_name": "ABC_Debit",
+        "observed_balance": "25391.20",
+        "currency": "CNY",
+        "confidence": 0.95
+      },
+      {
+        "account_id": "22222222-2222-2222-2222-222222222222",
+        "account_name": "ABC_Term",
+        "observed_balance": "200000.00",
+        "currency": "CNY",
+        "confidence": 0.92
+      },
+      {
+        "account_id": null,
+        "account_name": "未匹配理财账户",
+        "observed_balance": "120458.11",
+        "currency": "CNY",
+        "confidence": 0.65
+      }
+    ]
+  }
+}
+```
+
+---
+
+### Confirmation, Rejection, & Recovery
+
+Asset capture requests fully participate in the standard ingestion lifecycle:
+- **Recovery**: `GET /api/v1/ingestion-requests/by-key/{idempotency_key}`
+- **Confirmation**: `POST /api/v1/ingestion-requests/{id}/confirm`
+  - User submits approved/corrected observation mapping.
+  - Backend locks affected `account_state` rows in ascending UUID order and atomically writes snapshots and reconciliation effects.
+- **Rejection**: `POST /api/v1/ingestion-requests/{id}/reject`
+  - Marks request as `rejected`, writes no financial changes.
 
 ---
 
@@ -1261,6 +1485,7 @@ Optional filters:
 ```text
 ?status=active
 ?account_type=credit
+?risk_level=low
 ?owner_user_id=...
 ```
 
@@ -1272,9 +1497,9 @@ Response:
     {
       "id": "uuid",
       "name": "ICBC_Visa_Credit",
-      "institution": "ICBC",
       "account_type": "credit",
       "currency": "USD",
+      "risk_level": null,
       "owner_user_id": "uuid",
       "billing_day": 31,
       "due_day": 25,
@@ -1300,14 +1525,19 @@ Request:
 
 ```json
 {
-  "name": "DBS_USD",
-  "institution": "DBS",
-  "account_type": "cash",
-  "currency": "USD",
+  "name": "ABC_Wealth",
+  "account_type": "investment",
+  "currency": "CNY",
+  "risk_level": "medium",
   "owner_user_id": "uuid",
   "linked_cash_account_id": null
 }
 ```
+
+Constraints:
+- `risk_level` allowed values: `very_low`, `low`, `medium`, `high`, `null`.
+- **Credit Invariant**: If `account_type == "credit"`, `risk_level` MUST be `null` or omitted. Submitting non-null `risk_level` for a credit account returns `422 Unprocessable Entity`.
+- `institution` is removed from the target API contract (multi-account naming conventions are used instead, e.g. `ABC_Debit`, `ABC_Term`, `ABC_Wealth`).
 
 Response `201 Created`.
 
@@ -1316,6 +1546,8 @@ Response `201 Created`.
 ## 16.3 Update account
 
 ```http
+POST /api/v1/accounts/{account_id}
+or
 PATCH /api/v1/accounts/{account_id}
 ```
 
@@ -1323,12 +1555,17 @@ Request:
 
 ```json
 {
-  "name": "DBS USD",
+  "name": "ABC Wealth",
+  "risk_level": "high",
   "billing_day": null,
   "due_day": null,
   "row_version": 4
 }
 ```
+
+Constraints:
+- Credit accounts cannot have non-null `risk_level`.
+- Gemini MUST NOT infer or mutate `risk_level`.
 
 Immutable after history exists:
 
@@ -1379,24 +1616,61 @@ DELETE means soft-delete/deactivate.
 GET /api/v1/categories?type=expense&status=active
 ```
 
+Response:
+
+```json
+{
+  "items": [
+    {
+      "id": "uuid-child",
+      "name": "Child",
+      "category_type": "expense",
+      "description": "所有儿童及子女直接相关开销（包括但不限于医疗、母婴早教、童装等），全部归入本类别，而非普通医疗或教育。",
+      "status": "active"
+    }
+  ]
+}
+```
+
+---
+
 ## 18.2 Create category
 
 ```http
 POST /api/v1/categories
 ```
 
+Request:
+
 ```json
 {
   "name": "Child",
-  "type": "expense"
+  "type": "expense",
+  "description": "所有儿童及子女直接相关开销（包括医疗、母婴、教育等）优先归入本类别。"
 }
 ```
+
+Rules:
+- `description` (nullable TEXT): Contains the semantic classification policy for this category.
+- Gemini expense classification receives active category `name` + `description`.
+- **Do NOT add `priority`**: Priority is not supported. Classification decisions are driven purely by explicit semantic descriptions.
+
+---
 
 ## 18.3 Update / deactivate
 
 ```http
 PATCH /api/v1/categories/{category_id}
 POST  /api/v1/categories/{category_id}/deactivate
+```
+
+Request:
+
+```json
+{
+  "description": "更新后的孩子专属开销语义说明",
+  "status": "active"
+}
 ```
 
 No hard deletion if referenced by history.
@@ -1784,6 +2058,76 @@ Response:
   ]
 }
 ```
+
+---
+
+## 25.5 Risk distribution summary
+
+```http
+GET /api/v1/dashboard/risk-distribution
+```
+
+Response:
+
+```json
+{
+  "as_of": "2026-09-04T12:00:00+08:00",
+  "reporting_currency": "CNY",
+  "total_asset_amount": "355849.31",
+  "items": [
+    {
+      "risk_level": "very_low",
+      "display_name": "极低风险",
+      "amount": "25391.20",
+      "percentage": "0.0713",
+      "account_count": 1
+    },
+    {
+      "risk_level": "low",
+      "display_name": "低风险",
+      "amount": "200000.00",
+      "percentage": "0.5620",
+      "account_count": 1
+    },
+    {
+      "risk_level": "medium",
+      "display_name": "中风险",
+      "amount": "130458.11",
+      "percentage": "0.3667",
+      "account_count": 1
+    },
+    {
+      "risk_level": "high",
+      "display_name": "高风险",
+      "amount": "0.00",
+      "percentage": "0.0000",
+      "account_count": 0
+    },
+    {
+      "risk_level": null,
+      "display_name": "未分类",
+      "amount": "0.00",
+      "percentage": "0.0000",
+      "account_count": 0
+    }
+  ]
+}
+```
+
+Rules:
+- Includes:
+  - positive cash balances (`account_type = 'cash'` AND `balance > 0`)
+  - positive savings balances (`account_type = 'savings'` AND `balance > 0`)
+  - positive investment valuations (`account_type = 'investment'` AND `valuation > 0`)
+- **Excludes every credit account** (`account_type = 'credit'`). Credit accounts never participate in risk allocation.
+- `risk_level` NULL appears as "unclassified" (`未分类`).
+- Display levels:
+  - `very_low` -> 极低风险
+  - `low` -> 低风险
+  - `medium` -> 中风险
+  - `high` -> 高风险
+  - `NULL` -> 未分类
+- All amounts are converted to household reporting currency using existing reference FX rules.
 
 ---
 

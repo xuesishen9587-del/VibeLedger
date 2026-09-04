@@ -108,3 +108,14 @@ The canonical match statuses on `statement_lines` are:
 - **`status = 'committed'`** $\iff$ `deleted_at IS NULL` AND `delete_reason IS NULL`
 - **`status = 'voided'`** $\iff$ `deleted_at IS NOT NULL` AND `delete_reason IS NOT NULL`
 - Soft delete and void are the identical financial lifecycle operation; voiding atomically reverses `account_state` projections exactly once and preserves audit trails.
+
+### 3.10 Ingestion Request Kinds
+- **`expense`**: Single-expense receipt/payment capture from iPhone Shortcut or Dashboard.
+- **`transfer`**: Two-legged internal transfer capture.
+- **`snapshot`**: Single-account manual or Dashboard balance observation.
+- **`asset_capture`**: Dedicated multi-account asset overview capture from a single banking or investment screenshot (`POST /api/v1/asset-captures`). Strictly separated from single expense capture; commits all observed account snapshots atomically or rolls back completely.
+
+### 3.11 Account Types & Risk Allocation
+- **`account_type`**: Exactly `cash`, `savings`, `credit`, `investment`. A single financial institution or platform is modeled as multiple independent canonical Accounts. The `institution` entity, `asset_class`, `liquidity_level`, and account hierarchies are strictly out of scope.
+- **`risk_level`**: User-configured metadata (`very_low`, `low`, `medium`, `high`, `NULL`). Used for Dashboard household wealth risk distribution. Credit accounts MUST have `risk_level = NULL` and are excluded from risk distribution. Asset accounts with `NULL` risk level are displayed as "unclassified" (未分类).
+- **Category `description`**: Semantic classification policy passed to Gemini. Category `priority` is prohibited.

@@ -37,6 +37,9 @@
 - 信用卡最低还款、逾期、提前结清分期。
 - 精确汇兑损益核算。
 - 历史旧数据迁移。
+- `institution`（金融机构）实体或机构层级模型。
+- `asset_class`、`liquidity_level`、`parent_account_id` 或任何账户父子层级关系。
+- Category `priority`（分类优先级）。
 
 ---
 
@@ -46,22 +49,36 @@
 
 表示真实金融账户。
 
-主要类型：
+主要类型（`account_type`，严格限定为以下四类）：
 
-- `cash`
-- `savings`
-- `credit`
-- `investment`
+- `cash`：可直接用于支付或日常消费的流动资金。包括银行活期存款余额、借记卡活期余额、微信零钱/零钱通直接消费余额、支付宝余额等。
+- `savings`：通常不直接用于日常刷卡/扫码消费的储蓄资金，主要是银行定期存款。
+- `investment`：具有投资、净值波动或理财属性的资产账户。包括银行理财产品、债券基金、股票/指数基金、证券投资账户及其他按市值估值的资产账户。
+- `credit`：负债类账户。包括信用卡账户、花呗等消费信贷负债。
+
+账户建模示例：
+
+- `ABC_Debit` -> `cash`（农行借记卡活期）
+- `ABC_Term` -> `savings`（农行定期存款）
+- `ABC_Wealth` -> `investment`（农行理财产品）
+- `ABC_Cup_Credit` -> `credit`（农行银联信用卡）
+- `Alipay` -> `cash`（支付宝日常余额）
+- `Alipay_BondFund` -> `investment`（支付宝端内持有的债券基金）
+- `Alipay_EquityFund` -> `investment`（支付宝端内持有的股票基金）
+
+现实中的一个金融机构或服务平台（如中国农业银行、支付宝），在领域模型中根据资金属性拆分为多个相互独立的标准化 Account。
+**领域模型中不引入 `institution` 实体，也不在 Account 上保留 `institution` 属性。**
+**不引入 `asset_class`、`liquidity_level`、`parent_account_id` 或任何账户父子层级关系。**
 
 核心属性：
 
 ```text
 id
 name
-institution
 account_type
 currency
-owner_user_id
+risk_level           nullable
+owner_user_id        nullable
 status
 billing_day          nullable
 due_day              nullable
@@ -69,6 +86,13 @@ linked_cash_account_id nullable
 created_at
 updated_at
 ```
+
+`risk_level`（风险等级）：
+- 允许取值：`very_low`（极低风险）、`low`（低风险）、`medium`（中风险）、`high`（高风险）、`NULL`。
+- 纯用户配置的元数据，用于 Dashboard 家庭整体财富与风险分布展示。
+- **Gemini 严禁推断、设置或修改 `risk_level`。**
+- **负债类账户（`account_type = 'credit'`）的 `risk_level` 必须为 `NULL`**，绝不参与家庭资产风险分布统计。
+- 资产类账户（`cash` / `savings` / `investment`）创建时允许暂不指定风险等级（`risk_level = NULL`），在 Dashboard 风险分布中归入“未分类”（unclassified）。
 
 规则：
 
@@ -350,6 +374,7 @@ last_seen_at
 id
 name
 type
+description          nullable
 status
 ```
 
@@ -360,7 +385,11 @@ expense
 income
 ```
 
-允许 Dashboard 自定义。
+规则：
+- 允许 Dashboard 自定义。
+- `description`（分类描述）：保存语义分类指引与业务边界（例如：明确指出所有涉及孩子的医疗、教育、衣物等消费，均统一归入 Child 分类，而非普通的 Health 或 Education）。
+- **严禁引入 `priority`（优先级）字段**，分类边界完全通过 `name` 与 `description` 的语义策略表达。
+- Gemini 消费记账提取时，必须同时接收活跃分类的 `name` 与 `description`。
 
 ---
 
@@ -374,7 +403,11 @@ account_id
 alias
 ```
 
-账户识别规则不得继续硬编码在 Python Literal 中。
+规则：
+- 账户识别规则不得继续硬编码在 Python Literal 中。
+- **别名全局可能存在重叠/歧义**：同一金融机构名下的不同账户（例如 `ABC_Debit`、`ABC_Term`、`ABC_Wealth`）通常配置有包含机构名称的别名（如“农行”、“农业银行”），以及通用业务别名（如“活期存款”、“定期存款”、“理财产品”）。
+- **通用泛指别名（如“活期”、“定期”、“理财”）在有多个活跃账户匹配时，绝对不足以单独作为确定性账户解析的依据**。
+- AI 可利用整屏上下文（如页面顶部的银行名称 + 区块标题“定期存款”）解析对应账户，但 Backend 必须进行严格确定性校验：账户必须存在、处于 active 状态、属于同一家庭、且具有唯一确定性映射；若匹配存在歧义或无法解析，必须转入 `needs_confirmation`。
 
 ---
 
@@ -1008,6 +1041,76 @@ Investment P&L：
 
 ---
 
+# 15.5 Core Flow D — Multi-Account Asset Capture
+
+专用于家庭资产截屏（网银首页、理财平台资产总览）的多账户权威余额/估值提取。与单笔消费记账（Expense capture）严格隔离。
+
+```text
+Dedicated Asset Capture Shortcut
+↓
+Generate idempotency_key
+↓
+Capture asset overview screenshot
+↓
+POST /api/v1/asset-captures
+↓
+Gemini static structured extraction (no additionalProperties)
+↓
+Extract observations (account_name, balance, currency) + displayed_total
+↓
+Deterministic validation & aggregate cross-check
+↓
+┌─ High confidence + unambiguous resolution + total cross-check pass
+│       ↓
+│   Sort affected account IDs (ascending UUID order)
+│       ↓
+│   Lock account_state rows (FOR UPDATE)
+│       ↓
+│   Atomic commit:
+│   - save account_snapshots (balance / investment_valuation)
+│   - execute reconciliation / investment P&L
+│   - update account_state projections
+│       ↓
+│   committed
+│
+└─ Ambiguous resolution / ASSET_TOTAL_MISMATCH / large residual
+        ↓
+    needs_confirmation (ingestion_requests)
+        ↓
+    User confirms / edits / rejects in Dashboard
+        ↓
+    Atomic commit only after user confirmation
+```
+
+### 15.5.1 核心规则与不变式
+
+1. **多账户单图提取（Multi-Account in One Image）**：
+   - 接口不强制要求 `account_id`。
+   - 单张截屏允许同时识别同一金融机构或平台下的多个账户余额（如：活期存款、定期存款、理财产品）。
+   - 示例：一张农业银行截图显示活期 25,391.20 CNY、定期 200,000.00 CNY、理财 130,458.11 CNY、总资产 355,849.31 CNY。系统分别解析为 `ABC_Debit`、`ABC_Term`、`ABC_Wealth` 三笔独立观测。
+2. **汇总总额防重规则（Aggregate Total Anti-Double-Counting Rule）**：
+   - 截屏中出现的“总资产”、“资产合计”、“总市值”、“Total Assets”、“Asset Total”等总计字段，**仅作为交叉校验数据（cross-check data）**。
+   - **汇总项绝不得生成独立的 Account Snapshot**，彻底杜绝与分项重复计入。
+   - 当分项观测币种与汇总币种一致时，后端核对分项之和是否等于汇总总额；若存在实质性偏差，标记 `failure_code = 'ASSET_TOTAL_MISMATCH'` 并强制转入 `needs_confirmation`。
+3. **确定性账户映射（Account Resolution）**：
+   - Gemini 接收活跃账户的名称、`account_type`、币种及别名列表，利用整屏上下文（如银行 App 标题）识别账户。
+   - 通用泛指别名（如“活期”、“定期”）在存在多个活跃账户候选时，绝不足以作为唯一确定映射。
+   - 后端执行严格确定性验证（账户存在、active、同家庭、唯一映射、币种匹配），若无法唯一确定则转入 `needs_confirmation`。Gemini 绝不能新建账户。
+4. **持久化与核算语义（Persistence & Accounting Semantics）**：
+   - 资产截屏绝不直接强改 `account_state`。
+   - 标准流水线：`screenshot -> AI observations -> canonical resolution -> authoritative snapshots -> reconciliation / investment valuation -> account_state`。
+   - `cash` / `savings` 账户生成 `snapshot_type = 'balance'` 的快照；
+   - `investment` 账户生成 `snapshot_type = 'investment_valuation'` 的快照，并计算 `investment_pnl = closing - opening - contributions + withdrawals`。估值变动计入净资产与投资分析，绝不计入家庭现金收入。
+5. **多账户原子性（Multi-Account Atomicity）**：
+   - 一次 Asset Capture 属于单一原子事务，**要么全部观测账户生效，要么全不生效（ALL OR NOTHING）**。
+   - 写入前，先将所有识别出的 `account_id` 按 UUID 升序排序，按序对 `account_state` 加排他锁（`FOR UPDATE`），杜绝死锁。
+   - 在单一数据库事务内完成所有 Snapshot、对账调整与投资损益写入；任一账户失败则整单回滚，绝不产生局部快照写入。
+6. **请求幂等（Idempotency）**：
+   - 新增 `request_kind = 'asset_capture'`。
+   - 单次截屏生成一条 `ingestion_requests`，以 `(device_id, idempotency_key)` 为幂等边界。重试相同 payload 幂等返回已有结果；不同 payload 报 409 冲突。
+
+---
+
 # 16. Dashboard Reporting
 
 核心指标：
@@ -1037,6 +1140,24 @@ last_authoritative_snapshot_at
 ```
 
 不要求所有账户每月完成 Statement。
+
+### 16.1 资产与风险分布（Asset & Risk Distribution）
+
+Dashboard 提供两重视角的家庭资产配置分布：
+
+1. **账户类型分布（Account Type Allocation）**：
+   - 按 `cash`、`savings`、`investment` 展示总资产占比；负债 `credit` 单独展示。
+2. **风险等级分布（Risk Level Allocation）**：
+   - **纳入统计范围**：仅包含正余额的 `cash`、正余额的 `savings`，以及正估值的 `investment` 资产。
+   - **严格排除范围**：**所有 `credit` 负债账户绝对不参与风险分布统计**。
+   - **未分类处理**：若资产账户未设置 `risk_level`（即 `risk_level = NULL`），在风险图表与统计中归入“未分类”（unclassified）。
+   - **展示分级**：
+     - `very_low` -> 极低风险（如活期存款、银行现金理财）
+     - `low` -> 低风险（如定期存款、纯债基金）
+     - `medium` -> 中风险（如平衡配置基金、固收+）
+     - `high` -> 高风险（如股票型基金、股票投资账户）
+     - `NULL` -> 未分类（unclassified）
+   - **币种折算**：所有非报告币种资产，统一按照基准汇率服务（Reference FX）转换为家庭报告币种（reporting_currency）进行聚合统计。
 
 ---
 

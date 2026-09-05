@@ -1602,6 +1602,7 @@ Phase 12.5 spans six sub-phases:
   - Add check constraints: `risk_level IN ('very_low', 'low', 'medium', 'high')`, `account_type <> 'credit' OR risk_level IS NULL`.
   - Add index `ix_accounts_household_risk`.
   - `ALTER TABLE categories ADD COLUMN description TEXT;`
+  - Seed the 14 canonical Product v1 Expense categories and their descriptions (`Grocery`, `Dine`, `Child`, `Home & Utilities`, `Digital & Gadgets`, `Clothing`, `Beauty`, `Transportation`, `Health`, `Education`, `Gift & Socials`, `Parents`, `Fun & Games`, `Trips & Occasions`).
   - Update `chk_ingestion_kind` on `ingestion_requests` to include `'asset_capture'`.
   - Execute `ALTER TABLE accounts DROP COLUMN institution;` to bring staging schema to target domain model.
   - **Zero-Downtime Deployment Sequencing Requirement**:
@@ -1611,12 +1612,16 @@ Phase 12.5 spans six sub-phases:
 
 ### 18.5.3 Phase 12.5C — Backend Domain, Repositories, & APIs
 - Update Account domain entities, repositories, and API endpoints to validate and persist `risk_level`.
-- Update Category domain entities, repositories, and API endpoints to persist `description`.
-- Update Gemini service system prompt to receive category `name` and `description` for expense classification.
+- Update Category domain entities, repositories, and API endpoints to persist `description`:
+  - Enforce fixed 14 canonical Product v1 Expense category taxonomy.
+  - Reject arbitrary creation, renaming, or deactivation of Expense categories (`CANONICAL_EXPENSE_CATEGORY_IMMUTABLE`). Allow updating `description` only.
+  - Keep Income category creation/update/deactivation customizable.
+- Update Gemini service system prompt to receive active category `name` and `description` for expense classification (covering all 14 canonical expense categories, with Child semantic override rule and no priority column).
 - Define static Gemini transport schemas `AssetObservationTransport` and `AssetCaptureExtractionTransport` (strictly compatible with Gemini Developer API, no dynamic dicts, no `additionalProperties`).
 - Implement `POST /api/v1/asset-captures` endpoint:
   - Device bearer authentication.
   - Idempotency handling via `ingestion_requests` (`request_kind = 'asset_capture'`).
+  - Candidate Account Scope Isolation: Gemini extraction receives ONLY active accounts whose `account_type IN ('cash', 'savings', 'investment')`. Credit accounts (`credit`) are strictly excluded.
   - Gemini asset extraction invocation.
   - Deterministic aggregate total cross-check with exact quantized comparison:
     1. Quantize observations and displayed total to minor currency units;
@@ -1624,12 +1629,14 @@ Phase 12.5 spans six sub-phases:
     3. Exact equality = pass;
     4. Non-zero difference = `ASSET_TOTAL_MISMATCH` -> `ingestion_request.status = needs_confirmation`;
     5. Skip aggregate check if currencies differ (do not fabricate FX).
-  - Canonical account resolution with ambiguity protection for generic aliases.
+  - Screenshot liabilities exclusion: credit-card liabilities or outstanding balances displayed on asset overviews are ignored for asset observations and total cross-checks (governed by credit-card reconciliation domain).
+  - Canonical account resolution with ambiguity protection for generic aliases:
+    - Rejects any observation mapped to `credit` with `failure_code = 'ASSET_ACCOUNT_TYPE_INVALID'`, forcing `needs_confirmation` with zero financial facts committed.
   - Multi-account atomic locking: sort affected canonical `account_id`s in ascending UUID order, acquire `account_state FOR UPDATE`, commit snapshots, per-account reconciliation batches (`source_request_id`), adjustments, and investment P&L in ONE DB transaction. Rollback all on failure.
   - Auto-commit for high-confidence/unambiguous matches; `needs_confirmation` for mismatches/ambiguities.
 - Implement Polymorphic Ingestion Confirm and Draft endpoints:
   - `PATCH /api/v1/ingestion-requests/{request_id}/draft`: polymorphic by `request_kind`. If `asset_capture`, accepts `{"observations": [{"account_id": "uuid", "observed_balance": "...", "currency": "..."}]}` so Dashboard can correct unmapped accounts or OCR errors prior to confirmation.
-  - `POST /api/v1/ingestion-requests/{request_id}/confirm`: bodyless `{}`. Dispatched by `request_kind`. If `asset_capture`, revalidates current draft, sorts affected account UUIDs, locks `account_state` rows in ascending UUID order, atomically commits all snapshots, per-account reconciliation batches, adjustments, and investment P&L in ONE single DB transaction. Returns multi-account `results` response (NOT expense `transaction_id`). Repeated confirm replays stored response.
+  - `POST /api/v1/ingestion-requests/{request_id}/confirm`: Request body NONE REQUIRED (an empty JSON object `{}` MAY be tolerated for compatibility, but MUST NOT be required). Dispatched by `request_kind`. If `asset_capture`, revalidates current draft, sorts affected account UUIDs, locks `account_state` rows in ascending UUID order, atomically commits all snapshots, per-account reconciliation batches, adjustments, and investment P&L in ONE single DB transaction. Returns multi-account `results` response (NOT expense `transaction_id`). Repeated confirm replays stored response.
   - `POST /api/v1/ingestion-requests/{request_id}/reject`: marks `ingestion_request` as `rejected`, committing zero financial facts.
 - Clean up Single-Account Snapshot endpoint:
   - `POST /api/v1/accounts/{account_id}/snapshots` is strictly dedicated to known-account numeric/manual authoritative snapshot entry.
@@ -1644,11 +1651,14 @@ Phase 12.5 spans six sub-phases:
   - Displays portfolio risk breakdown (`very_low`, `low`, `medium`, `high`, `NULL` as unclassified).
   - Strictly excludes all credit accounts.
   - Converts non-reporting currencies using Reference FX.
-- Category Management UI: Add and edit category `description`.
+- Category Management UI:
+  - Displays fixed 14 Product v1 Expense categories and allows editing `description`.
+  - Disallows create, rename, or deactivation of expense categories.
+  - Maintains Income category management.
 - Asset Capture Review / Confirmation UI:
   - Review draft asset captures in `needs_confirmation`.
-  - Resolve unmapped observations or correct OCR errors via `PATCH /api/v1/ingestion-requests/{id}/draft`.
-  - Confirm via bodyless `POST /api/v1/ingestion-requests/{id}/confirm` or reject via `POST /reject`.
+  - Resolve unmapped observations or correct OCR errors via `PATCH /api/v1/ingestion-requests/{id}/draft` (prevents selecting credit accounts).
+  - Confirm via `POST /api/v1/ingestion-requests/{id}/confirm` (no request body required) or reject via `POST /reject`.
 
 ### 18.5.5 Phase 12.5E — Dedicated iOS Asset Capture Shortcut
 - Dedicated `ios-shortcut-asset-1.0` Shortcut (distinct from Expense Shortcut).

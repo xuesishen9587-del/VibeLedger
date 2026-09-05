@@ -1634,18 +1634,33 @@ Fields representing aggregate totals (such as "Total Assets", "总资产", "资�
      - Do not fabricate FX rates solely to make the screenshot total reconcile.
      - Skip this aggregate equality auto-check.
      - Continue deterministic validation of individual observations.
+5. **Displayed Credit-Card Liabilities Exclusion**:
+   If an asset-overview screenshot also displays credit-card liabilities, current outstanding, statement balance, available credit, or debt figures:
+   - They **MUST NOT** become `AssetObservation` entries.
+   - They **MUST NOT** participate in displayed asset-total constituent sums or cross-checks.
+   - They **MUST NOT** create ordinary account snapshots.
+   - They remain strictly under the existing dedicated Credit Card Snapshot / Statement reconciliation domain.
 
 ### 31.2.3 Account Resolution & Ambiguity Guards
 
-1. Matches candidate accounts by canonical `name` and active `AccountAlias`.
-2. **Generic Aliases Guard**: Generic aliases such as "活期", "定期", "理财" are ambiguous globally across different institutions. In the presence of multiple active candidates, generic aliases alone **MUST NOT** resolve deterministically without conclusive full-screen context verified by backend.
-3. Backend validates:
+1. **Candidate Scope Isolation**:
+   - Gemini extraction prompt receives ONLY active canonical asset accounts for the household whose `account_type IN ('cash', 'savings', 'investment')`.
+   - **Credit accounts (`credit`) MUST NOT be supplied as candidate accounts to Asset Capture extraction.**
+2. Matches candidate accounts by canonical `name` and active `AccountAlias`.
+3. **Eligible Account Types Only**:
+   - Canonical match must belong to `account_type IN ('cash', 'savings', 'investment')`.
+   - If any observation in the draft maps to a `credit` account, backend validation MUST reject it:
+     - Sets `failure_code = 'ASSET_ACCOUNT_TYPE_INVALID'`.
+     - Forces the overall ingestion request into `status = 'needs_confirmation'`.
+     - Zero financial facts are committed.
+4. **Generic Aliases Guard**: Generic aliases such as "活期", "定期", "理财" are ambiguous globally across different institutions. In the presence of multiple active candidates, generic aliases alone **MUST NOT** resolve deterministically without conclusive full-screen context verified by backend.
+5. Backend validates:
    - Account exists and is `active`.
    - Belongs to the authenticated household.
    - Unique canonical resolution.
    - Currency matches account definition.
-4. Any ambiguity or unresolved observation forces the workflow into `needs_confirmation`.
-5. AI MUST NOT create new accounts.
+6. Any ambiguity, invalid account type, or unresolved observation forces the workflow into `needs_confirmation`.
+7. AI MUST NOT create new accounts.
 
 ### 31.2.4 Multi-Account Atomicity & Workflow Isolation
 
@@ -1662,9 +1677,9 @@ Key structural and status invariants:
    - `needs_review` = `reconciliation_batches.status` only.
    - A reconciliation batch NEVER takes `needs_confirmation` status.
 3. **Unconfirmed State (needs_confirmation)**:
-   - When account resolution is ambiguous, aggregate total check fails (`ASSET_TOTAL_MISMATCH`), or ordinary account residuals exceed threshold, the overall `ingestion_request.status` becomes `needs_confirmation`.
+   - When account resolution is ambiguous, aggregate total check fails (`ASSET_TOTAL_MISMATCH`), account type is invalid (`ASSET_ACCOUNT_TYPE_INVALID`), or ordinary account residuals exceed threshold, the overall `ingestion_request.status` becomes `needs_confirmation`.
    - **Zero Financial Facts Committed**: No account snapshots, adjustment transactions, investment P&L periods, or `account_state` ledger balance changes are committed while in this status.
-   - Dashboard corrects unmapped observations or misrecognized values via `PATCH /api/v1/ingestion-requests/{id}/draft` (`observations: [{account_id, observed_balance, currency}]`), then calls bodyless `POST /api/v1/ingestion-requests/{id}/confirm` (or `POST /reject`).
+   - Dashboard corrects unmapped observations or misrecognized values via `PATCH /api/v1/ingestion-requests/{id}/draft` (`observations: [{account_id, observed_balance, currency}]`), then calls `POST /api/v1/ingestion-requests/{id}/confirm` (no request body required; `{}` tolerated) or `POST /reject`.
 4. **ALL OR NOTHING Atomic Commit**:
    - At final confirm (or high-confidence auto-commit):
      - Resolve all accounts and validate all observations.

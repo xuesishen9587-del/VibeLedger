@@ -385,11 +385,39 @@ expense
 income
 ```
 
-规则：
-- 允许 Dashboard 自定义。
-- `description`（分类描述）：保存语义分类指引与业务边界（例如：明确指出所有涉及孩子的医疗、教育、衣物等消费，均统一归入 Child 分类，而非普通的 Health 或 Education）。
-- **严禁引入 `priority`（优先级）字段**，分类边界完全通过 `name` 与 `description` 的语义策略表达。
-- Gemini 消费记账提取时，必须同时接收活跃分类的 `name` 与 `description`。
+### 3.3.1 Product v1 标准支出分类（Canonical Expense Categories）
+
+Product v1 支出分类体系严格固定为以下 14 个标准分类，其语义规则由 `description` 承载：
+
+1. **Grocery**：超市采购、日常日用品、米面粮油水果等。
+2. **Dine**：外食、外卖、咖啡、奶茶、零食等即时餐饮消费。
+3. **Child**：孩子的一切费用，包括母婴、玩具、育儿嫂、儿童医疗、儿童教育等。只要消费主体明确是孩子，即使同时具有 Health / Education / Clothing 等属性，也归入 Child。
+4. **Home & Utilities**：房租房贷、物业、水电暖网、大件家电、快递费、家庭维修等维持家庭运转的支出。
+5. **Digital & Gadgets**：手机、电脑、耳机、充电线及其他数码 3C 产品。
+6. **Clothing**：成人衣物、鞋帽、配饰。
+7. **Beauty**：成人护肤、化妆、洗护、剪发、美发等皮肤和头发管理。
+8. **Transportation**：打车、地铁、公共交通、加油、停车、车辆保养、通行费等。
+9. **Health**：成人药品、看病、体检、商业医疗保险。
+10. **Education**：成人自我提升，包括书籍、培训、大模型及软件订阅费。
+11. **Gift & Socials**：人情往来、送礼、红包、宴请、聚会、孝敬父母的现金红包。
+12. **Parents**：专为父母老人购买的特定物品或直接开销，不含现金红包。
+13. **Fun & Games**：日常娱乐，包括游戏充值、电影、按摩、游乐园等。
+14. **Trips & Occasions**：旅游度假、结婚纪念日等非日常特定重大支出。
+
+### 3.3.2 分类规则约束与不变式
+
+- **支出分类固定性（Expense Categories Fixed）**：
+  - Product v1 不支持任意新增支出分类；
+  - 不支持重命名标准支出分类；
+  - 不支持通过常规用户操作停用或删除标准支出分类。
+  - Dashboard 仅可展示或维护其 `description`（语义说明），标准名称严格固定。
+- **语义描述机制（Category.description）**：
+  - 标准分类的语义描述由数据库迁移或系统初始化脚本（Bootstrap）配置入库，绝不在 Gemini Prompt 中硬编码。
+  - Gemini 消费记账提取时，必须同时接收 14 个活跃支出分类的 `name` 与 `description`。
+- **严禁引入 `priority`（优先级）字段**：
+  - 分类边界完全通过 `name` 与 `description` 的语义规则覆盖（如 Child 覆盖儿童相关的一切衣食住行教育医疗）。
+- **收入分类（Income Categories）**：
+  - 收入分类独立于上述 14 支出分类约束，维持既有的自定义与管理能力。
 
 ---
 
@@ -1084,20 +1112,27 @@ Deterministic validation & aggregate cross-check
         ↓
     Dashboard edits draft (PATCH /api/v1/ingestion-requests/{id}/draft)
         ↓
-    Dashboard confirms (POST /api/v1/ingestion-requests/{id}/confirm with body {})
+    Dashboard confirms (POST /api/v1/ingestion-requests/{id}/confirm; no body required)
         ↓
     Atomic commit of all accounts only after confirmation
 ```
 
 ### 15.5.1 核心规则与不变式
 
-1. **多账户单图提取（Multi-Account in One Image）**：
-   - 接口不强制要求 `account_id`。
-   - 单张截屏允许同时识别同一金融机构或平台下的多个账户余额（如：活期存款、定期存款、理财产品）。
-   - 示例：一张农业银行截图显示活期 25,391.20 CNY、定期 200,000.00 CNY、理财 130,458.11 CNY、总资产 355,849.31 CNY。系统分别解析为 `ABC_Debit`、`ABC_Term`、`ABC_Wealth` 三笔独立观测。
-2. **汇总总额防重与精确量化核对规则（Aggregate Total Exact Comparison）**：
+1. **多账户单图提取与资产账户边界（Asset Account Scope Boundary）**：
+   - `POST /api/v1/asset-captures` 是纯**资产观测工作流**。
+   - **合格账户类型（Eligible Account Types）**：严格限定为 `cash`、`savings`、`investment`。
+   - **不合格账户类型（Ineligible Account Types）**：**`credit`（负债账户）绝对不属于资产捕获范畴**。
+   - 接口不强制要求 `account_id`。单张截屏允许同时识别同一金融机构或平台下的多个资产账户余额（如：活期存款、定期存款、理财产品）。
+   - 示例：一张农业银行截图显示活期 25,391.20 CNY、定期 200,000.00 CNY、理财 130,458.11 CNY、总资产 355,849.31 CNY。系统分别解析为 `ABC_Debit`、`ABC_Term`、`ABC_Wealth` 三笔独立资产观测。
+2. **汇总总额防重、精确量化核对与截屏负债排除规则（Aggregate Total & Liability Exclusion）**：
    - 截屏中出现的“总资产”、“资产合计”、“总市值”、“Total Assets”、“Asset Total”等总计字段，**仅作为交叉校验数据（cross-check data）**。
    - **汇总项绝不得生成独立的 Account Snapshot**，彻底杜绝与分项重复计入。
+   - **截屏负债排除规则**：若资产概览截屏中同时显示了信用卡负债、信用卡欠款、已出账单、可用额度等：
+     - 这些数值**绝对不得转化为 AssetObservation**；
+     - **绝对不得参与资产总额分项求和校验**；
+     - **绝对不得生成普通账户快照**；
+     - 它们继续属于既有的信用卡快照（Credit Card Snapshot）与账单对账（Statement Reconciliation）领域。
    - **同币种精确量化校验**：
      1. 将各分项观测金额与截屏显示的汇总金额（`displayed_total`）按照货币小单位（如 CNY/USD 2 位小数，JPY 0 位小数）进行精确量化（Quantize）。
      2. 计算量化后的分项观测金额之和。
@@ -1106,10 +1141,12 @@ Deterministic validation & aggregate cross-check
    - **异币种或无共同比较基准**：
      - 严禁为了凑齐截屏总额而捏造或估算 FX 汇率。
      - 跳过此项总额严格等式自检，继续执行针对各独立分项观测的确定性验证。
-3. **确定性账户映射（Account Resolution）**：
-   - Gemini 接收活跃账户的名称、`account_type`、币种及别名列表，利用整屏上下文（如银行 App 标题）识别账户。
-   - 通用泛指别名（如“活期”、“定期”）在存在多个活跃账户候选时，绝不足以作为唯一确定映射。
-   - 后端执行严格确定性验证（账户存在、active、同家庭、唯一映射、币种匹配），若无法唯一确定则转入 `needs_confirmation`。Gemini 绝不能新建账户。
+3. **确定性账户映射与候选账户隔离（Candidate Isolation & Account Resolution）**：
+   - **候选账户隔离**：Gemini 资产提取提示词中，**仅接收家庭活跃且属于 `cash` / `savings` / `investment` 的账户列表**（名称、`account_type`、币种及别名）。**严禁向 Gemini 提供 `credit` 账户**。
+   - **通用别名防歧义**：通用泛指别名（如“活期”、“定期”）在存在多个活跃账户候选时，绝不足以作为唯一确定映射。
+   - **后端确定性校验**：后端执行严格确定性验证（账户存在、active、同家庭、唯一映射、币种匹配，且 `account_type IN ('cash', 'savings', 'investment')`）。
+   - **误映射信用账户阻断**：若任何观测项被错误映射至 `credit` 账户，后端直接判定非法：标记 `failure_code = 'ASSET_ACCOUNT_TYPE_INVALID'`，整体转入 `needs_confirmation`，绝不提交任何财务事实。
+   - 若无法唯一确定则转入 `needs_confirmation`。Gemini 绝不能新建账户。
 4. **持久化与核算语义（Persistence & Accounting Semantics）**：
    - 资产截屏绝不直接强改 `account_state`。
    - 标准流水线：`screenshot -> AI observations -> canonical resolution -> authoritative snapshots -> reconciliation / investment valuation -> account_state`。
@@ -1120,8 +1157,9 @@ Deterministic validation & aggregate cross-check
      $$\mathbf{1\text{ ingestion\_request}} + \mathbf{0..N\text{ account-scoped reconciliation\_batches}}$$
    - 每个 `reconciliation_batch` 严格对应单一账户（`account_id NOT NULL`），并通过 `source_request_id` 关联至本次 `ingestion_request`。
    - **严禁引入父对账批次表、`asset_capture_batches` 表或账户层级关系**。`ingestion_request` 是多账户截屏捕获的唯一工作流与分组边界。
-   - **待确认状态**：若存在映射歧义或总额不符，整体 `ingestion_requests.status = 'needs_confirmation'`。此时**绝不部分提交任何财务事实**，所有快照、对账调整、投资损益及 `account_state` 均保持未提交。
-   - **修正流程**：Dashboard 调用多态草稿修正接口 `PATCH /api/v1/ingestion-requests/{id}/draft`（传入 `observations: [{account_id, observed_balance, currency}]`）修正未匹配账户或金额，随后调用无 Body 的确认接口 `POST /api/v1/ingestion-requests/{id}/confirm`。
+   - **待确认状态**：若存在映射歧义、总额不符或非法账户类型，整体 `ingestion_requests.status = 'needs_confirmation'`。此时**绝不部分提交任何财务事实**，所有快照、对账调整、投资损益及 `account_state` 均保持未提交。
+   - **修正流程**：Dashboard 调用多态草稿修正接口 `PATCH /api/v1/ingestion-requests/{id}/draft`（传入 `observations: [{account_id, observed_balance, currency}]`）修正未匹配账户或金额，随后调用确认接口 `POST /api/v1/ingestion-requests/{id}/confirm`。
+   - **确认接口无 Body（NONE REQUIRED）**：`POST /api/v1/ingestion-requests/{id}/confirm` **无需请求体（Request body: NONE REQUIRED）**；客户端发送空 JSON 对象 `{}` 仅作兼容容忍，绝非强制要求。
    - **原子提交（ALL OR NOTHING）**：
      - 确认或高置信自动提交时，先将涉及的所有 canonical `account_id` 按 UUID 升序排序，严格按序锁定 `account_state` 行（`FOR UPDATE`），杜绝死锁。
      - 在单一数据库事务内完成所有 Snapshot、各账户对账调整与投资损益写入。

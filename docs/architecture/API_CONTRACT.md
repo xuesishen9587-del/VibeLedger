@@ -611,11 +611,11 @@ Authorization: Bearer <device-token>
 
 Request:
 
-```json
-{}
+```http
+(No request body required)
 ```
 
-The confirmation request body remains strictly bodyless (`{}`). The backend dispatches confirmation behavior polymorphically by `ingestion_request.request_kind`:
+Request body: **NONE REQUIRED**. The iPhone Shortcut sends `POST /confirm` without a body, and the backend requires no body parameter. An empty JSON object `{}` MAY be tolerated for backward compatibility, but MUST NOT be required. The backend dispatches confirmation behavior polymorphically by `ingestion_request.request_kind`:
 
 ### Case A: `request_kind = 'expense'`
 Backend:
@@ -927,7 +927,7 @@ class AssetCaptureExtractionTransport(BaseModel):
 ```
 
 AI Invariants:
-- Gemini prompt receives all active canonical accounts for the household (name, `account_type`, currency, active aliases).
+- Gemini prompt receives ONLY active canonical **asset** accounts for the household whose `account_type IN ('cash', 'savings', 'investment')` (name, `account_type`, currency, active aliases). **Credit accounts (`credit`) MUST NOT be supplied as candidate accounts to Asset Capture extraction.**
 - Gemini may use whole-screen context (e.g. "中国农业银行" logo/header + "活期储蓄" / "定期存款" / "理财产品" sections) to map observations.
 - Gemini MUST NOT create new accounts.
 - Backend performs deterministic validation and reconciliation after AI extraction.
@@ -952,19 +952,32 @@ Fields representing aggregate totals (such as "Total Assets", "总资产", "资�
      - Do not fabricate FX rates solely to make the screenshot total reconcile.
      - Skip this aggregate equality auto-check.
      - Continue deterministic validation of individual observations.
+5. **Displayed Credit-Card Liabilities Exclusion**:
+   If an asset-overview screenshot also displays credit-card liabilities, current outstanding, statement balance, available credit, or debt figures:
+   - They **MUST NOT** become `AssetObservation` entries.
+   - They **MUST NOT** participate in displayed asset-total constituent sums or cross-checks.
+   - They **MUST NOT** create ordinary account snapshots.
+   - They remain under the existing dedicated Credit Card Snapshot / Statement reconciliation domain.
 
 ---
 
 ### Account Resolution & Deterministic Validation
 
 1. Canonical mapping relies on canonical `Account` name and `AccountAlias`.
-2. **Generic Aliases Guard**: Generic aliases such as "活期", "定期", "理财" are ambiguous globally across different institutions. In the presence of multiple active candidates, generic aliases alone **MUST NOT** resolve deterministically without conclusive full-screen context verified by backend.
-3. Backend validation checks:
+2. **Eligible Account Types Only**:
+   - Canonical match must belong to `account_type IN ('cash', 'savings', 'investment')`.
+   - **`credit` accounts are strictly ineligible for Asset Capture.**
+   - If any observation in the draft maps to a `credit` account, backend validation MUST reject it:
+     - Sets `failure_code = 'ASSET_ACCOUNT_TYPE_INVALID'`.
+     - Forces the overall ingestion request into `status = 'needs_confirmation'`.
+     - Zero financial facts are committed.
+3. **Generic Aliases Guard**: Generic aliases such as "活期", "定期", "理财" are ambiguous globally across different institutions. In the presence of multiple active candidates, generic aliases alone **MUST NOT** resolve deterministically without conclusive full-screen context verified by backend.
+4. Backend validation checks:
    - Account exists and is `active`.
    - Belongs to the authenticated household.
    - Unique canonical match.
    - Currency matches the account's defined currency.
-4. Any ambiguity or unresolved observation forces `status = 'needs_confirmation'`.
+5. Any ambiguity or unresolved observation forces `status = 'needs_confirmation'`.
 
 ---
 
@@ -990,7 +1003,7 @@ Fields representing aggregate totals (such as "Total Assets", "总资产", "资�
    - When an Asset Capture requires confirmation:
      - `ingestion_request.status = 'needs_confirmation'`.
      - Zero financial facts are partially committed: account snapshots, adjustment transactions, investment P&L, and `account_state` effects remain uncommitted.
-     - Dashboard edits the ingestion draft via `PATCH /api/v1/ingestion-requests/{id}/draft` and confirms via bodyless `POST /api/v1/ingestion-requests/{id}/confirm` or rejects via `POST /api/v1/ingestion-requests/{id}/reject`.
+     - Dashboard edits the ingestion draft via `PATCH /api/v1/ingestion-requests/{id}/draft` and confirms via `POST /api/v1/ingestion-requests/{id}/confirm` (no body required) or rejects via `POST /api/v1/ingestion-requests/{id}/reject`.
 5. **ALL OR NOTHING Atomicity**:
    - At final confirm or high-confidence auto-commit:
      - All affected accounts are validated.
@@ -1106,7 +1119,7 @@ Asset capture requests fully participate in the standard ingestion lifecycle:
 - **Structured Correction**: `PATCH /api/v1/ingestion-requests/{id}/draft`
   - Dashboard submits corrected/approved observation mappings (`observations: [{account_id, observed_balance, currency}]`) to resolve unmapped accounts or correct OCR misrecognitions prior to confirmation.
 - **Confirmation**: `POST /api/v1/ingestion-requests/{id}/confirm`
-  - Request body is strictly bodyless (`{}`).
+  - Request body: **NONE REQUIRED** (an empty JSON object `{}` MAY be tolerated for compatibility, but MUST NOT be required).
   - Backend revalidates the current asset draft, sorts affected canonical `account_id`s in ascending UUID order, locks `account_state` rows (`FOR UPDATE`), and atomically writes snapshots, per-account reconciliation batches, adjustments, and investment P&L in ONE database transaction.
   - Returns the Asset Capture committed response (containing the `results` array, NOT an expense `transaction_id`).
   - Repeated confirmation replays the stored committed response.
@@ -1731,55 +1744,98 @@ Response:
       "id": "uuid-child",
       "name": "Child",
       "category_type": "expense",
-      "description": "所有儿童及子女直接相关开销（包括但不限于医疗、母婴早教、童装等），全部归入本类别，而非普通医疗或教育。",
+      "description": "孩子的一切费用，包括母婴、玩具、育儿嫂、儿童医疗、儿童教育等。只要消费主体明确是孩子，即使同时具有 Health / Education / Clothing 等属性，也归入 Child。",
       "status": "active"
     }
   ]
 }
 ```
 
+### Canonical Product v1 Expense Category Taxonomy
+
+The user-defined Product v1 EXPENSE category taxonomy is strictly fixed to exactly 14 canonical categories:
+
+1. **Grocery**: 超市采购、日常日用品、米面粮油水果等。
+2. **Dine**: 外食、外卖、咖啡、奶茶、零食等即时餐饮消费。
+3. **Child**: 孩子的一切费用，包括母婴、玩具、育儿嫂、儿童医疗、儿童教育等。只要消费主体明确是孩子，即使同时具有 Health / Education / Clothing 等属性，也归入 Child。
+4. **Home & Utilities**: 房租房贷、物业、水电暖网、大件家电、快递费、家庭维修等维持家庭运转的支出。
+5. **Digital & Gadgets**: 手机、电脑、耳机、充电线及其他数码 3C 产品。
+6. **Clothing**: 成人衣物、鞋帽、配饰。
+7. **Beauty**: 成人护肤、化妆、洗护、剪发、美发等皮肤和头发管理。
+8. **Transportation**: 打车、地铁、公共交通、加油、停车、车辆保养、通行费等。
+9. **Health**: 成人药品、看病、体检、商业医疗保险。
+10. **Education**: 成人自我提升，包括书籍、培训、大模型及软件订阅费。
+11. **Gift & Socials**: 人情往来、送礼、红包、宴请、聚会、孝敬父母的现金红包。
+12. **Parents**: 专为父母老人购买的特定物品或直接开销，不含现金红包。
+13. **Fun & Games**: 日常娱乐，包括游戏充值、电影、按摩、游乐园等。
+14. **Trips & Occasions**: 旅游度假、结婚纪念日等非日常特定重大支出。
+
 ---
 
-## 18.2 Create category
+## 18.2 Category Management & Invariants
+
+### A. Product v1 Expense Category Invariants
+- **Fixed Taxonomy**:
+  - Arbitrary creation of new EXPENSE categories is **NOT supported** in Product v1.
+  - Renaming canonical EXPENSE categories is **NOT supported**.
+  - Deleting or deactivating canonical EXPENSE categories is **NOT supported** through normal Dashboard user workflow.
+  - If a client attempts to create, rename, or deactivate a canonical expense category, the backend rejects the request:
+    ```json
+    {
+      "error": {
+        "code": "CANONICAL_EXPENSE_CATEGORY_IMMUTABLE",
+        "message": "Canonical expense categories cannot be created, renamed, or deactivated in Product v1.",
+        "retryable": false,
+        "details": {}
+      }
+    }
+    ```
+- **Semantic Classification Policy (`Category.description`)**:
+  - The 14 canonical descriptions above are seeded and configured by database migration or bootstrap, **NOT hard-coded in the Gemini prompt**.
+  - Gemini expense classification prompt dynamically receives active category `name` + `description` pairs.
+  - **Do NOT add `priority`**: Priority columns or properties are strictly prohibited. Classification decisions are driven purely by explicit semantic descriptions (e.g. Child category rule overrides Health/Education for child-related expenses).
+- **Dashboard Maintenance**:
+  - Dashboard displays canonical expense category names and descriptions.
+  - Dashboard may allow editing category `description` via `PATCH /api/v1/categories/{category_id}`, but canonical names remain immutable.
+
+### B. Income Category Management
+Income category behavior is outside these expense-specific restrictions:
+- Income categories continue to support creation, renaming, and deactivation as user-defined custom categories:
 
 ```http
 POST /api/v1/categories
 ```
 
+Request (Income only):
+
+```json
+{
+  "name": "Salary",
+  "type": "income",
+  "description": "主业工资收入"
+}
+```
+
+---
+
+## 18.3 Update Category Description
+
+```http
+PATCH /api/v1/categories/{category_id}
+```
+
 Request:
 
 ```json
 {
-  "name": "Child",
-  "type": "expense",
-  "description": "所有儿童及子女直接相关开销（包括医疗、母婴、教育等）优先归入本类别。"
+  "description": "孩子的一切费用，包括母婴、玩具、育儿嫂、儿童医疗、儿童教育等。"
 }
 ```
 
 Rules:
-- `description` (nullable TEXT): Contains the semantic classification policy for this category.
-- Gemini expense classification receives active category `name` + `description`.
-- **Do NOT add `priority`**: Priority is not supported. Classification decisions are driven purely by explicit semantic descriptions.
-
----
-
-## 18.3 Update / deactivate
-
-```http
-PATCH /api/v1/categories/{category_id}
-POST  /api/v1/categories/{category_id}/deactivate
-```
-
-Request:
-
-```json
-{
-  "description": "更新后的孩子专属开销语义说明",
-  "status": "active"
-}
-```
-
-No hard deletion if referenced by history.
+- For Expense categories: only `description` may be updated. Attempting to change `name` or `type` is rejected (`CANONICAL_EXPENSE_CATEGORY_IMMUTABLE`).
+- For Income categories: `name` and `description` may be updated.
+- No hard deletion is permitted if a category is referenced by historical transactions.
 
 ---
 

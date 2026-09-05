@@ -390,7 +390,12 @@ Do not enforce global alias uniqueness. Ambiguous aliases are valid and must cau
 | `created_at` | TIMESTAMPTZ | NOT NULL default now() |
 | `updated_at` | TIMESTAMPTZ | NOT NULL default now() |
 
-> Note: `description` provides semantic classification guidelines for AI (e.g. child spending policy). No `priority` column is added.
+> [!NOTE]
+> **Product v1 Expense Category Taxonomy**:
+> Product v1 freezes exactly 14 canonical active Expense categories (`Grocery`, `Dine`, `Child`, `Home & Utilities`, `Digital & Gadgets`, `Clothing`, `Beauty`, `Transportation`, `Health`, `Education`, `Gift & Socials`, `Parents`, `Fun & Games`, `Trips & Occasions`), initialized and seeded via migration or bootstrap with canonical descriptions.
+> Arbitrary creation, renaming, or deactivation of Expense categories is not supported in Product v1.
+> `description` provides semantic classification guidelines for AI (e.g. child spending policy). No `priority` column is added.
+> Income categories remain customizable.
 
 ```sql
 CHECK (category_type IN ('expense', 'income'));

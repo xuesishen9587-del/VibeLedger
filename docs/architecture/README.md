@@ -114,9 +114,9 @@ The canonical match statuses on `statement_lines` are:
 - **`expense`**: Single-expense receipt/payment capture from iPhone Shortcut or Dashboard.
 - **`transfer`**: Two-legged internal transfer capture.
 - **`snapshot`**: Single-account manual or Dashboard balance observation.
-- **`asset_capture`**: Dedicated multi-account asset overview capture from a single banking or investment screenshot (`POST /api/v1/asset-captures`). Strictly separated from single expense capture; commits all observed account snapshots atomically or rolls back completely.
+- **`asset_capture`**: Dedicated multi-account asset overview capture from a single banking or investment screenshot (`POST /api/v1/asset-captures`). Strictly restricted to ASSET accounts (`cash`, `savings`, `investment`); credit accounts are excluded from candidate accounts and rejected by deterministic validation (`ASSET_ACCOUNT_TYPE_INVALID`). Displayed credit-card liabilities are ignored. Confirmed via bodyless `POST /confirm` (empty object `{}` tolerated). Commits all observed account snapshots atomically or rolls back completely.
 
 ### 3.11 Account Types & Risk Allocation
 - **`account_type`**: Exactly `cash`, `savings`, `credit`, `investment`. A single financial institution or platform is modeled as multiple independent canonical Accounts. The `institution` entity, `asset_class`, `liquidity_level`, and account hierarchies are strictly out of scope.
 - **`risk_level`**: User-configured metadata (`very_low`, `low`, `medium`, `high`, `NULL`). Used for Dashboard household wealth risk distribution. Credit accounts MUST have `risk_level = NULL` and are excluded from risk distribution. Asset accounts with `NULL` risk level are displayed as "unclassified" (未分类).
-- **Category `description`**: Semantic classification policy passed to Gemini. Category `priority` is prohibited.
+- **Canonical Expense Categories & Category `description`**: Product v1 defines exactly 14 canonical active Expense categories whose names are immutable (`CANONICAL_EXPENSE_CATEGORY_IMMUTABLE`). Category `description` carries semantic classification rules (e.g. `Child` override semantics) passed to Gemini. Category `priority` is prohibited. Income categories remain fully customizable.

@@ -834,11 +834,49 @@ no account balance change
 
 ## Confirm
 
-Expected:
-
+Test A (Empty Body / No Body):
 ```text
+POST /api/v1/ingestion-requests/{id}/confirm without a request body (Content-Length: 0) on expense draft
+Expected:
 transaction created once
 request -> committed
+```
+
+Test B (Empty JSON Object `{}` Body):
+```text
+POST /api/v1/ingestion-requests/{id}/confirm with body {} on expense draft
+Expected:
+transaction created once
+request -> committed
+```
+
+Test C (Replay Idempotency):
+```text
+second POST /api/v1/ingestion-requests/{id}/confirm (no body or {})
+Expected:
+200 OK replaying stored response_payload
+no duplicate transaction created
+```
+
+---
+
+## Expense Category Gemini Prompt Injection
+
+Test A (14 Canonical Categories Injected with Descriptions):
+```text
+Verify Gemini Expense extraction prompt receives all 14 active canonical expense category names along with their persisted descriptions from categories table:
+  Grocery, Dine, Child, Home & Utilities, Digital & Gadgets, Clothing, Beauty,
+  Transportation, Health, Education, Gift & Socials, Parents, Fun & Games, Trips & Occasions
+Verify income categories are NOT injected into expense prompt
+```
+
+Test B (Child Semantic Rule without Priority Column):
+```text
+Mock receipt text: "儿科门诊挂号与儿童感冒药 120元" or "儿童绘本 45元"
+Child description specifies: "只要消费主体明确是孩子，即使同时具有 Health / Education / Clothing 等属性，也归入 Child"
+Expected:
+Gemini classifies category as "Child"
+Verify categories table schema has NO priority column (semantic rule handled via prompt description)
 ```
 
 ---
@@ -881,6 +919,47 @@ contain no dynamic Dict[str, ...] fields
 generate no additionalProperties in JSON schema
 pass google.genai._transformers.t_schema validation
 strictly adhere to Gemini Developer API constraints
+```
+
+## Candidate Scope Isolation (Credit Account Exclusion from Gemini Context)
+Test A (Gemini Candidate Account List Excludes Credit Accounts):
+```text
+Household accounts:
+  ABC_Debit (account_type: cash)
+  CMB_Savings (account_type: savings)
+  ABC_Wealth (account_type: investment)
+  CMB_Visa (account_type: credit)
+When preparing Gemini Asset Capture prompt context:
+Candidate account list passed to Gemini MUST include ONLY: ABC_Debit, CMB_Savings, ABC_Wealth
+CMB_Visa (credit) MUST NOT be supplied in candidate list
+```
+
+## Deterministic Validation Rejection of Credit Account (`ASSET_ACCOUNT_TYPE_INVALID`)
+Test:
+```text
+Client submits or Gemini extracts an observation mapped to account_id with account_type = 'credit':
+Expected:
+deterministic backend validation rejects mapping with failure_code = 'ASSET_ACCOUNT_TYPE_INVALID'
+ingestion_request.status = needs_confirmation
+0 account_snapshots created across any accounts
+0 reconciliation_batches created
+0 ledger rows / balance mutations
+account_id cleared or marked invalid in stored draft
+```
+
+## Displayed Credit Liability Ignored in Screenshot Recognition
+Test:
+```text
+Mock banking app summary screenshot displaying:
+  活期存款 25,391.20 CNY
+  理财产品 130,458.11 CNY
+  信用卡待还 5,200.00 CNY
+  资产总额 155,849.31 CNY
+Expected:
+Gemini prompt instructs extractor to capture ASSET accounts only and ignore credit-card liabilities/available credit
+No AssetObservation generated for "信用卡待还 5,200.00 CNY"
+Displayed total cross-check compares 25,391.20 + 130,458.11 = 155,849.31 CNY -> exact match passes
+Credit card liabilities remain strictly under dedicated credit-card statement/snapshot reconciliation domain
 ```
 
 ## High-Confidence Multi-Account Asset Capture
@@ -978,16 +1057,16 @@ status remains needs_confirmation until confirm endpoint is called
 
 Test B (Invalid Draft Patch Rejected):
 ```text
-PATCH with non-existent account_id, inactive account, account from another household, currency mismatch, or duplicate account_id
+PATCH with non-existent account_id, inactive account, account from another household, currency mismatch, duplicate account_id, or account_type = 'credit' (ASSET_ACCOUNT_TYPE_INVALID)
 Expected:
 400/422 validation error
 draft not mutated
 ```
 
 ## Bodyless Asset Capture Confirm (`POST /api/v1/ingestion-requests/{id}/confirm`)
-Test A (Confirm Patched Draft):
+Test A (Confirm Patched Draft - No Body and Empty Object `{}` Body):
 ```text
-POST /api/v1/ingestion-requests/{id}/confirm with body {}
+POST /api/v1/ingestion-requests/{id}/confirm without body (Content-Length: 0) OR with body {}
 Expected:
 revalidates complete current draft
 locks account_state rows in ascending UUID order
@@ -1004,7 +1083,7 @@ returns Asset Capture response (results array with account details, NOT expense 
 
 Test B (Repeated Confirm Idempotency Replay):
 ```text
-second POST /api/v1/ingestion-requests/{id}/confirm with body {} on committed asset capture
+second POST /api/v1/ingestion-requests/{id}/confirm (no body or {}) on committed asset capture
 Expected:
 200 OK replaying stored response_payload
 no duplicate snapshots, no duplicate reconciliation batches, no duplicate adjustments
@@ -1012,7 +1091,7 @@ no duplicate snapshots, no duplicate reconciliation batches, no duplicate adjust
 
 Test C (Expense Confirm Unchanged):
 ```text
-POST /api/v1/ingestion-requests/{id}/confirm with body {} on expense draft
+POST /api/v1/ingestion-requests/{id}/confirm without body or with body {} on expense draft
 Expected:
 commits single transaction/installment
 returns expense response with transaction_id (expense workflow completely undisturbed)
@@ -1112,10 +1191,33 @@ cannot change currency after financial history
 
 Categories:
 
+Canonical 14 Expense Categories & Immutability:
+
 ```text
-create
-rename
-deactivate
+Verify 14 canonical active Expense categories seeded via migration/bootstrap:
+  Grocery, Dine, Child, Home & Utilities, Digital & Gadgets, Clothing, Beauty,
+  Transportation, Health, Education, Gift & Socials, Parents, Fun & Games, Trips & Occasions
+
+Immutability rules (CANONICAL_EXPENSE_CATEGORY_IMMUTABLE):
+  POST /api/v1/categories with category_type = 'expense' -> 400 Bad Request (CANONICAL_EXPENSE_CATEGORY_IMMUTABLE)
+  PATCH /api/v1/categories/{id} attempting to update name -> 400 Bad Request (CANONICAL_EXPENSE_CATEGORY_IMMUTABLE)
+  PATCH /api/v1/categories/{id} attempting to set is_active = false -> 400 Bad Request (CANONICAL_EXPENSE_CATEGORY_IMMUTABLE)
+
+Description editing (allowed & persisted):
+  PATCH /api/v1/categories/{id} updating description only -> 200 OK
+  GET /api/v1/categories reflects updated description
+  subsequent Gemini prompts receive updated description
+
+Schema invariant:
+  categories table has NO priority column (Child precedence handled purely via description semantics)
+```
+
+Income Categories (Fully Customizable):
+
+```text
+create (POST /api/v1/categories with category_type = 'income' -> 201 Created)
+rename (PATCH /api/v1/categories/{id} -> 200 OK)
+deactivate (PATCH /api/v1/categories/{id} -> 200 OK)
 history remains queryable
 ```
 
@@ -2469,7 +2571,13 @@ Required automated and manual acceptance:
 
 ```text
 Account risk_level validation (credit must have NULL risk_level)
-Category description persistence and prompt injection
+Credit accounts excluded from Asset Capture candidate accounts and Gemini prompt
+Asset Capture draft mapped to credit rejected deterministically with ASSET_ACCOUNT_TYPE_INVALID -> needs_confirmation
+Screenshot credit-card liability displays ignored for Asset Capture observations and aggregate sum cross-check
+Existing credit-card statement/snapshot reconciliation behavior completely unchanged
+Canonical 14 expense categories seeded with fixed names; arbitrary create/rename/deactivate rejected (CANONICAL_EXPENSE_CATEGORY_IMMUTABLE)
+Category description persistence, mutability via Dashboard, and prompt injection
+No category priority column exists; Child semantic override handled purely via description
 Migration 0010 execution (ALTER TABLE accounts DROP COLUMN institution) with backend deployment sequencing
 Gemini static transport schema verification (no dynamic dicts, no additionalProperties)
 Multi-account asset capture API (POST /api/v1/asset-captures)
@@ -2477,7 +2585,7 @@ Exact quantized aggregate total cross-check (exact equality pass vs ASSET_TOTAL_
 Generic alias ambiguity guard (unmapped observation forced to needs_confirmation)
 Multi-account atomicity and deterministic locking order (UUID order, ALL OR NOTHING)
 Polymorphic ingestion draft revision (PATCH /api/v1/ingestion-requests/{id}/draft for asset_capture)
-Bodyless ingestion confirmation (POST /api/v1/ingestion-requests/{id}/confirm returns Asset Capture results; repeated replay idempotency)
+Bodyless ingestion confirmation (POST /api/v1/ingestion-requests/{id}/confirm with no body or {} returns Asset Capture results; repeated replay idempotency)
 Dedicated single-account snapshot endpoint (numeric-only, reject image payload)
 Status terminology and workflow isolation (needs_confirmation on requests, needs_review on batches, 1 request + 0..N batches via source_request_id)
 Expense Shortcut and confirmation behavior completely unchanged

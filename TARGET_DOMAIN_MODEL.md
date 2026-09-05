@@ -1,1274 +1,360 @@
-# VibeLedger Target Domain Model
+# VibeLedger: household wealth and spending
+
+Status: **Simplified target, 2026-09-05; implementation pending.** This replaces the
+Phase 12.5 architecture. The existing staging implementation is the starting point.
+Read [the implementation contract](docs/architecture/CONTRACTS.md) and
+[transition and acceptance plan](docs/architecture/IMPLEMENTATION_PLAN.md) next.
+
+## 1. Product promise
 
-> Status: **Frozen Target Domain Model (Final consistency review complete)**
-> Purpose: 作为后续 Codex / Antigravity 架构设计与开发的业务约束。
->
-> 原则：**保持家庭账本准确到“足够可信”，优先降低日常使用摩擦，不构建复杂家庭 ERP。**
+Two household members can see what they own, what they owe, how their investments
+have performed, and where everyday spending goes. Clear expense screenshots are
+recorded without a conversation. Periodic account-overview screenshots or manual
+balance updates keep the wealth picture useful.
+
+The system does not promise a complete bank ledger, live balances, audited cash
+flow, portfolio accounting, or recovery of expenses never captured. Show these
+limits through dates and coverage, rather than filling gaps with invented
+transactions, zero balances, or investment profits.
+
+### The central decision: two independent records
+
+1. **Spending records:** expenses, refunds, and optional income entries.
+2. **Balance observations:** the amount reported for an account at a stated time.
+
+An expense never changes a balance observation. A new balance never creates an
+expense, income, transfer, opening-balance transaction, or balancing adjustment.
+There is no calculated account balance to reconcile. Investment gains are a
+separate calculation between observations with explicitly known capital flows.
+
+```mermaid
+flowchart LR
+    Phone[Expense Shortcut] --> API[FastAPI]
+    UI[Streamlit Dashboard] --> API
+    API --> AI[Gemini: extract proposed facts]
+    AI --> API
+    API --> Spending[Spending records]
+    API --> Balances[Dated account balances]
+    Balances --> Wealth[Assets, debts, net worth and risk]
+    Balances --> Gains[Investment gains with known flows]
+    Spending --> Habits[Spending composition and trends]
+```
+
+Maintaining trustworthy projected balances would require capturing every salary,
+transfer, repayment, fee, refund, settlement and contribution. That obligation is
+absent from the actual product goals. Last reported balances are the smaller model.
+
+## 2. Everyday workflows
 
----
+### A. Capture spending
 
-## 1. Core Principles
+Keep the physically tested experience:
 
-### MUST
-
-- 家庭整体账本，两人可查看全部数据。
-- Account、Transaction、Snapshot、Reconciliation 四类对象必须分离。
-- 普通消费以**实际交易日期**归属月份；Statement posting date 仅用于匹配。
-- Statement 不是强制月度流程，只是高精度 reconciliation 工具。
-- Snapshot、Statement、Dashboard 手工余额均可作为账户权威校准来源。
-- 小额差异允许自动 `reconciliation_adjustment`。
-- 投资市值变化不得计入家庭收入。
-- 内部转账和信用卡还款不得计入收入或消费。
-- 原始币种金额永久保留。
-- 所有修改、删除必须可审计；删除采用 soft delete。
-- PDF 解析成功立即删除；失败最长保留 24h；PDF 密码永不持久化。
-
-### SHOULD
-
-- 高频 Expense Shortcut 保持无额外交互。
-- 一个入口对应一个明确业务意图，不建立万能 AI 分类入口。
-- Transfer / Snapshot 如使用 Shortcut，应为独立专用 Shortcut。
-- Statement 重复上传无需检测 PDF 是否重复，但 reconciliation 必须 replay-safe。
-
-### OUT OF SCOPE — Product v1 / MVP
-
-- AA / 夫妻债权债务。
-- 投资具体持仓、成本、证券交易解析。
-- 信用卡最低还款、逾期、提前结清分期。
-- 精确汇兑损益核算。
-- 历史旧数据迁移。
-- `institution`（金融机构）实体或机构层级模型。
-- `asset_class`、`liquidity_level`、`parent_account_id` 或任何账户父子层级关系。
-- Category `priority`（分类优先级）。
-
----
-
-# 2. Domain Model
-
-## 2.1 Account
-
-表示真实金融账户。
-
-主要类型（`account_type`，严格限定为以下四类）：
-
-- `cash`：可直接用于支付或日常消费的流动资金。包括银行活期存款余额、借记卡活期余额、微信零钱/零钱通直接消费余额、支付宝余额等。
-- `savings`：通常不直接用于日常刷卡/扫码消费的储蓄资金，主要是银行定期存款。
-- `investment`：具有投资、净值波动或理财属性的资产账户。包括银行理财产品、债券基金、股票/指数基金、证券投资账户及其他按市值估值的资产账户。
-- `credit`：负债类账户。包括信用卡账户、花呗等消费信贷负债。
-
-账户建模示例：
-
-- `ABC_Debit` -> `cash`（农行借记卡活期）
-- `ABC_Term` -> `savings`（农行定期存款）
-- `ABC_Wealth` -> `investment`（农行理财产品）
-- `ABC_Cup_Credit` -> `credit`（农行银联信用卡）
-- `Alipay` -> `cash`（支付宝日常余额）
-- `Alipay_BondFund` -> `investment`（支付宝端内持有的债券基金）
-- `Alipay_EquityFund` -> `investment`（支付宝端内持有的股票基金）
-
-现实中的一个金融机构或服务平台（如中国农业银行、支付宝），在领域模型中根据资金属性拆分为多个相互独立的标准化 Account。
-**领域模型中不引入 `institution` 实体，也不在 Account 上保留 `institution` 属性。**
-**不引入 `asset_class`、`liquidity_level`、`parent_account_id` 或任何账户父子层级关系。**
-
-核心属性：
-
-```text
-id
-name
-account_type
-currency
-risk_level           nullable
-owner_user_id        nullable
-status
-billing_day          nullable
-due_day              nullable
-linked_cash_account_id nullable
-created_at
-updated_at
-```
-
-`risk_level`（风险等级）：
-- 允许取值：`very_low`（极低风险）、`low`（低风险）、`medium`（中风险）、`high`（高风险）、`NULL`。
-- 纯用户配置的元数据，用于 Dashboard 家庭整体财富与风险分布展示。
-- **Gemini 严禁推断、设置或修改 `risk_level`。**
-- **负债类账户（`account_type = 'credit'`）的 `risk_level` 必须为 `NULL`**，绝不参与家庭资产风险分布统计。
-- 资产类账户（`cash` / `savings` / `investment`）创建时允许暂不指定风险等级（`risk_level = NULL`），在 Dashboard 风险分布中归入“未分类”（unclassified）。
-
-规则：
-
-- 一个 Account 只对应一个币种。
-- 多币种银行账户拆为多个 Account。
-- Account 可停用，不删除历史。
-- `linked_cash_account_id` 仅作为转账匹配先验，不代表自动发生 transfer。
-
----
-
-## 2.2 Transaction
-
-表示真实发生的资金或经济事件。
-
-`transaction_type`：
-
-```text
-expense
-cash_income
-refund
-transfer
-fee
-reconciliation_adjustment
-opening_balance
-```
-
-投资盈亏不使用 Transaction 表示，见 Snapshot / Investment P&L。
-
-核心字段：
-
-```text
-id
-transaction_type
-occurred_on
-occurred_at            nullable
-posted_on              nullable
-
-from_account_id        nullable
-to_account_id          nullable
-
-original_amount
-original_currency
-
-from_amount            nullable
-from_currency          nullable
-to_amount              nullable
-to_currency            nullable
-effective_fx_rate      nullable
-
-account_leg_status     nullable (estimated / authoritative)
-
-category_id            nullable
-merchant               nullable
-remarks                nullable
-
-source
-status                 (committed / voided)
-confidence             nullable
-
-source_request_id      nullable
-statement_batch_id     nullable
-
-created_at
-updated_at
-deleted_at             nullable
-delete_reason          nullable
-```
-
-### Foreign Currency Credit Card Expense Rule
-
-外币信用卡消费（`original_currency` $\ne$ 账户币种）：
-- **Shortcut 录入时**：永久保留 `original_amount` / `original_currency`；使用参考汇率计算预估扣款金额（`from_amount` / `from_currency`），标记 `account_leg_status = estimated`，并以此预估值更新 `account_state` 负债。
-- **Statement 出账对账时**：对账原子提交时以银行权威结算金额覆盖 `from_amount`，置 `account_leg_status = authoritative`，将结算投影差额（$$\text{projection\_delta} = \text{projection\_effect}(\text{after}) - \text{projection\_effect}(\text{before}) = -68.20 - (-68.90) = +0.70\text{ USD}$$）原子补偿至 `account_state`（使卡内负债从 $-68.90$ 修正为 $-68.20$），记录 `posted_on`，冻结历史 reporting FX，并记录审计日志。
-- **重要约束**：预估仅允许用于外币信用卡消费扣款腿；跨币种内部转账（`transfer`）必须提供双向真实金额，严禁用参考汇率捏造。
-
-### Fee & Category Rules
-
-- **`fee`（手续费）**：独立的 `transaction_type`，属于家庭现金支出，必须关联支出分类（`category_id`），计入家庭总支出。转账手续费作为同一操作下的独立 `fee` 交易，不计入转账本金。
-- **分类规则**：
-  - `expense` $\to$ 必须关联支出分类
-  - `fee` $\to$ 必须关联支出分类
-  - `cash_income` $\to$ 必须关联收入分类
-  - `refund` $\to$ 可继承原消费分类
-  - `transfer` / `opening_balance` / `reconciliation_adjustment` $\to$ 分类必须为 NULL
-
-### Soft Delete & Void Rules
-
-- `status = committed` $\iff$ `deleted_at IS NULL`
-- `status = voided` $\iff$ `deleted_at IS NOT NULL` 且必须提供 `delete_reason`
-- 软删除与作废（void）为同一生命周期操作，原子反向回退 `account_state` 投影并记录不可变审计事件。
-
-### Date Rule
-
-普通消费：
-
-```text
-occurred_on = 实际交易业务日期 (DATE, 必需, 报表归属口径)
-occurred_at = 实际交易精确时间 (TIMESTAMPTZ, 可选)
-posted_on   = Statement/银行入账日期 (DATE, 可选, 仅用于匹配与对账)
-```
-
-报表使用 `occurred_on`。
-
-分期例外：见 Installment。
-
----
-
-## 2.3 Transaction Link
-
-用于表达交易间关系。
-
-```text
-id
-source_transaction_id
-target_transaction_id
-relation_type
-```
-
-`relation_type`：
-
-```text
-refund_of
-reversal_of
-installment_of
-```
-
-退款必须作为独立 `refund` 流水，不删除原消费。
-
----
-
-## 2.4 Account Snapshot
-
-表示某时间点账户的权威状态。
-
-```text
-id
-account_id
-as_of
-balance
-currency
-
-snapshot_type
-source
-
-created_at
-```
-
-`snapshot_type`：
-
-```text
-balance
-investment_valuation
-```
-
-`source`：
-
-```text
-shortcut
-statement
-dashboard_manual
-```
-
-Snapshot 不是 Transaction。
-
----
-
-## 2.5 Credit Card Snapshot
-
-信用卡独立保存账单状态。
-
-```text
-id
-account_id
-as_of
-
-statement_period_start
-statement_period_end
-
-statement_balance
-remaining_statement_due
-unbilled_balance
-current_outstanding
-
-currency
-source
-created_at
-```
-
-三个重要概念必须分离：
-
-```text
-statement_balance
-unbilled_balance
-current_outstanding
-```
-
----
-
-## 2.6 Investment Snapshot
-
-可直接复用 `account_snapshots`，但业务语义如下：
-
-```text
-account_id
-as_of
-total_asset_value
-currency
-```
-
-Product v1 投资 Statement 只解析：
-
-```text
-总资产
-明确入金
-明确出金
-```
-
-不解析：
-
-```text
-具体持仓
-交易数量
-成本
-证券买卖
-```
-
-投资期间收益：
-
-```text
-investment_pnl
-=
-ending_value
-- beginning_value
-- net_contributions
-```
-
-投资 P&L：
-
-- 进入投资收益与净资产曲线；
-- 不进入 `cash_income`；
-- 不进入家庭日常收入。
-
----
-
-# 3. Supporting Tables
-
-## 3.1 Users
-
-```text
-id
-display_name
-default_currency
-created_at
-```
-
-两人均可查看全部家庭数据。
-
----
-
-## 3.2 Devices
-
-```text
-id
-user_id
-device_name
-api_token_hash
-status
-created_at
-last_seen_at
-```
-
-两部 iPhone 使用不同 token。
-
----
-
-## 3.3 Categories
-
-```text
-id
-name
-type
-description          nullable
-status
-```
-
-`type`：
-
-```text
-expense
-income
-```
-
-### 3.3.1 Product v1 标准支出分类（Canonical Expense Categories）
-
-Product v1 支出分类体系严格固定为以下 14 个标准分类，其语义规则由 `description` 承载：
-
-1. **Grocery**：超市采购、日常日用品、米面粮油水果等。
-2. **Dine**：外食、外卖、咖啡、奶茶、零食等即时餐饮消费。
-3. **Child**：孩子的一切费用，包括母婴、玩具、育儿嫂、儿童医疗、儿童教育等。只要消费主体明确是孩子，即使同时具有 Health / Education / Clothing 等属性，也归入 Child。
-4. **Home & Utilities**：房租房贷、物业、水电暖网、大件家电、快递费、家庭维修等维持家庭运转的支出。
-5. **Digital & Gadgets**：手机、电脑、耳机、充电线及其他数码 3C 产品。
-6. **Clothing**：成人衣物、鞋帽、配饰。
-7. **Beauty**：成人护肤、化妆、洗护、剪发、美发等皮肤和头发管理。
-8. **Transportation**：打车、地铁、公共交通、加油、停车、车辆保养、通行费等。
-9. **Health**：成人药品、看病、体检、商业医疗保险。
-10. **Education**：成人自我提升，包括书籍、培训、大模型及软件订阅费。
-11. **Gift & Socials**：人情往来、送礼、红包、宴请、聚会、孝敬父母的现金红包。
-12. **Parents**：专为父母老人购买的特定物品或直接开销，不含现金红包。
-13. **Fun & Games**：日常娱乐，包括游戏充值、电影、按摩、游乐园等。
-14. **Trips & Occasions**：旅游度假、结婚纪念日等非日常特定重大支出。
-
-### 3.3.2 分类规则约束与不变式
-
-- **支出分类固定性（Expense Categories Fixed）**：
-  - Product v1 不支持任意新增支出分类；
-  - 不支持重命名标准支出分类；
-  - 不支持通过常规用户操作停用或删除标准支出分类。
-  - Dashboard 仅可展示或维护其 `description`（语义说明），标准名称严格固定。
-- **语义描述机制（Category.description）**：
-  - 标准分类的语义描述由数据库迁移或系统初始化脚本（Bootstrap）配置入库，绝不在 Gemini Prompt 中硬编码。
-  - Gemini 消费记账提取时，必须同时接收 14 个活跃支出分类的 `name` 与 `description`。
-- **严禁引入 `priority`（优先级）字段**：
-  - 分类边界完全通过 `name` 与 `description` 的语义规则覆盖（如 Child 覆盖儿童相关的一切衣食住行教育医疗）。
-- **收入分类（Income Categories）**：
-  - 收入分类独立于上述 14 支出分类约束，维持既有的自定义与管理能力。
-
----
-
-## 3.4 Account Aliases
-
-用于 AI 和 Statement 匹配。
-
-```text
-id
-account_id
-alias
-```
-
-规则：
-- 账户识别规则不得继续硬编码在 Python Literal 中。
-- **别名全局可能存在重叠/歧义**：同一金融机构名下的不同账户（例如 `ABC_Debit`、`ABC_Term`、`ABC_Wealth`）通常配置有包含机构名称的别名（如“农行”、“农业银行”），以及通用业务别名（如“活期存款”、“定期存款”、“理财产品”）。
-- **通用泛指别名（如“活期”、“定期”、“理财”）在有多个活跃账户匹配时，绝对不足以单独作为确定性账户解析的依据**。
-- AI 可利用整屏上下文（如页面顶部的银行名称 + 区块标题“定期存款”）解析对应账户，但 Backend 必须进行严格确定性校验：账户必须存在、处于 active 状态、属于同一家庭、且具有唯一确定性映射；若匹配存在歧义或无法解析，必须转入 `needs_confirmation`。
-
----
-
-# 4. Statement / Reconciliation Model
-
-## 4.1 Reconciliation Batch
-
-每次 Statement 上传形成一个独立批次。
-
-```text
-id
-account_id
-
-period_start
-period_end
-
-status
-
-authoritative_balance      nullable
-statement_balance          nullable
-current_outstanding        nullable
-unbilled_balance           nullable
-
-matched_count
-created_count
-pending_count
-adjustment_amount
-
-created_at
-committed_at               nullable
-```
-
-`status`：
-
-```text
-processing
-ready
-needs_review
-committed
-rejected
-failed
-```
-
-原 PDF 不保存。
-
----
-
-## 4.2 Statement Line
-
-保存 PDF 解析后的标准化流水，不保存 PDF 本体。
-
-```text
-id
-batch_id
-
-transaction_date
-posted_date
-
-description
-
-amount
-currency
-
-line_type
-match_status
-
-matched_transaction_id nullable
-confidence
-```
-
-`line_type`：
-
-```text
-expense
-income
-transfer
-refund
-fee
-unknown
-```
-
-`match_status`：
-
-```text
-unmatched
-matched
-new_candidate
-ambiguous
-ignored
-```
-
-> 注：`line_type` 的 `income` 仅存在于 Statement 流水解析层；入账生成正式 Transaction 时统一转换为 `cash_income`。
-
----
-
-## 4.3 Reconciliation Candidate
-
-解析期间的候选修改，不立即影响正式账本。
-
-```text
-id
-batch_id
-candidate_type
-payload
-status
-reason
-```
-
-`candidate_type`：
-
-```text
-match
-create_transaction
-create_transfer
-refund
-adjustment
-snapshot
-investment_pnl
-recognize_installment
-```
-
-Statement 必须：
-
-```text
-parse
-→ candidates
-→ reconcile
-→ preview
-→ atomic commit
-```
-
-任何需人工确认项存在时：
-
-```text
-整个 Batch = needs_review
-```
-
-不得部分修改正式账本。
-
----
-
-# 5. Matching Rules
-
-Statement 与已有交易匹配默认：
-
-1. 必须属于同一 Account。
-2. 金额和币种优先精确匹配。
-3. 日期默认允许 ±5 天。
-4. Merchant / Description 使用模糊匹配。
-5. 唯一明确候选可自动匹配。
-6. 多候选必须人工确认。
-7. Statement 明确漏记交易可自动生成 candidate。
-8. 类型不明确则进入待确认。
-
-外币信用卡：
-
-```text
-优先匹配原币金额
-↓
-若只有结算币金额
-↓
-日期 + 商户 + settlement amount 辅助匹配
-```
-
----
-
-# 6. Internal Transfer
-
-内部转账：
-
-```text
-一笔 Transaction
-transaction_type = transfer
-```
-
-同币种：
-
-```text
-from_account
-to_account
-amount
-currency
-```
-
-跨币种：
-
-```text
-from_amount
-from_currency
-
-to_amount
-to_currency
-
-effective_fx_rate
-```
-
-手续费：
-
-```text
-独立 fee Transaction
-```
-
-同一 transfer 同时出现在两个 Statement 时：
-
-```text
-合并为同一 transfer
-```
-
-不得产生两笔收入/支出。
-
-Statement 只有：
-
-```text
-“转账支出 5000”
-```
-
-且无法确定目标账户时：
-
-```text
-创建 candidate
-→ 搜索家庭账户对应流入
-→ 唯一候选自动匹配
-→ 否则 needs_review
-```
-
-禁止 AI 猜测账户。
-
----
-
-# 7. Foreign Currency
-
-永久保存：
-
-```text
-original_amount
-original_currency
-```
-
-当前资产：
-
-```text
-使用 current / T-1 FX
-```
-
-未出账信用卡消费：
-
-```text
-使用 current / T-1 FX 作为临时报表值
-```
-
-Statement 出账后：
-
-```text
-消费历史折算值冻结
-```
-
-后续信用卡还款：
-
-```text
-只是 asset → liability transfer
-```
-
-实际还款汇率不得重新修改历史消费金额。
-
----
-
-# 8. Installment
-
-例如：
-
-```text
-12,000 CNY / 12 months
-```
-
-分期计划建立流程：
-- **统一入口**：Expense Shortcut 仍为统一消费入口，通过 AI 结构化提取识别 `payment_mode`（`one_off` / `installment`）。
-- **字段提取**：对于分期消费，提取 `total_amount`、`currency`、`total_periods`、`merchant`、`from_account`。
-- **初次录入**：创建 `installment_plans` 与各期 `installment_periods` 计划排期表，返回 `installment_plan_id` 与提示摘要（如“12,000 CNY 12期分期计划已建立”）。
-- **零提前记账**：不得在购买当天生成 12 笔正式未来 Transaction，不得立即确认消费支出，不得将全部本金扣减当前账户余额。
-- **按期确认**：首期及后续各期费用在信用卡 Statement 首次出账时，通过 `recognize_installment` 候选在对账提交时确认当期实际 `expense` 流水并计入当期负债与支出。
-- **尾期调整**：最后一期自动承担 rounding remainder。
-
-展示口径：
-
-```text
-本期应还 (statement_balance / remaining_due)
-剩余未出账分期 (unbilled installment schedules)
-current_outstanding (已出账未还 + 未出账已消费)
-```
-
-Product v1 不支持提前还清。
-
----
-
-# 9. Opening Balance
-
-系统使用统一：
-
-```text
-ledger_start_date
-```
-
-之前历史不迁移。
-
-首次账户状态来自：
-
-```text
-Statement
-Snapshot
-Dashboard manual input
-```
-
-生成：
-
-```text
-opening_balance
-```
-
-Opening Balance：
-
-- 不属于收入；
-- 不属于消费；
-- 不属于投资收益。
-
----
-
-# 10. Reconciliation Threshold
-
-普通账户：
-
-```text
-abs(residual in CNY) <= 200
-```
-
-可自动：
-
-```text
-reconciliation_adjustment
-```
-
-该 adjustment：
-
-- 修正余额；
-- 不进入消费统计。
-
-超过：
-
-```text
-200 CNY
-```
-
-必须：
-
-```text
-needs_review
-```
-
-Investment Account：
-
-```text
-禁止套用 ±200 自动 adjustment
-```
-
-投资差额必须区分：
-
-```text
-资金流入/流出
-investment_pnl
-```
-
----
-
-# 11. Workflow Confirmation & Review Rules
-
-系统严格区分 **Ingestion 阶段的确认（`needs_confirmation`）** 与 **Reconciliation 阶段的审核（`needs_review`）**：
-- `needs_confirmation` **仅属于 `ingestion_requests.status`**（客户端/AI 捕获草稿生命周期）；
-- `needs_review` **仅属于 `reconciliation_batches.status`**（对账引擎差异裁决生命周期）。
-- 二者状态绝不混淆：`reconciliation_batches` 不包含 `needs_confirmation` 状态，`ingestion_requests` 亦不包含 `needs_review` 状态。
-
-### 11.1 Ingestion / Shortcut 阶段 MUST `needs_confirmation`
-
-发生在客户端提交消费或多账户资产截图草稿处理期间：
-
-```text
-找不到唯一扣款/资产账户 / 多个账户候选
-金额、币种置信度不足或存在确定性校验冲突
-多账户资产截屏中分项和与显示总额不符（ASSET_TOTAL_MISMATCH）
-分类置信度不足（若需人工确认分类）
-用户在正式提交前发起自然语言修正或 Dashboard 草稿修正
-```
-
-草稿处于 `needs_confirmation` 期间，**绝不生成正式 Transaction / Snapshot，绝不修改账户余额**。
-
-### 11.2 Reconciliation / 对账阶段 MUST `needs_review`
-
-发生在 Statement 对账批次、Snapshot 对账或投资对账计算期间：
-
-```text
-Statement 与已有交易存在多候选匹配 / 候选冲突
-普通账户对账 residual > 200 CNY
-对账流水类型歧义（无法明确区分 refund / cash_income / transfer）
-投资账户对账存在未明确的资金进出（capital movement）
-内部转账对账找不到唯一对方账户
-Statement 权威数据与历史已确认记录冲突
-```
-
-批次处于 `needs_review` 期间，**绝不部分修改正式账本，等待人工裁决后原子提交**。
-
-### 11.3 历史已确认交易变更（Correction）
-
-修改 `verification_status = statement_confirmed` 的历史交易：
-- 严禁直接隐式修改或重用 ingestion requests；
-- 必须通过专用的变更预览（correction preview）与用户显式提交（correction commit）流程；
-- 原子重算并补偿 `account_state` 投影，记录完整的变更前/后不可变审计事件。
-
-### 11.4 自动处理场景
-
-以下情况 MAY 自动提交入账：
-
-```text
-普通消费 Shortcut：唯一账户、金额币种明确、分类明确、校验通过
-Statement 对账：唯一高置信匹配、明确漏记普通消费、普通账户 residual <= 200 CNY
-投资对账：资金进出完全明确且无歧义
-```
-
-交易金额大小本身不触发强制确认。
-
----
-
-# 12. Entry Points
-
-## Expense Shortcut
-
-高频入口。
-
-```text
-Screenshot
-→ Expense-only AI extraction
-→ validation
-→ committed / needs_confirmation
-```
-
-Shortcut 不判断业务类型。
-
-必须支持：
-
-```text
-client-generated idempotency_key
-device token
-captured_at
-client_version
-```
-
----
-
-## Transfer Entry
-
-低频入口。
-
-优先来源：
-
-```text
-Statement
-Dashboard manual / dedicated capture
-```
-
-如未来使用 Shortcut：
-
-```text
-必须为独立 Transfer Shortcut
-```
-
-不得与 Expense Shortcut 混合。
-
----
-
-## Account Snapshot Entry
-
-来源：
-
-```text
-Dashboard
-Dedicated Snapshot Shortcut
-Statement
-```
-
-用于：
-
-```text
-cash balance
-savings balance
-investment valuation
-```
-
----
-
-# 13. Core Flow A — Expense
-
-```text
-Expense Shortcut
-↓
-Generate idempotency_key
-↓
-Screenshot + note
-↓
-POST expense request
-↓
-AI extracts expense fields only
-↓
-Deterministic validation
-↓
-┌─ High confidence + valid
-│      ↓
-│   Create Transaction
-│      ↓
-│   Update calculated account state
-│      ↓
-│   committed
-│
-└─ Ambiguous
-       ↓
-   needs_confirmation
-       ↓
-   User confirm / edit / reject
-       ↓
-   Commit only after approval
-```
-
-Requirements:
-
-- retry with same idempotency key must be no-op;
-- failed response must not create duplicate transaction;
-- low-confidence item must not affect balance before approval.
-
----
-
-# 14. Core Flow B — Reconciliation
-
-```text
-Upload Statement
-or
-Submit Snapshot
-or
-Manual Balance
-↓
-Create Reconciliation Batch
-↓
-Parse authoritative observation
-↓
-Match existing Transactions
-↓
-Generate missing transaction candidates
-↓
-Generate transfer/refund candidates
-↓
-Calculate ledger state
-↓
-Compare authoritative state
-↓
-Residual check
-↓
-┌─ No ambiguity
-│   + residual within rule
-│        ↓
-│    Atomic commit
-│
-└─ Any ambiguity
-         ↓
-     needs_review
-         ↓
-     User resolves
-         ↓
-     Recalculate
-         ↓
-     Atomic commit
-```
-
-Statement PDF：
-
-```text
-parse success → delete immediately
-parse failure → maximum retention 24h
-password → memory only
-```
-
-重复上传同一 Statement：
-
-```text
-重新执行 reconciliation
-```
-
-但已有正式流水必须重新匹配，不得重复补录。
-
----
-
-# 15. Core Flow C — Investment
-
-```text
-Investment Snapshot / Statement
-↓
-Read total asset value
-↓
-Find previous investment snapshot
-↓
-Collect known contributions / withdrawals
-↓
-Calculate:
-
-P&L =
-Ending Value
-- Beginning Value
-- Net Contributions
-↓
-┌─ Contributions known
-│       ↓
-│   Save snapshot
-│   Save investment P&L
-│
-└─ Unknown capital movement
-        ↓
-    needs_review
-        ↓
-    User supplies transfer / capital movement
-        ↓
-    Recalculate P&L
-```
-
-Investment P&L：
-
-```text
-影响净资产
-进入投资分析
-不进入家庭收入
-```
-
----
-
-# 15.5 Core Flow D — Multi-Account Asset Capture
-
-专用于家庭资产截屏（网银首页、理财平台资产总览）的多账户权威余额/估值提取。与单笔消费记账（Expense capture）严格隔离。
-
-```text
-Dedicated Asset Capture Shortcut
-↓
-Generate idempotency_key
-↓
-Capture asset overview screenshot
-↓
-POST /api/v1/asset-captures
-↓
-Gemini static structured extraction (no additionalProperties)
-↓
-Extract observations (account_name, balance, currency) + displayed_total
-↓
-Deterministic validation & aggregate cross-check
-↓
-┌─ High confidence + unambiguous resolution + total cross-check pass
-│       ↓
-│   Sort affected account IDs (ascending UUID order)
-│       ↓
-│   Lock account_state rows (FOR UPDATE)
-│       ↓
-│   Atomic commit:
-│   - save account_snapshots (balance / investment_valuation)
-│   - execute per-account reconciliation / investment P&L
-│   - update all associated reconciliation_batches -> committed
-│   - update ingestion_request -> committed (ONE DB transaction)
-│       ↓
-│   committed (Returns Asset Capture response)
-│
-└─ Ambiguous resolution / ASSET_TOTAL_MISMATCH / large residual
-        ↓
-    needs_confirmation (ingestion_requests only; zero financial facts committed)
-        ↓
-    Dashboard edits draft (PATCH /api/v1/ingestion-requests/{id}/draft)
-        ↓
-    Dashboard confirms (POST /api/v1/ingestion-requests/{id}/confirm; no body required)
-        ↓
-    Atomic commit of all accounts only after confirmation
-```
-
-### 15.5.1 核心规则与不变式
-
-1. **多账户单图提取与资产账户边界（Asset Account Scope Boundary）**：
-   - `POST /api/v1/asset-captures` 是纯**资产观测工作流**。
-   - **合格账户类型（Eligible Account Types）**：严格限定为 `cash`、`savings`、`investment`。
-   - **不合格账户类型（Ineligible Account Types）**：**`credit`（负债账户）绝对不属于资产捕获范畴**。
-   - 接口不强制要求 `account_id`。单张截屏允许同时识别同一金融机构或平台下的多个资产账户余额（如：活期存款、定期存款、理财产品）。
-   - 示例：一张农业银行截图显示活期 25,391.20 CNY、定期 200,000.00 CNY、理财 130,458.11 CNY、总资产 355,849.31 CNY。系统分别解析为 `ABC_Debit`、`ABC_Term`、`ABC_Wealth` 三笔独立资产观测。
-2. **汇总总额防重、精确量化核对与截屏负债排除规则（Aggregate Total & Liability Exclusion）**：
-   - 截屏中出现的“总资产”、“资产合计”、“总市值”、“Total Assets”、“Asset Total”等总计字段，**仅作为交叉校验数据（cross-check data）**。
-   - **汇总项绝不得生成独立的 Account Snapshot**，彻底杜绝与分项重复计入。
-   - **截屏负债排除规则**：若资产概览截屏中同时显示了信用卡负债、信用卡欠款、已出账单、可用额度等：
-     - 这些数值**绝对不得转化为 AssetObservation**；
-     - **绝对不得参与资产总额分项求和校验**；
-     - **绝对不得生成普通账户快照**；
-     - 它们继续属于既有的信用卡快照（Credit Card Snapshot）与账单对账（Statement Reconciliation）领域。
-   - **同币种精确量化校验**：
-     1. 将各分项观测金额与截屏显示的汇总金额（`displayed_total`）按照货币小单位（如 CNY/USD 2 位小数，JPY 0 位小数）进行精确量化（Quantize）。
-     2. 计算量化后的分项观测金额之和。
-     3. 量化后若分项之和严格等于汇总金额（Exact Equality），则校验通过。
-     4. 若量化后存在任何非零差额（Any non-zero difference），判定为总额不符：标记 `failure_code = 'ASSET_TOTAL_MISMATCH'`，整体 `ingestion_request` 强制转入 `needs_confirmation`，阻止自动提交。
-   - **异币种或无共同比较基准**：
-     - 严禁为了凑齐截屏总额而捏造或估算 FX 汇率。
-     - 跳过此项总额严格等式自检，继续执行针对各独立分项观测的确定性验证。
-3. **确定性账户映射与候选账户隔离（Candidate Isolation & Account Resolution）**：
-   - **候选账户隔离**：Gemini 资产提取提示词中，**仅接收家庭活跃且属于 `cash` / `savings` / `investment` 的账户列表**（名称、`account_type`、币种及别名）。**严禁向 Gemini 提供 `credit` 账户**。
-   - **通用别名防歧义**：通用泛指别名（如“活期”、“定期”）在存在多个活跃账户候选时，绝不足以作为唯一确定映射。
-   - **后端确定性校验**：后端执行严格确定性验证（账户存在、active、同家庭、唯一映射、币种匹配，且 `account_type IN ('cash', 'savings', 'investment')`）。
-   - **误映射信用账户阻断**：若任何观测项被错误映射至 `credit` 账户，后端直接判定非法：标记 `failure_code = 'ASSET_ACCOUNT_TYPE_INVALID'`，整体转入 `needs_confirmation`，绝不提交任何财务事实。
-   - 若无法唯一确定则转入 `needs_confirmation`。Gemini 绝不能新建账户。
-4. **持久化与核算语义（Persistence & Accounting Semantics）**：
-   - 资产截屏绝不直接强改 `account_state`。
-   - 标准流水线：`screenshot -> AI observations -> canonical resolution -> authoritative snapshots -> reconciliation / investment valuation -> account_state`。
-   - `cash` / `savings` 账户生成 `snapshot_type = 'balance'` 的快照；
-   - `investment` 账户生成 `snapshot_type = 'investment_valuation'` 的快照，并计算 `investment_pnl = closing - opening - contributions + withdrawals`。估值变动计入净资产与投资分析，绝不计入家庭现金收入。
-5. **多账户原子性与工作流边界（Workflow Boundary & Atomicity）**：
-   - 单次 Asset Capture 业务在系统层表现为：
-     $$\mathbf{1\text{ ingestion\_request}} + \mathbf{0..N\text{ account-scoped reconciliation\_batches}}$$
-   - 每个 `reconciliation_batch` 严格对应单一账户（`account_id NOT NULL`），并通过 `source_request_id` 关联至本次 `ingestion_request`。
-   - **严禁引入父对账批次表、`asset_capture_batches` 表或账户层级关系**。`ingestion_request` 是多账户截屏捕获的唯一工作流与分组边界。
-   - **待确认状态**：若存在映射歧义、总额不符或非法账户类型，整体 `ingestion_requests.status = 'needs_confirmation'`。此时**绝不部分提交任何财务事实**，所有快照、对账调整、投资损益及 `account_state` 均保持未提交。
-   - **修正流程**：Dashboard 调用多态草稿修正接口 `PATCH /api/v1/ingestion-requests/{id}/draft`（传入 `observations: [{account_id, observed_balance, currency}]`）修正未匹配账户或金额，随后调用确认接口 `POST /api/v1/ingestion-requests/{id}/confirm`。
-   - **确认接口无 Body（NONE REQUIRED）**：`POST /api/v1/ingestion-requests/{id}/confirm` **无需请求体（Request body: NONE REQUIRED）**；客户端发送空 JSON 对象 `{}` 仅作兼容容忍，绝非强制要求。
-   - **原子提交（ALL OR NOTHING）**：
-     - 确认或高置信自动提交时，先将涉及的所有 canonical `account_id` 按 UUID 升序排序，严格按序锁定 `account_state` 行（`FOR UPDATE`），杜绝死锁。
-     - 在单一数据库事务内完成所有 Snapshot、各账户对账调整与投资损益写入。
-     - 所有关联的 `reconciliation_batches` 与该 `ingestion_request` 在同一事务内一同转为 `committed`。
-     - 确认接口返回 Asset Capture 提交结果（多账户 `results` 数组，绝非单笔交易的 `transaction_id`）；重复提交幂等重放已存储结果。
-     - 若调用 reject，`ingestion_request` 转为 `rejected`，不产生任何财务事实。
-6. **请求幂等（Idempotency）**：
-   - 新增 `request_kind = 'asset_capture'`。
-   - 单次截屏生成一条 `ingestion_requests`，以 `(device_id, idempotency_key)` 为幂等边界。重试相同 payload 幂等返回已有结果；不同 payload 报 409 冲突。
-
----
-
-# 16. Dashboard Reporting
-
-核心指标：
-
 ```text
-Total Assets
-Total Liabilities
-Net Worth
-
-Cash Income
-Expense
-Net Cash Flow
-
-Investment P&L
-
-Credit Card:
-- statement balance
-- remaining due
-- unbilled balance
-- current outstanding
+payment screenshot -> Shortcut compresses/encodes -> POST /api/v1/expenses
+  clear expense -> recorded; short amount/merchant/category summary
+  uncertain fact -> confirm, correct in ordinary language, or cancel
 ```
 
-同时展示 Account 数据新鲜度：
+The normal new-expense path has **one backend request**. No preflight account,
+category, authentication, status, or FX request is added. Keep the device token and
+plain-text pending key in local iPhone storage. Recovery may use extra requests;
+its race-safe behavior is specified in CONTRACTS.
 
-```text
-last_authoritative_snapshot_at
-```
-
-不要求所有账户每月完成 Statement。
+The backend validates proposed facts; Gemini cannot authorize writes. Amount,
+currency, expense intent, and date must be reliable. Keep the existing field-level
+confidence starting threshold of 0.85 and tune against household fixtures, not the
+model's overall confidence alone. A new merchant or large amount alone does not interrupt.
 
-### 16.1 资产与风险分布（Asset & Risk Distribution）
+Payment account is useful metadata, **not a required accounting leg**. If only the
+account is unknown, record the otherwise clear expense with `account_id = null`;
+show “payment account unknown” in detail. Never pick a default account or guess
+among aliases. This also allows spending before balances are initialized.
+A low-confidence category goes to visible **Other**, editable later, without blocking
+an otherwise clear purchase.
+
+Use the receipt's business date when readable. If no date is shown, a clearly current
+successful-payment screen may use the capture's local date with `date_source = capture_date`.
+A historical list, ambiguous year, unreadable visible date, pending payment, or failed
+payment requires review. Known failed payments are rejected, never recorded.
 
-Dashboard 提供两重视角的家庭资产配置分布：
+Transfers, card repayments, loan principal repayments, and investment deposits are
+not spending. Return an explanatory rejected result for an unambiguous non-expense;
+ambiguous person-to-person payments require review. Never force everything sent to
+the expense entry point into an expense. Refund capture is an explicit Dashboard
+action in this release; a clear refund screen directs the user there.
+
+### B. Update wealth
+
+The Wealth page offers **Update balances**, by screenshot or a manual table. An
+optional separate balance Shortcut can use the same backend; it does not change
+the Expense Shortcut.
+
+1. Extract visible amounts, labels, currencies, times, and balance/debt/total meaning.
+2. Map only to active household accounts with clear identity and matching currency.
+3. Clear non-overlapping rows can save automatically. Return the saved account list.
+   All selected rows in one submission commit together.
+4. Uncertain identity, scope, currency, amount, or debt meaning produces one editable
+   review table. The user may correct, explicitly create an account, or explicitly
+   exclude a row and save the remainder. No second reconciliation review.
+5. Manual Save is already confirmation. A change from the last balance never creates
+   a discrepancy task or requires an explanation.
+
+The first observation starts that account's history; no household-wide opening
+ceremony. Zero is valid; missing is not zero. Older observations enter history
+without replacing a newer current observation. Future-dated balances are rejected.
+
+#### Avoid counting money twice
 
-1. **账户类型分布（Account Type Allocation）**：
-   - 按 `cash`、`savings`、`investment` 展示总资产占比；负债 `credit` 单独展示。
-2. **风险等级分布（Risk Level Allocation）**：
-   - **纳入统计范围**：仅包含正余额的 `cash`、正余额的 `savings`，以及正估值的 `investment` 资产。
-   - **严格排除范围**：**所有 `credit` 负债账户绝对不参与风险分布统计**。
-   - **未分类处理**：若资产账户未设置 `risk_level`（即 `risk_level = NULL`），在风险图表与统计中归入“未分类”（unclassified）。
-   - **展示分级**：
-     - `very_low` -> 极低风险（如活期存款、银行现金理财）
-     - `low` -> 低风险（如定期存款、纯债基金）
-     - `medium` -> 中风险（如平衡配置基金、固收+）
-     - `high` -> 高风险（如股票型基金、股票投资账户）
-     - `NULL` -> 未分类（unclassified）
-   - **币种折算**：所有非报告币种资产，统一按照基准汇率服务（Reference FX）转换为家庭报告币种（reporting_currency）进行聚合统计。
+Each account has a short `balance_scope`, such as “brokerage total, including cash
+and holdings” or “Alipay equity funds only; excludes wallet”. Accounts are flat.
+The setup UI explains that tracked accounts must cover distinct money. A brokerage
+total and its holdings cannot both be included. Splitting helps risk reporting,
+but the aggregate then remains a screenshot cross-check only.
 
----
+Institution totals, subtotals, yesterday's earnings, credit limits, available credit,
+and maturity proceeds are never additional balances. Cross-check a total only when
+its currency and included rows are known. Cropped screens or totals spanning other
+currencies cannot supply an equation for selected rows. Genuine mismatches need
+review; CONTRACTS defines display-rounding tolerances. Never invent a missing row
+or adjustment. Across uploads, configured account scopes remain the overlap guard;
+AI cannot prove that two real-world accounts are distinct.
 
-# 17. Source of Truth Rules
+#### Debts use the same observations
 
-优先级：
+Capture a card's **total amount currently owed**, including unbilled purchases and
+remaining installment principal where applicable. This month's bill, minimum due,
+available credit, and credit limit used are not substitutes. If total debt is
+unavailable, retain the dated prior value and ask for a total or manual amount;
+do not silently omit the card from completeness.
 
-```text
-Statement / authoritative Snapshot
-        >
-confirmed Transaction
-        >
-AI estimated value
-```
+The UI accepts a positive “Amount owed”; storage is negative. Explicit card
+overpayments are positive; overdrafts are negative. Loans use outstanding principal,
+excluding future interest. No statement calendar, due calculation, or reminder engine.
+
+### C. Understand investment gains
 
-Statement / Snapshot 可以校准账户状态。
+An investment account is a total-value bucket, not a security position. At its
+balance update ask optionally: **“Since the previous update, how much money did
+you add or take out?”** Offer no movement, enter totals, or not sure. Never preselect
+zero. Save the balance even if this answer is unknown.
 
-任何 reconciliation 都不得静默改写：
+For consecutive valid observations of the same investment account and currency:
 
 ```text
-原始 transaction evidence
-original currency amount
-historical audit trail
-```
-
----
-
-# 18. Implementation Constraint
-
-后续 Agent 开发前必须遵守：
-
-1. **先设计新 schema，再改业务代码。**
-2. 不继续扩展现有 `accounts + transactions` 两表模型来勉强承载全部语义。
-3. 不为兼容旧数据牺牲新模型；旧生产数据无需迁移。
-4. Backend 是唯一业务规则层。
-5. Dashboard 不应继续复制核心 accounting logic。
-6. 所有余额修改必须事务安全、并发安全。
-7. 所有正式写入必须支持审计和可追溯。
-8. 新功能必须有对应 deterministic tests。
-9. 未在本文明确的工程细节，由实现 Agent 给出推荐方案，不继续向产品用户逐项询问。
-
----
-
-## Next Step
-
-目标架构设计文档已全部制定并冻结于 `docs/architecture/`：
-1. [`PHYSICAL_SCHEMA.md`](./docs/architecture/PHYSICAL_SCHEMA.md) — 目标 PostgreSQL 持久化规范
-2. [`API_CONTRACT.md`](./docs/architecture/API_CONTRACT.md) — 目标 REST API 契约
-3. [`RECONCILIATION_ENGINE.md`](./docs/architecture/RECONCILIATION_ENGINE.md) — 对账与匹配引擎规范
-4. [`IMPLEMENTATION_PLAN.md`](./docs/architecture/IMPLEMENTATION_PLAN.md) — 实施路径与分阶段计划
-5. [`TEST_PLAN.md`](./docs/architecture/TEST_PLAN.md) — 验证与测试规范
+gain = closing balance - opening balance - money added + money taken out
+```
 
-后续开发请严格按照 [`IMPLEMENTATION_PLAN.md`](./docs/architecture/IMPLEMENTATION_PLAN.md) 从 **Implementation Phase 0** 及 **Implementation Phase 1** 开始分阶段推进。
+100,000 -> 160,000 with 50,000 added means a gain of 10,000. Without knowing the
+addition, show “value increased 60,000; investment gain unknown”. Absence of recorded
+transfers is never evidence of zero flows.
+
+“Taken out” includes distributions paid outside the account. Reinvested income and
+internal trades are already inside its value. Internal investment fees reduce its
+gain; do not generate another daily expense automatically. This measures account
+gain after internal charges, not tax or externally paid fee accounting.
+
+The user supplies **complete** addition/withdrawal totals for the interval. Gemini
+may prefill explicitly shown flows covering that interval, but the user must confirm
+completeness. Daily/lifetime/provider earnings are not substitutes. The initial
+release does not aggregate incompatible provider metrics. No positions, lots,
+cost basis, realized/unrealized split, return percentage, time-weighted return, or IRR.
+
+Store flow inputs linked to opening and closing observation IDs; calculate gains
+on read. Correcting, voiding, or inserting an observation between the pair invalidates
+that pairing for reports. Keep old inputs in history; new intervals are unknown
+until explicitly supplied. Never copy or apportion flows automatically.
+
+Show actual interval dates per account. A filtered sum includes only whole eligible
+intervals contained in that range; list gaps, boundary-crossing intervals, and
+accounts without known gains. Never prorate calendar-month performance. Group by
+native currency. An optional reporting-currency estimate uses each interval's
+closing-date rate, labelled translated account gains, excluding currency revaluation
+of household assets. A partial sum is never “total household investment gain”.
+
+## 3. Records and reporting rules
+
+### Household and accounts
+
+Retain the household, two users, membership checks, and revocable device tokens.
+Both users see and correct all household finance records. Account ownership is
+descriptive; no private subledgers or spouse settlements. Keep existing owner/member
+roles for device administration without adding a permission system.
+
+Retain `cash`, `savings`, `investment`, `credit`. Credit covers liability accounts,
+including consumer loans. Type is descriptive, not a separate workflow. One currency
+per account; split multicurrency accounts. Type and currency become immutable after
+any observation or transaction references the account. No billing/due days, linked
+cash account, institution entity, asset-class taxonomy, or parent account. Institution
+names may appear in ordinary names, aliases, and scope descriptions.
+
+Risk is user-selected `very_low`, `low`, `medium`, `high`, or null (unclassified).
+Gemini never chooses risk. Credit accounts have null risk. A mixed investment bucket
+can be split into distinct accounts for risk reporting or left broadly classified.
+
+Accounts have `opened_on` (default local creation date) and optional `closed_on`.
+Closing requires an explicit zero closing observation and no later active observation.
+An unused, uninitialized account can be cancelled without asserting it ever held zero.
+There is no “hide nonzero account from wealth” toggle. History remains visible.
+Correcting a closing observation must preserve closure conditions or explicitly reopen
+the account in the same operation.
+
+### Spending, income and refunds
+
+Keep the `transactions` table name for reuse, with only `expense`, `refund`, and
+`cash_income`. One positive original amount/currency, optional payment account,
+category, business date, merchant, note, and provenance suffice. No from/to legs.
+
+```text
+recorded spending = expenses - refunds received in the reporting date range
+recorded income = optional cash_income entries in that range
+```
+
+Fees paid as household purchases are ordinary expenses. Show gross purchases,
+refunds, and net spending. Negative net spending by category/month is valid: use
+bars/tables rather than forcing it into a pie. Optional income capture is not a
+complete cash-flow system; do not present a reliable saving rate or explain
+net-worth changes through income minus spending.
+
+A refund is a separate positive record on its received date. If its purchase is
+known, use `refund_of_transaction_id`, copy the category at creation, require the
+same original currency, and prevent active refunds exceeding the purchase. A missing
+or pre-start purchase permits an unlinked refund with explicit category and note.
+No fuzzy refund matching. Original category edits do not silently alter refunds;
+they remain individually editable. A purchase cannot be voided or reduced below
+active refunds until those refunds are explicitly corrected or unlinked.
+
+#### Installments: purchase-date spending
+
+Record the full purchase price once on the purchase date. Subsequent principal
+repayments and monthly bill lines are not new spending. A separately identified
+financing fee can be recorded when charged. A screen showing only “1,000 this month”
+cannot establish a 12,000 purchase: require the total or reject the repayment screen.
+Pre-start purchases do not generate spending when their principal is repaid later.
+
+This deliberately replaces recognition of each billed installment. It answers
+“what did we buy?” and removes schedule/statement dependencies. Debt observations
+must include remaining installment principal. Monthly repayment forecasting is absent.
+
+### Categories
+
+Seed the previously discussed categories plus **Other**. Users may rename, describe,
+add, and archive categories; stable IDs preserve history. Keep Other active as the
+fallback (its display label can be localized). No immutable 14-category subsystem,
+priority field, rule engine, or training job. Pass active names and descriptions
+from PostgreSQL to Gemini.
+
+| Initial expense name | Classification meaning |
+|---|---|
+| Grocery | Groceries, household consumables, ingredients |
+| Dine | Restaurants, takeaway, coffee, drinks and ready-to-eat snacks |
+| Child | All explicitly child-related purchases, including health, clothing and education; precedes those adult categories |
+| Home & Utilities | Rent, utilities, maintenance, appliances; excludes loan principal, includes identifiable mortgage interest |
+| Digital & Gadgets | Phones, computers, accessories and electronics |
+| Clothing | Adult clothing, shoes and accessories |
+| Beauty | Adult skincare, cosmetics, haircuts and personal care |
+| Transportation | Transit, taxi, fuel, parking, maintenance and tolls |
+| Health | Adult medicine, care, checkups and medical insurance |
+| Education | Adult books, training, software and AI subscriptions |
+| Gift & Socials | Gifts, social occasions and cash gifts to parents |
+| Parents | Specific goods/services for parents, excluding cash gifts |
+| Fun & Games | Routine entertainment, games, cinema and recreation |
+| Trips & Occasions | Holidays, anniversaries and distinct major occasions |
+| Other | Clear expenses without a sufficiently reliable category |
+
+Seed editable income categories Salary, Interest, Other income.
+
+### Wealth, history, freshness and risk
+
+For each account included at time T, choose its newest active observation with
+`as_of <= T`. Never add subsequent transactions. Label the current card **Last
+reported wealth**, with account dates and the range of observation dates.
+
+```text
+assets = sum of positive converted balances
+liabilities = sum of absolute negative converted balances
+net worth = assets - liabilities
+```
+
+Missing observations, missing FX, or unresolved debt scope make coverage incomplete.
+Show known subtotals and missing accounts; complete totals are null. Empty households
+show setup, not “100% fresh / zero wealth”. Stale observations stay in known amounts:
+show their ages, an update cue after 30 days, and prominent staleness after 90. These
+are display thresholds, never write gates. Incomplete/stale pictures stay qualified.
+
+Risk uses positive assets only, never net worth as denominator. Null-risk assets
+and positive card overpayments are unclassified (identify surplus in detail).
+Negative balances are debts, excluded from risk. Buckets sum to known positive
+assets; if that sum is zero, percentages are null. Risk is current metadata;
+historical risk allocation is not offered.
+
+Wealth history is a step series carrying forward last observations, with gaps before
+each account's first observation. Inclusion uses opened/closed dates; include closing
+zero on the closing day. Late entries/corrections restate history. Each point carries
+observation dates and missing/stale counts. Asynchronous observations are not a
+verified same-day balance sheet; changes are not automatically investment gains.
+
+### Money, dates and currencies
+
+Keep PostgreSQL NUMERIC, Python Decimal, and JSON decimal strings. Retain original
+amounts/currencies. Use existing minor-unit rules and ROUND_HALF_UP; no financial floats.
+Reporting currency defaults to CNY, timezone to Asia/Singapore. Reporting currency
+is fixed once records exist. Receipt/capture local dates govern expenses; household
+timezone supplies manual-entry and report boundaries.
+
+Spending uses a reference original-to-reporting quote for its business date, frozen
+when first obtained. Account and purchase currencies may differ. Remove estimated
+card settlement legs and statement replacement. Current wealth uses current available
+quotes; historical wealth uses quotes no later than its date. Show quote dates and
+reference-conversion labels. Missing rates never become 1.0 or zero: retain native
+records and qualify partial totals. CONTRACTS defines retries and permitted quote age.
+
+## 4. Dashboard and operations
+
+Keep Streamlit and its REST client. Four pages suffice:
+
+| Page | Contents and actions |
+|---|---|
+| Wealth | Last reported assets/debts/net worth, dated accounts, risk, history; Update balances; Investments subsection with interval gains and flow inputs |
+| Spending | Month/category/merchant trends, gross/refunds/net, transaction list; add, edit, refund, void; optional income |
+| Review | Only uncertain captures; one editable form/table; confirm or dismiss |
+| Settings | Accounts, non-overlap scope, aliases, risk, categories, devices, sign out |
+
+History is a panel on each record, not an Audit center. No batches, candidates,
+adjustments, correction-preview tokens, raw JWTs, or engine versions in daily UI.
+One Save edits a record; conflicts ask the user to reload its current version.
+
+Replace daily token-pasting with two pre-provisioned Supabase Auth email/password
+accounts, per-session login/refresh/logout, and backend JWT verification. Reuse
+verified-subject-to-user mapping. Device authentication stays. Credentials and setup
+are operator work, not open product decisions; HMAC test tokens remain staging-only.
+
+Keep one FastAPI service, one Streamlit service in Cloud Run asia-southeast1, and
+Supabase PostgreSQL. Dashboard has no database credentials; private financial tables
+are not exposed through the browser Data API. No worker, queue broker, Redis, event
+bus, scheduled reconciliation, or portfolio service. AI runs inside HTTP handling,
+outside database locks, with durable receipts protecting interruption recovery.
+
+Store structured facts and minimal history; discard screenshots when processing
+finishes. Never persist images, base64, raw model responses, passwords, tokens, or
+full prompts in receipts, audit, logs, or errors. Removing statements removes PDF
+and password handling from the active runtime.
+
+## 5. Deliberate tradeoffs
+
+| Previous approach | Target decision and effect |
+|---|---|
+| Projected balances | Last observations only; wealth ages visibly, while missing transfers cannot fabricate a supposedly calibrated balance |
+| Statements and reconciliation | Remove; no automatic backfill of missed spending, monthly closing, or residual adjustments |
+| Ordinary, credit, investment snapshot pipelines | One observation path; type-specific interpretation is validation |
+| Persisted derived P&L and matched transfer legs | Explicit interval flow totals; unknown gains do not block balance updates |
+| Installment schedules and billing recognition | Full purchase-date spending once; debt separately observed; no repayment forecast |
+| Generic links and correction preview/commit | One refund link and one version-checked edit/void with history |
+| Two review lifecycles | One capture draft lifecycle |
+| Immutable canonical categories | Editable seeded vocabulary and fallback Other |
+| Audit center and universal financial workflow | Minimal change history and durable receipts remain to solve real mistakes/retries |
+
+These are implementation choices, not claims of delivered behavior. No product
+question blocks this specification. If automatic missing-expense import, monthly
+installment budgeting, or live projected balances later become necessary, reopen
+that workflow with evidence of need. Do not retain the old engines as hidden prerequisites.

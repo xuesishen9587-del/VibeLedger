@@ -28,10 +28,10 @@ The following patterns from these legacy documents are explicitly obsolete in th
 
 | Legacy Concept | Why It Is Obsolete | Target Replacement |
 |---|---|---|
-| `accounts.current_balance` as source of truth | Mutable scalar causes audit loss and drift | Derived `account_state` projection + authoritative `account_snapshots` |
-| Generic `adjustment` transaction type | Overloaded and ambiguous | Specific `reconciliation_adjustment`, `investment_pnl`, and `opening_balance` |
-| Investment adjustment mapped into income | Distorts cash flow metrics | `investment_pnl_periods` tracked separately from cash income |
-| Future installment transactions created immediately | Prematurely alters current debt and confuses monthly cash flow | `installment_plans` / `installment_periods` schedule; transaction only when billed |
+| `accounts.current_balance` as source of truth | Mutable scalar loses dated evidence | Latest active dated balance observation; no account_state projection |
+| Generic `adjustment` transaction type | Mixes unrelated meanings | Balance observations independent of spending; no balancing transactions |
+| Investment adjustment mapped into income | Distorts spending/income reporting | Gain derived from observation pairs with explicitly complete capital-flow inputs |
+| Future installment transactions created immediately | Confuses spending and debt | Full purchase-date spending once, total debt separately observed; no schedules |
 | `TABLE_SUFFIX` for environment isolation | Pollutes table names and DDL | Independent database / schema configuration via `DATABASE_URL` / `DB_SCHEMA` |
 | Startup `database.init_db()` DDL migration | Uncontrolled migration on app boot | Versioned standalone migration scripts |
 | Dashboard direct PostgreSQL access | Bypasses business rules and duplicates logic | Dashboard consumes Backend REST APIs exclusively |

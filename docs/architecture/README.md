@@ -1,122 +1,46 @@
-# VibeLedger Target Architecture Documentation
+# VibeLedger architecture
 
-> Status: **Frozen Target Architecture**  
-> Scope: **Product v1 / MVP**
+The **2026-09-05 simplified target** replaces the previous Phase 12.5 design.
+Implementation has not yet been changed to match it. The accepted staging backend,
+REST Dashboard and real iPhone expense experience provide the implementation base.
 
-This directory contains the authoritative technical architecture specifications, contracts, implementation sequences, and verification plans for the VibeLedger target system.
+There are three canonical documents, each with one responsibility:
 
----
+1. [TARGET_DOMAIN_MODEL](../../TARGET_DOMAIN_MODEL.md): user workflows, product rules,
+   reporting meaning, simplifications and deliberate tradeoffs.
+2. [CONTRACTS](CONTRACTS.md): schema, invariants, APIs, capture recovery, concurrency,
+   AI/auth boundaries and runtime shape.
+3. [IMPLEMENTATION_PLAN](IMPLEMENTATION_PLAN.md): repository assessment, keep/refactor/
+   remove map, implementation slices S0–S6 and executable acceptance expectations.
 
-## 1. Document Authority Hierarchy
+Read them in that order. Product rules govern implementation meaning; CONTRACTS
+makes them concrete; the plan orders delivery. Resolve contradictions by updating
+these documents together, not by adding another parallel “freeze” specification.
+[PROJECT_CONTEXT](../../PROJECT_CONTEXT.md) is the short status handoff, not another
+domain contract. [The staging runbook](../deployment/STAGING_DEPLOYMENT.md) records
+the previous accepted deployment and is not yet the simplified deployment procedure.
 
-When resolving technical or business questions, use the following strict authority order:
+The core model is independent spending records and dated account balance observations.
+Investment gains require explicitly known capital flows. There is no projected
+account balance, statement/reconciliation engine, installment schedule, or monthly close.
+Keep FastAPI, Streamlit, PostgreSQL, device idempotency, Decimal math and household auth.
 
-```text
-TARGET_DOMAIN_MODEL.md
-    = approved business/domain truth (root)
+## Documentation consolidation
 
-docs/architecture/PHYSICAL_SCHEMA.md
-    = target PostgreSQL persistence contract
+| Previous document | Disposition |
+|---|---|
+| TARGET_DOMAIN_MODEL.md | Rewritten around household workflows and explicit reporting limits |
+| PHYSICAL_SCHEMA.md and API_CONTRACT.md | Replaced by CONTRACTS.md so fields and behavior share one technical contract |
+| RECONCILIATION_ENGINE.md | Removed; the target has no reconciliation engine |
+| TEST_PLAN.md | Consolidated into IMPLEMENTATION_PLAN.md with slice exits and one acceptance matrix |
+| IMPLEMENTATION_PLAN.md | Rewritten; old phase hierarchy replaced by bounded delivery slices |
+| Root README.md and PROJECT_CONTEXT.md | Corrected to distinguish existing implementation, historical acceptance and pending simplified target |
 
-docs/architecture/API_CONTRACT.md
-    = target external REST API contract
+The old architecture remains available in Git at `3ac0ed6` (before this rewrite),
+for example with `git show 3ac0ed6:docs/architecture/API_CONTRACT.md`. It is historical
+evidence, not an implementation dependency. Do not copy it into another active
+specification directory. Comments in immutable old migrations retain their original
+document references to preserve migration checksums.
 
-docs/architecture/RECONCILIATION_ENGINE.md
-    = target reconciliation & matching engine contract
-
-docs/architecture/IMPLEMENTATION_PLAN.md
-    = implementation roadmap and phase sequencing
-
-docs/architecture/TEST_PLAN.md
-    = verification contract & test matrix
-
-PROJECT_CONTEXT.md
-    = concise current-state / Agent handoff index
-
-docs/legacy/*
-    = historical/current-old implementation reference only
-```
-
-If legacy documentation or existing prototype code conflicts with target architecture, **target architecture wins**.
-
----
-
-## 2. Architecture Document Map
-
-| Document | Purpose | Primary Audience |
-|---|---|---|
-| [`TARGET_DOMAIN_MODEL.md`](../../TARGET_DOMAIN_MODEL.md) | Defines core business concepts, domain entities (`Account`, `Transaction`, `Snapshot`, `Reconciliation`), date rules, currency principles, and out-of-scope boundaries. | Domain logic, product invariants |
-| [`PHYSICAL_SCHEMA.md`](./PHYSICAL_SCHEMA.md) | Defines the target PostgreSQL tables, UUID PKs, exact `NUMERIC(20,6)` types, foreign keys, check constraints, row-level locking strategies, derived projection (`account_state`), and append-only audit trail (`audit_events`). | Database engineering, persistence repositories |
-| [`API_CONTRACT.md`](./API_CONTRACT.md) | Defines public `/api/v1` REST endpoints, decimal string JSON serialization, device bearer authentication, draft confirmation flow, and error envelopes. | API layer, Shortcut integration, Dashboard client |
-| [`RECONCILIATION_ENGINE.md`](./RECONCILIATION_ENGINE.md) | Defines the deterministic matching algorithm, scoring gates, fuzzy merchant similarity, refund lookbacks, installment recognition, residual thresholds, and atomic batch commit algorithm. | Matching engine, reconciliation services |
-| [`IMPLEMENTATION_PLAN.md`](./IMPLEMENTATION_PLAN.md) | Defines the step-by-step strangler migration from Phase 0 to Phase 14, isolating development without touching legacy production data. | Agent task planning, execution sequencing |
-| [`TEST_PLAN.md`](./TEST_PLAN.md) | Defines the multi-tiered test pyramid (Unit, DB Integration, API Integration, E2E), permanent regression invariants, and sandbox safety rules. | QA, test automation, phase acceptance |
-
----
-
-## 3. Canonical Terminology & Glossary
-
-### 3.1 Scope vs. Implementation Sequencing
-- **`Product v1` / `MVP`**: Refers to the complete functional product scope defined by the frozen target architecture.
-- **`Implementation Phase 0`, `Implementation Phase 1`, ...**: Refers strictly to the sequential technical milestones in [`IMPLEMENTATION_PLAN.md`](./IMPLEMENTATION_PLAN.md). Standalone "Phase 1" must never be used to ambiguously refer to product scope.
-
-### 3.2 Date Fields
-- **`occurred_on`** (`DATE`, required): Authoritative business/reporting date when the economic event occurred. Used for monthly budgeting and reports.
-- **`occurred_at`** (`TIMESTAMPTZ`, optional): Exact timestamp when available (e.g., from digital receipts).
-- **`posted_on`** (`DATE`, optional): Bank/Statement clearing date. Used for audit trail and reconciliation matching only, never for overriding reporting month.
-
-### 3.3 Transaction Types vs Statement Line Types
-- **`cash_income`**: Canonical transaction type for actual cash inflows into household accounts (salary, interest, reimbursements, gift money).
-- **`income`**: May exist only at the `statement_lines.line_type` raw extraction layer. A Statement line of type `income` transforms into a `cash_income` transaction upon confirmation.
-- **`reconciliation_adjustment`**: Automatic or manual adjustment applied to an ordinary account during reconciliation when residual $\le 200\text{ CNY}$. Modifies balance projection; excluded from income/expense statistics.
-- **`investment_pnl`**: Non-cash market valuation change derived from `account_snapshots`. Persisted in `investment_pnl_periods`; tracked in net worth but strictly excluded from cash income.
-- **`opening_balance`**: Initial ledger baseline transaction at `ledger_start_date`. Excluded from income and expense metrics.
-
-### 3.4 Workflow Statuses
-- **`needs_confirmation`**: Belongs **strictly to `ingestion_requests.status`** (e.g. Expense or Asset Capture captures with low confidence, ambiguous accounts, or validation warnings) that require user approval before financial commit. While unconfirmed, zero financial facts are committed.
-- **`needs_review`**: Belongs **strictly to `reconciliation_batches.status`** (and reconciliation candidates) where automated matching is ambiguous, capital flow is unclear, or residual exceeds threshold.
-- Reconciliation batches NEVER take `needs_confirmation`; Ingestion requests NEVER take `needs_review`. One Asset Capture produces 1 `ingestion_request` + 0..N account-scoped `reconciliation_batches` linked by `source_request_id`.
-
-### 3.5 Candidate Types (Reconciliation Enum)
-The canonical set of reconciliation candidate types across all architecture contracts is:
-1. `match` — Link Statement line to an existing committed transaction.
-2. `create_transaction` — Propose creating a missing ordinary transaction (`expense`, `cash_income`, `fee`).
-3. `create_transfer` — Propose creating an internal transfer between two household accounts.
-4. `refund` — Propose creating a refund transaction linked via `refund_of` to an earlier expense.
-5. `adjustment` — Propose an ordinary account `reconciliation_adjustment` ($\le 200\text{ CNY}$).
-6. `snapshot` — Propose saving an authoritative account balance snapshot.
-7. `investment_pnl` — Propose calculating and persisting investment P&L for a period.
-8. `recognize_installment` — Propose recognizing a scheduled installment period as a billed expense.
-
-### 3.6 Statement Match Statuses
-The canonical match statuses on `statement_lines` are:
-- `unmatched` — Initial state; line has not yet been processed by the matcher.
-- `matched` — High-confidence unique match with an existing transaction.
-- `new_candidate` — High-confidence proposal to create a new transaction/transfer/refund/installment.
-- `ambiguous` — Multiple matches or unclear semantics requiring human review.
-- `ignored` — Line intentionally skipped from ledger impact (e.g., non-household movement).
-
-### 3.7 Foreign Credit Card Estimation & Account Leg Status
-- **`account_leg_status = 'estimated'`**: Set at Shortcut ingestion time for foreign card expenses (`original_currency <> card.currency`) where settlement leg is estimated via reference FX. Updates `account_state` estimated debt.
-- **`account_leg_status = 'authoritative'`**: Set upon Statement reconciliation atomic commit, replacing the estimate with actual settlement amount, applying the balance delta to `account_state`, and freezing historical reporting FX.
-- **Transfer Invariant**: Cross-currency internal transfers strictly require both actual settlement legs and NEVER use estimated FX.
-
-### 3.8 Fee & Category Invariants
-- **`fee`**: Distinct transaction type representing household cash outflow; requires an active expense-type category (`category_id`).
-- **Reporting Formula**: $\text{Household Expense} = \text{ordinary expense} + \text{fee} - \text{applicable refunds}$.
-
-### 3.9 Void & Soft Delete Lifecycle
-- **`status = 'committed'`** $\iff$ `deleted_at IS NULL` AND `delete_reason IS NULL`
-- **`status = 'voided'`** $\iff$ `deleted_at IS NOT NULL` AND `delete_reason IS NOT NULL`
-- Soft delete and void are the identical financial lifecycle operation; voiding atomically reverses `account_state` projections exactly once and preserves audit trails.
-
-### 3.10 Ingestion Request Kinds
-- **`expense`**: Single-expense receipt/payment capture from iPhone Shortcut or Dashboard.
-- **`transfer`**: Two-legged internal transfer capture.
-- **`snapshot`**: Single-account manual or Dashboard balance observation.
-- **`asset_capture`**: Dedicated multi-account asset overview capture from a single banking or investment screenshot (`POST /api/v1/asset-captures`). Strictly restricted to ASSET accounts (`cash`, `savings`, `investment`); credit accounts are excluded from candidate accounts and rejected by deterministic validation (`ASSET_ACCOUNT_TYPE_INVALID`). Displayed credit-card liabilities are ignored. Confirmed via bodyless `POST /confirm` (empty object `{}` tolerated). Commits all observed account snapshots atomically or rolls back completely.
-
-### 3.11 Account Types & Risk Allocation
-- **`account_type`**: Exactly `cash`, `savings`, `credit`, `investment`. A single financial institution or platform is modeled as multiple independent canonical Accounts. The `institution` entity, `asset_class`, `liquidity_level`, and account hierarchies are strictly out of scope.
-- **`risk_level`**: User-configured metadata (`very_low`, `low`, `medium`, `high`, `NULL`). Used for Dashboard household wealth risk distribution. Credit accounts MUST have `risk_level = NULL` and are excluded from risk distribution. Asset accounts with `NULL` risk level are displayed as "unclassified" (未分类).
-- **Canonical Expense Categories & Category `description`**: Product v1 defines exactly 14 canonical active Expense categories whose names are immutable (`CANONICAL_EXPENSE_CATEGORY_IMMUTABLE`). Category `description` carries semantic classification rules (e.g. `Child` override semantics) passed to Gemini. Category `priority` is prohibited. Income categories remain fully customizable.
+Older [prototype documents](../legacy/README.md) remain historical only. No production
+deployment, database migration, or runtime behavior change is performed by this review.

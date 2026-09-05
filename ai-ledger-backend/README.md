@@ -10,7 +10,10 @@ license: mit
 
 # VibeLedger Backend
 
-VibeLedger Backend provides the target REST API (`/api/v1/*`), health & readiness probes (`/health`, `/ready`), background statement processing, Gemini multimodal expense ingestion, and deterministic ledger accounting.
+VibeLedger Backend implements `/api/v1/*`, `/health`, `/ready`, Gemini expense capture,
+and the previous architecture's ledger, synchronous statement/reconciliation and
+reporting workflows. The simplified architecture specified on 2026-09-05 is pending
+implementation; it retains the expense interface and replaces those ledger workflows.
 
 ---
 
@@ -23,13 +26,18 @@ The target backend application is implemented in `app/` and exposed via `app.mai
   - `GET /ready` — Database connection, schema migration status, SHA256 checksum verification, and Gemini client status
 - **Container Definition**: `Dockerfile.target` (`uvicorn app.main:app --host 0.0.0.0 --port 7860`)
 
-> **Note on Legacy Runtime**: `Dockerfile` and `main.py` remain preserved for the legacy prototype (`/api/record`) until Phase 13 production fresh cutover.
+> **Legacy runtime**: `Dockerfile` and root `main.py` serve the old `/api/record`
+> prototype. The implemented staging application is `app.main:app` using
+> `Dockerfile.target`. Do not confuse either current implementation with the pending
+> simplified schema. Removal/cutover follows S0–S6 in the current implementation plan.
 
 ---
 
 ## Deployment & Staging Runbook
 
-For complete instructions on configuring, migrating, bootstrapping, and deploying the target backend in an isolated staging environment, refer to:
+For the previous accepted staging setup and its historical runtime evidence, refer to
+the following runbook. Update it during simplified implementation before using it
+for the new schema; do not run it as a simplified deployment procedure:
 - [`docs/deployment/STAGING_DEPLOYMENT.md`](../docs/deployment/STAGING_DEPLOYMENT.md)
 
 ---
@@ -37,11 +45,8 @@ For complete instructions on configuring, migrating, bootstrapping, and deployin
 ## Target Architecture References
 
 For target business rules, schemas, API contracts, and implementation sequencing, refer to:
-- [`TARGET_DOMAIN_MODEL.md`](../TARGET_DOMAIN_MODEL.md) — Approved business & domain truth
-- [`docs/architecture/PHYSICAL_SCHEMA.md`](../docs/architecture/PHYSICAL_SCHEMA.md) — Target PostgreSQL persistence contract
-- [`docs/architecture/API_CONTRACT.md`](../docs/architecture/API_CONTRACT.md) — Target `/api/v1` REST API contract
-- [`docs/architecture/RECONCILIATION_ENGINE.md`](../docs/architecture/RECONCILIATION_ENGINE.md) — Target reconciliation and matching engine
-- [`docs/architecture/IMPLEMENTATION_PLAN.md`](../docs/architecture/IMPLEMENTATION_PLAN.md) — Implementation roadmap
-- [`docs/architecture/TEST_PLAN.md`](../docs/architecture/TEST_PLAN.md) — Target verification & test plan
+- [`TARGET_DOMAIN_MODEL.md`](../TARGET_DOMAIN_MODEL.md) — Household workflows and reporting meaning
+- [`CONTRACTS.md`](../docs/architecture/CONTRACTS.md) — Simplified database, APIs, retry, auth and runtime contract
+- [`IMPLEMENTATION_PLAN.md`](../docs/architecture/IMPLEMENTATION_PLAN.md) — Code assessment, transition slices and acceptance matrix
 
 For historical prototype documentation, see [`docs/legacy/`](../docs/legacy/README.md).

@@ -12,9 +12,14 @@ license: mit
 app_file: app.py
 ---
 
-# VibeLedger Dashboard (Phase 11)
+# VibeLedger Dashboard
 
 VibeLedger Dashboard is a presentation-layer Streamlit frontend that communicates exclusively with the backend service via authenticated `/api/v1/*` REST APIs.
+
+The current code implements the previous architecture's eight-page interface. The
+[simplified target](../docs/architecture/README.md) is pending implementation: four
+pages (Wealth, Spending, Review, Settings), dated balances, simple record edits,
+and consumer login. Existing token configuration below describes current code only.
 
 ---
 
@@ -23,7 +28,8 @@ VibeLedger Dashboard is a presentation-layer Streamlit frontend that communicate
 1. **Zero Database Access**: The Dashboard maintains no direct PostgreSQL connections, holds no database credentials, and executes no SQL queries.
 2. **REST API Client**: All business operations, domain calculations, reconciliation flows, and asset/liability aggregations are performed by the backend service.
 3. **Browser Authentication**: Uses JWT-based Browser Authentication (`Authorization: Bearer <JWT>`) aligned with Phase 10 specifications.
-4. **Optimistic Concurrency**: Supports full preview and commit workflows for transaction corrections and reconciliation batches with row version conflict detection.
+4. **Optimistic Concurrency**: Current code supports correction and reconciliation
+   preview/commit. The simplified target retains version checks with one Save per edit.
 
 ---
 

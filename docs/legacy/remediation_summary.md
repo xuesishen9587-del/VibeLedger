@@ -69,7 +69,7 @@
 ## ⚠️ 历史测试与运行警告 (NEUTRALISED)
 
 > 🛑 **重要安全提示**：  
-> 以下为历史记录中的测试说明。**切勿直接运行旧脚本或对远端/生产数据库执行测试**。目标架构的测试体系（参见 [`docs/architecture/TEST_PLAN.md`](../architecture/TEST_PLAN.md)）将在独立隔离的本地/测试数据库环境中运行。
+> 以下为历史记录中的测试说明。**切勿直接运行旧脚本或对远端/生产数据库执行测试**。当前测试与验收规范见 [`IMPLEMENTATION_PLAN.md`](../architecture/IMPLEMENTATION_PLAN.md)，使用独立隔离的本地/测试数据库。
 
 ### 历史测试说明 (仅作档案留存，请勿直接执行)
 - 历史代码曾在 `ai-ledger-backend/test_idempotency.py` 中直接向配置的数据库写入 `Test_CNY_Debit` 账户。

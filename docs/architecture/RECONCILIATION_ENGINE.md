@@ -1621,11 +1621,19 @@ $$\text{Screenshot} \rightarrow \text{AI Observations} \rightarrow \text{Canonic
 Fields representing aggregate totals (such as "Total Assets", "总资产", "资产合计", "总市值", "Portfolio Total"):
 1. **Serve strictly as cross-check data**.
 2. **THEY NEVER CREATE AN ACCOUNT SNAPSHOT** (strictly avoiding double-counting against constituent accounts).
-3. When constituent observations and the displayed total share the same currency, the engine cross-checks:
-   $$\text{delta} = |\sum \text{observation.balance} - \text{displayed\_total}|$$
-4. If a material mismatch exists:
-   - Sets `failure_code = 'ASSET_TOTAL_MISMATCH'`.
-   - The entire batch enters `needs_confirmation` and will not auto-commit.
+3. **Exact Aggregate Total Comparison (Same Currency)**:
+   When constituent observations and the displayed total share the same currency, the engine executes an exact quantized cross-check:
+   a. Quantize each constituent observation balance and `displayed_total` to the currency minor unit using existing money-domain rules (e.g. 2 decimal places for CNY/USD, 0 for JPY).
+   b. Sum quantized constituent observations.
+   c. Exact equality after quantization = pass.
+   d. Any non-zero difference after quantization:
+      - Sets `failure_code = 'ASSET_TOTAL_MISMATCH'`.
+      - The overall `ingestion_request` enters `status = 'needs_confirmation'` and will not auto-commit.
+4. **Different Currencies or Unavailable Common Total**:
+   - If constituent currencies differ, or a valid common comparison is unavailable:
+     - Do not fabricate FX rates solely to make the screenshot total reconcile.
+     - Skip this aggregate equality auto-check.
+     - Continue deterministic validation of individual observations.
 
 ### 31.2.3 Account Resolution & Ambiguity Guards
 
@@ -1639,33 +1647,54 @@ Fields representing aggregate totals (such as "Total Assets", "总资产", "资�
 4. Any ambiguity or unresolved observation forces the workflow into `needs_confirmation`.
 5. AI MUST NOT create new accounts.
 
-### 31.2.4 Multi-Account Atomicity
+### 31.2.4 Multi-Account Atomicity & Workflow Isolation
 
-One Asset Capture is one atomic workflow:
-1. **ALL OR NOTHING**: Either all observations are validated and committed, or none are committed.
-2. Before writing:
-   - Resolve all accounts and validate all observations.
-   - Sort all affected canonical `account_id`s in ascending UUID order.
-   - Acquire `SELECT ... FOR UPDATE` locks on `account_state` strictly in sorted order (preventing deadlocks).
-3. Inside a single database transaction:
-   - Insert all snapshots (`account_snapshots`).
-   - Create any required reconciliation adjustments (`reconciliation_adjustment`).
-   - Compute and record investment P&L (`investment_pnl_periods`).
-   - Update `account_state` projections and `last_authoritative_snapshot_at`.
-   - Update `ingestion_requests` status to `committed`.
-4. Any failure: **ROLLBACK ALL**. No partial screenshot application.
+One Asset Capture represents:
+$$\mathbf{1\text{ ingestion\_request}} + \mathbf{0..N\text{ account-scoped reconciliation\_batches}}$$
+
+Key structural and status invariants:
+1. **Reconciliation Batch Scoping**:
+   - Each `reconciliation_batch` remains strictly scoped to exactly ONE account (`account_id NOT NULL`).
+   - All account-scoped `reconciliation_batches` produced by an Asset Capture reference the parent `ingestion_requests` row through `source_request_id`.
+   - **No Parent Reconciliation Batch**: We do NOT introduce a parent reconciliation batch, an `asset_capture_batches` table, or account hierarchies. The `ingestion_request` is the overall multi-account workflow and grouping boundary.
+2. **Status Terminology Isolation**:
+   - `needs_confirmation` = `ingestion_requests.status` only.
+   - `needs_review` = `reconciliation_batches.status` only.
+   - A reconciliation batch NEVER takes `needs_confirmation` status.
+3. **Unconfirmed State (needs_confirmation)**:
+   - When account resolution is ambiguous, aggregate total check fails (`ASSET_TOTAL_MISMATCH`), or ordinary account residuals exceed threshold, the overall `ingestion_request.status` becomes `needs_confirmation`.
+   - **Zero Financial Facts Committed**: No account snapshots, adjustment transactions, investment P&L periods, or `account_state` ledger balance changes are committed while in this status.
+   - Dashboard corrects unmapped observations or misrecognized values via `PATCH /api/v1/ingestion-requests/{id}/draft` (`observations: [{account_id, observed_balance, currency}]`), then calls bodyless `POST /api/v1/ingestion-requests/{id}/confirm` (or `POST /reject`).
+4. **ALL OR NOTHING Atomic Commit**:
+   - At final confirm (or high-confidence auto-commit):
+     - Resolve all accounts and validate all observations.
+     - Sort all affected canonical `account_id`s in ascending UUID order.
+     - Acquire `SELECT ... FOR UPDATE` locks on `account_state` strictly in sorted order (preventing deadlocks).
+     - Inside a single database transaction:
+       - Insert all snapshots (`account_snapshots`).
+       - Create any required single-account reconciliation batches (`reconciliation_batches` with `status = 'committed'`, `batch_type = 'snapshot'`, `source_request_id = ingestion_requests.id`).
+       - Create any required reconciliation adjustments (`reconciliation_adjustment`).
+       - Compute and record investment P&L (`investment_pnl_periods`).
+       - Update `account_state` projections and `last_authoritative_snapshot_at`.
+       - Update all associated `reconciliation_batches` -> `committed`.
+       - Update `ingestion_requests.status` to `committed`.
+   - Any failure: **ROLLBACK ALL**. No partial screenshot application.
+5. **Rejection Semantics**:
+   - On `POST /api/v1/ingestion-requests/{id}/reject`:
+     - `ingestion_requests.status` becomes `rejected`.
+     - Any associated nonterminal reconciliation workflow state produces zero financial facts.
 
 ### 31.2.5 Auto-Commit vs Confirmation
 
 A high-confidence asset capture may auto-commit only when:
 1. All account mappings uniquely resolve.
-2. All currencies validate.
+2. All currencies validate against account definitions.
 3. All balances validate.
-4. Aggregate cross-check passes (or currencies differ).
+4. Aggregate cross-check passes exact quantized equality (or currencies differ).
 5. All ordinary account residuals are within the $\le 200\text{ CNY}$ auto-adjustment threshold.
 
 If any check fails, or residuals are large/unexplained:
-- Request status becomes `needs_confirmation`.
+- Request status becomes `needs_confirmation` on `ingestion_requests`.
 - User confirmation represents explicit approval of the authoritative observed balances and commits the corresponding reconciliation effects atomically.
 
 ---

@@ -1603,7 +1603,11 @@ Phase 12.5 spans six sub-phases:
   - Add index `ix_accounts_household_risk`.
   - `ALTER TABLE categories ADD COLUMN description TEXT;`
   - Update `chk_ingestion_kind` on `ingestion_requests` to include `'asset_capture'`.
-  - Remove legacy `institution` column from target physical schema expectations.
+  - Execute `ALTER TABLE accounts DROP COLUMN institution;` to bring staging schema to target domain model.
+  - **Zero-Downtime Deployment Sequencing Requirement**:
+    - Runtime backend code must first remove all `accounts.institution` dependencies (entities, queries, inserts, serializers) as part of the same Phase 12.5 staging upgrade.
+    - Deploy compatible backend revision first (or coordinate deployment and migration atomically), ensuring no running backend revision issues queries referencing `accounts.institution` after the column is dropped.
+    - Execute `0010_asset_model_freeze.sql` to drop the column.
 
 ### 18.5.3 Phase 12.5C — Backend Domain, Repositories, & APIs
 - Update Account domain entities, repositories, and API endpoints to validate and persist `risk_level`.
@@ -1614,11 +1618,26 @@ Phase 12.5 spans six sub-phases:
   - Device bearer authentication.
   - Idempotency handling via `ingestion_requests` (`request_kind = 'asset_capture'`).
   - Gemini asset extraction invocation.
-  - Deterministic aggregate total cross-check (`ASSET_TOTAL_MISMATCH`).
+  - Deterministic aggregate total cross-check with exact quantized comparison:
+    1. Quantize observations and displayed total to minor currency units;
+    2. Sum quantized constituent balances;
+    3. Exact equality = pass;
+    4. Non-zero difference = `ASSET_TOTAL_MISMATCH` -> `ingestion_request.status = needs_confirmation`;
+    5. Skip aggregate check if currencies differ (do not fabricate FX).
   - Canonical account resolution with ambiguity protection for generic aliases.
-  - Multi-account atomic locking: sort affected `account_id`s in ascending UUID order, acquire `account_state FOR UPDATE`, commit snapshots and reconciliation/P&L in a single DB transaction. Rollback all on failure.
+  - Multi-account atomic locking: sort affected canonical `account_id`s in ascending UUID order, acquire `account_state FOR UPDATE`, commit snapshots, per-account reconciliation batches (`source_request_id`), adjustments, and investment P&L in ONE DB transaction. Rollback all on failure.
   - Auto-commit for high-confidence/unambiguous matches; `needs_confirmation` for mismatches/ambiguities.
-  - Support confirm, reject, and recover endpoints for `asset_capture`.
+- Implement Polymorphic Ingestion Confirm and Draft endpoints:
+  - `PATCH /api/v1/ingestion-requests/{request_id}/draft`: polymorphic by `request_kind`. If `asset_capture`, accepts `{"observations": [{"account_id": "uuid", "observed_balance": "...", "currency": "..."}]}` so Dashboard can correct unmapped accounts or OCR errors prior to confirmation.
+  - `POST /api/v1/ingestion-requests/{request_id}/confirm`: bodyless `{}`. Dispatched by `request_kind`. If `asset_capture`, revalidates current draft, sorts affected account UUIDs, locks `account_state` rows in ascending UUID order, atomically commits all snapshots, per-account reconciliation batches, adjustments, and investment P&L in ONE single DB transaction. Returns multi-account `results` response (NOT expense `transaction_id`). Repeated confirm replays stored response.
+  - `POST /api/v1/ingestion-requests/{request_id}/reject`: marks `ingestion_request` as `rejected`, committing zero financial facts.
+- Clean up Single-Account Snapshot endpoint:
+  - `POST /api/v1/accounts/{account_id}/snapshots` is strictly dedicated to known-account numeric/manual authoritative snapshot entry.
+  - Remove all image-based request handling from this single-account endpoint; all screenshot recognition MUST use `POST /api/v1/asset-captures`.
+- Enforce Status and Scoping Isolation:
+  - `needs_confirmation` belongs to `ingestion_requests.status` only.
+  - `needs_review` belongs to `reconciliation_batches.status` only.
+  - One Asset Capture is 1 `ingestion_request` + 0..N account-scoped `reconciliation_batches` linked by `source_request_id`. No parent reconciliation batch table or `asset_capture_batches` table.
 
 ### 18.5.4 Phase 12.5D — Dashboard UI Enhancement
 - Risk Distribution Chart and Breakdown Table:
@@ -1626,7 +1645,10 @@ Phase 12.5 spans six sub-phases:
   - Strictly excludes all credit accounts.
   - Converts non-reporting currencies using Reference FX.
 - Category Management UI: Add and edit category `description`.
-- Asset Capture Review / Confirmation UI: Review, adjust, confirm, or reject draft asset captures.
+- Asset Capture Review / Confirmation UI:
+  - Review draft asset captures in `needs_confirmation`.
+  - Resolve unmapped observations or correct OCR errors via `PATCH /api/v1/ingestion-requests/{id}/draft`.
+  - Confirm via bodyless `POST /api/v1/ingestion-requests/{id}/confirm` or reject via `POST /reject`.
 
 ### 18.5.5 Phase 12.5E — Dedicated iOS Asset Capture Shortcut
 - Dedicated `ios-shortcut-asset-1.0` Shortcut (distinct from Expense Shortcut).
@@ -1635,8 +1657,8 @@ Phase 12.5 spans six sub-phases:
 - Displays confirmed balances or informs user to confirm on Dashboard.
 
 ### 18.5.6 Phase 12.5F — Automated Testing & Staging Acceptance
-- Unit tests: schema invariants, risk_level rules, category descriptions, static Gemini asset transport schema, aggregate cross-check math, risk distribution calculation.
-- Integration tests: database migrations, multi-account row locking and atomicity, deadlock avoidance, idempotency replay, API endpoints.
+- Unit tests: schema invariants, risk_level rules, category descriptions, static Gemini asset transport schema, exact quantized aggregate cross-check math, risk distribution calculation.
+- Integration tests: database migrations (including 0010 column drop), multi-account row locking and atomicity, deadlock avoidance, idempotency replay, polymorphic draft/confirm endpoints.
 - Staging acceptance: deploy to staging (`ENVIRONMENT=staging`), execute real asset capture with dedicated Shortcut, verify atomic snapshot creation, reconciliation adjustments, and Dashboard risk distribution.
 
 ## Acceptance Criteria

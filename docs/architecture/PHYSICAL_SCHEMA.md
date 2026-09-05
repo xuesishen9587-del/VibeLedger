@@ -262,7 +262,19 @@ Account metadata only.
 | `created_at` | TIMESTAMPTZ | NOT NULL default now() |
 | `updated_at` | TIMESTAMPTZ | NOT NULL default now() |
 
-> Note: `institution` was removed from the target domain model in Phase 12.5. A single real institution/platform is modeled as multiple independent Accounts (e.g. `ABC_Debit`, `ABC_Term`, `ABC_Wealth`). No `institution` entity or column is maintained in the target schema.
+> [!IMPORTANT]
+> **Migration 0010 & Column Removal**:
+> The target domain model has no `Account.institution`. Phase 12.5 migration `0010_asset_model_freeze.sql` is responsible for bringing the existing staging schema to this target by executing the equivalent of:
+> ```sql
+> ALTER TABLE accounts DROP COLUMN institution;
+> ```
+> The final migrated schema after 0010 MUST NOT contain `accounts.institution`.
+>
+> **Zero-Downtime Deployment Sequencing Requirement**:
+> 1. Runtime backend code must first remove all references and dependencies on `accounts.institution` (entities, queries, inserts, serializers) as part of the same Phase 12.5 staging upgrade.
+> 2. Deploy the compatible backend revision first (or coordinate deployment and migration atomically), ensuring no running backend revision issues queries selecting or inserting `accounts.institution` after the column has been dropped.
+> 3. Execute `0010_asset_model_freeze.sql` to drop the column.
+> A single real institution/platform is modeled as multiple independent Accounts (e.g. `ABC_Debit`, `ABC_Term`, `ABC_Wealth`). No `institution` entity or column is maintained in the target schema.
 
 Checks:
 
@@ -456,6 +468,14 @@ Rule:
 
 - same key + same `request_hash` -> return stored state/response;
 - same key + different hash -> reject as `IDEMPOTENCY_KEY_REUSE`.
+
+Multi-Account Asset Capture Workflow Rules:
+- A single Asset Capture produces exactly 1 `ingestion_requests` row (`request_kind = 'asset_capture'`).
+- `needs_confirmation` is an `ingestion_requests.status` value only (indicating client/AI draft awaiting user confirmation).
+- While in `needs_confirmation`, zero financial facts (snapshots, transactions, adjustments, investment P&L) are written or partially committed.
+- The `ingestion_request` serves as the overall multi-account workflow and grouping boundary.
+- Once confirmed, all associated account-scoped `reconciliation_batches` and the `ingestion_request` transition to `committed` within the same single database transaction.
+- If rejected, `ingestion_requests.status` becomes `rejected`, leaving zero financial facts.
 
 ---
 
@@ -1065,6 +1085,13 @@ Rules:
 - PDF password never persisted;
 - repeated upload creates a new batch;
 - replay safety comes from transaction matching, not PDF deduplication.
+
+Status and Scoping Invariants:
+- `needs_review` is a `reconciliation_batches.status` value only (indicating reconciliation variance awaiting human resolution).
+- `reconciliation_batches` NEVER take `needs_confirmation` status.
+- Each `reconciliation_batch` remains strictly scoped to exactly ONE account (`account_id NOT NULL`).
+- For multi-account Asset Captures, 0..N account-scoped `reconciliation_batches` are created, each linked to the parent ingestion request via `source_request_id = ingestion_requests.id`.
+- There is NO parent reconciliation batch table, NO `asset_capture_batches` table, and NO account hierarchy.
 
 ---
 

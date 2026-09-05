@@ -783,19 +783,23 @@ investment_pnl
 # 11. Workflow Confirmation & Review Rules
 
 系统严格区分 **Ingestion 阶段的确认（`needs_confirmation`）** 与 **Reconciliation 阶段的审核（`needs_review`）**：
+- `needs_confirmation` **仅属于 `ingestion_requests.status`**（客户端/AI 捕获草稿生命周期）；
+- `needs_review` **仅属于 `reconciliation_batches.status`**（对账引擎差异裁决生命周期）。
+- 二者状态绝不混淆：`reconciliation_batches` 不包含 `needs_confirmation` 状态，`ingestion_requests` 亦不包含 `needs_review` 状态。
 
 ### 11.1 Ingestion / Shortcut 阶段 MUST `needs_confirmation`
 
-发生在客户端提交消费截图或草稿处理期间：
+发生在客户端提交消费或多账户资产截图草稿处理期间：
 
 ```text
-找不到唯一扣款账户 / 多个账户候选
+找不到唯一扣款/资产账户 / 多个账户候选
 金额、币种置信度不足或存在确定性校验冲突
+多账户资产截屏中分项和与显示总额不符（ASSET_TOTAL_MISMATCH）
 分类置信度不足（若需人工确认分类）
-用户在正式提交前发起自然语言修正
+用户在正式提交前发起自然语言修正或 Dashboard 草稿修正
 ```
 
-草稿处于 `needs_confirmation` 期间，**绝不生成正式 Transaction，绝不修改账户余额**。
+草稿处于 `needs_confirmation` 期间，**绝不生成正式 Transaction / Snapshot，绝不修改账户余额**。
 
 ### 11.2 Reconciliation / 对账阶段 MUST `needs_review`
 
@@ -1068,18 +1072,21 @@ Deterministic validation & aggregate cross-check
 │       ↓
 │   Atomic commit:
 │   - save account_snapshots (balance / investment_valuation)
-│   - execute reconciliation / investment P&L
-│   - update account_state projections
+│   - execute per-account reconciliation / investment P&L
+│   - update all associated reconciliation_batches -> committed
+│   - update ingestion_request -> committed (ONE DB transaction)
 │       ↓
-│   committed
+│   committed (Returns Asset Capture response)
 │
 └─ Ambiguous resolution / ASSET_TOTAL_MISMATCH / large residual
         ↓
-    needs_confirmation (ingestion_requests)
+    needs_confirmation (ingestion_requests only; zero financial facts committed)
         ↓
-    User confirms / edits / rejects in Dashboard
+    Dashboard edits draft (PATCH /api/v1/ingestion-requests/{id}/draft)
         ↓
-    Atomic commit only after user confirmation
+    Dashboard confirms (POST /api/v1/ingestion-requests/{id}/confirm with body {})
+        ↓
+    Atomic commit of all accounts only after confirmation
 ```
 
 ### 15.5.1 核心规则与不变式
@@ -1088,10 +1095,17 @@ Deterministic validation & aggregate cross-check
    - 接口不强制要求 `account_id`。
    - 单张截屏允许同时识别同一金融机构或平台下的多个账户余额（如：活期存款、定期存款、理财产品）。
    - 示例：一张农业银行截图显示活期 25,391.20 CNY、定期 200,000.00 CNY、理财 130,458.11 CNY、总资产 355,849.31 CNY。系统分别解析为 `ABC_Debit`、`ABC_Term`、`ABC_Wealth` 三笔独立观测。
-2. **汇总总额防重规则（Aggregate Total Anti-Double-Counting Rule）**：
+2. **汇总总额防重与精确量化核对规则（Aggregate Total Exact Comparison）**：
    - 截屏中出现的“总资产”、“资产合计”、“总市值”、“Total Assets”、“Asset Total”等总计字段，**仅作为交叉校验数据（cross-check data）**。
    - **汇总项绝不得生成独立的 Account Snapshot**，彻底杜绝与分项重复计入。
-   - 当分项观测币种与汇总币种一致时，后端核对分项之和是否等于汇总总额；若存在实质性偏差，标记 `failure_code = 'ASSET_TOTAL_MISMATCH'` 并强制转入 `needs_confirmation`。
+   - **同币种精确量化校验**：
+     1. 将各分项观测金额与截屏显示的汇总金额（`displayed_total`）按照货币小单位（如 CNY/USD 2 位小数，JPY 0 位小数）进行精确量化（Quantize）。
+     2. 计算量化后的分项观测金额之和。
+     3. 量化后若分项之和严格等于汇总金额（Exact Equality），则校验通过。
+     4. 若量化后存在任何非零差额（Any non-zero difference），判定为总额不符：标记 `failure_code = 'ASSET_TOTAL_MISMATCH'`，整体 `ingestion_request` 强制转入 `needs_confirmation`，阻止自动提交。
+   - **异币种或无共同比较基准**：
+     - 严禁为了凑齐截屏总额而捏造或估算 FX 汇率。
+     - 跳过此项总额严格等式自检，继续执行针对各独立分项观测的确定性验证。
 3. **确定性账户映射（Account Resolution）**：
    - Gemini 接收活跃账户的名称、`account_type`、币种及别名列表，利用整屏上下文（如银行 App 标题）识别账户。
    - 通用泛指别名（如“活期”、“定期”）在存在多个活跃账户候选时，绝不足以作为唯一确定映射。
@@ -1101,10 +1115,19 @@ Deterministic validation & aggregate cross-check
    - 标准流水线：`screenshot -> AI observations -> canonical resolution -> authoritative snapshots -> reconciliation / investment valuation -> account_state`。
    - `cash` / `savings` 账户生成 `snapshot_type = 'balance'` 的快照；
    - `investment` 账户生成 `snapshot_type = 'investment_valuation'` 的快照，并计算 `investment_pnl = closing - opening - contributions + withdrawals`。估值变动计入净资产与投资分析，绝不计入家庭现金收入。
-5. **多账户原子性（Multi-Account Atomicity）**：
-   - 一次 Asset Capture 属于单一原子事务，**要么全部观测账户生效，要么全不生效（ALL OR NOTHING）**。
-   - 写入前，先将所有识别出的 `account_id` 按 UUID 升序排序，按序对 `account_state` 加排他锁（`FOR UPDATE`），杜绝死锁。
-   - 在单一数据库事务内完成所有 Snapshot、对账调整与投资损益写入；任一账户失败则整单回滚，绝不产生局部快照写入。
+5. **多账户原子性与工作流边界（Workflow Boundary & Atomicity）**：
+   - 单次 Asset Capture 业务在系统层表现为：
+     $$\mathbf{1\text{ ingestion\_request}} + \mathbf{0..N\text{ account-scoped reconciliation\_batches}}$$
+   - 每个 `reconciliation_batch` 严格对应单一账户（`account_id NOT NULL`），并通过 `source_request_id` 关联至本次 `ingestion_request`。
+   - **严禁引入父对账批次表、`asset_capture_batches` 表或账户层级关系**。`ingestion_request` 是多账户截屏捕获的唯一工作流与分组边界。
+   - **待确认状态**：若存在映射歧义或总额不符，整体 `ingestion_requests.status = 'needs_confirmation'`。此时**绝不部分提交任何财务事实**，所有快照、对账调整、投资损益及 `account_state` 均保持未提交。
+   - **修正流程**：Dashboard 调用多态草稿修正接口 `PATCH /api/v1/ingestion-requests/{id}/draft`（传入 `observations: [{account_id, observed_balance, currency}]`）修正未匹配账户或金额，随后调用无 Body 的确认接口 `POST /api/v1/ingestion-requests/{id}/confirm`。
+   - **原子提交（ALL OR NOTHING）**：
+     - 确认或高置信自动提交时，先将涉及的所有 canonical `account_id` 按 UUID 升序排序，严格按序锁定 `account_state` 行（`FOR UPDATE`），杜绝死锁。
+     - 在单一数据库事务内完成所有 Snapshot、各账户对账调整与投资损益写入。
+     - 所有关联的 `reconciliation_batches` 与该 `ingestion_request` 在同一事务内一同转为 `committed`。
+     - 确认接口返回 Asset Capture 提交结果（多账户 `results` 数组，绝非单笔交易的 `transaction_id`）；重复提交幂等重放已存储结果。
+     - 若调用 reject，`ingestion_request` 转为 `rejected`，不产生任何财务事实。
 6. **请求幂等（Idempotency）**：
    - 新增 `request_kind = 'asset_capture'`。
    - 单次截屏生成一条 `ingestion_requests`，以 `(device_id, idempotency_key)` 为幂等边界。重试相同 payload 幂等返回已有结果；不同 payload 报 409 冲突。

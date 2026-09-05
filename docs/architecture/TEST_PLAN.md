@@ -903,19 +903,36 @@ no snapshot created for displayed_total (anti-double-counting verified)
 account_state projections updated atomically
 ```
 
-## Aggregate Total Mismatch
-Mock Gemini output:
+## Aggregate Total Exact Quantized Cross-Check
+Test A (Exact Match):
 ```text
-observations sum = 345,849.31 CNY
+observations: [25,391.20 CNY, 200,000.00 CNY, 130,458.11 CNY]
+quantized sum = 355,849.31 CNY
 displayed_total = 355,849.31 CNY
-```
 Expected:
+cross-check passes
+permits high-confidence auto-commit
+```
+
+Test B (Non-Zero Mismatch):
 ```text
-status = needs_confirmation
-failure_code = ASSET_TOTAL_MISMATCH
+observations sum = 345,849.31 CNY (or 355,849.30 CNY — any non-zero difference after quantization)
+displayed_total = 355,849.31 CNY
+Expected:
+cross-check fails: failure_code = ASSET_TOTAL_MISMATCH
+overall ingestion_request.status = needs_confirmation
 draft stored on ingestion_request
-zero snapshots created
-zero account_state mutations
+zero snapshots created, zero financial facts committed
+```
+
+Test C (Mixed Currency / Unavailable Comparison):
+```text
+observations: [25,391.20 CNY, 3,500.00 USD]
+displayed_total: 50,000.00 CNY (or missing)
+Expected:
+skips aggregate total auto-check
+does NOT fabricate or guess FX rate
+continues deterministic validation of individual observations
 ```
 
 ## Ambiguous / Generic Alias Guard
@@ -927,8 +944,8 @@ without conclusive whole-screen context
 Expected:
 ```text
 status = needs_confirmation
-draft stored
-no auto-commit
+draft stored with account_id: null for ambiguous observation
+no auto-commit, zero financial facts written
 ```
 
 ## Multi-Account Atomicity and Rollback
@@ -940,6 +957,98 @@ entire transaction rolls back (ROLLBACK ALL)
 zero snapshots created across all 3 accounts
 ingestion_request status remains needs_confirmation or failed
 no partial writes
+```
+
+## Patch Asset Capture Draft (`PATCH /api/v1/ingestion-requests/{id}/draft`)
+Test A (Correct Unmapped Account & Balance):
+```text
+ingestion_request status = needs_confirmation with unmapped observation (account_id: null)
+PATCH /api/v1/ingestion-requests/{id}/draft
+payload: {
+  "observations": [
+    {"account_id": "<ABC_Debit_UUID>", "observed_balance": "25391.20", "currency": "CNY"},
+    {"account_id": "<ABC_Wealth_UUID>", "observed_balance": "130458.11", "currency": "CNY"}
+  ]
+}
+Expected:
+draft updated and revalidated
+all account_ids verified (active, household, currency matches)
+status remains needs_confirmation until confirm endpoint is called
+```
+
+Test B (Invalid Draft Patch Rejected):
+```text
+PATCH with non-existent account_id, inactive account, account from another household, currency mismatch, or duplicate account_id
+Expected:
+400/422 validation error
+draft not mutated
+```
+
+## Bodyless Asset Capture Confirm (`POST /api/v1/ingestion-requests/{id}/confirm`)
+Test A (Confirm Patched Draft):
+```text
+POST /api/v1/ingestion-requests/{id}/confirm with body {}
+Expected:
+revalidates complete current draft
+locks account_state rows in ascending UUID order
+commits in ONE DB transaction:
+  - account_snapshots for all observed accounts
+  - 0..N account-scoped reconciliation_batches (source_request_id = ingestion_requests.id)
+  - reconciliation_adjustment if residual <= 200 CNY
+  - investment_pnl for investment accounts
+  - account_state projections updated
+  - associated reconciliation_batches -> committed
+  - ingestion_request -> committed
+returns Asset Capture response (results array with account details, NOT expense transaction_id)
+```
+
+Test B (Repeated Confirm Idempotency Replay):
+```text
+second POST /api/v1/ingestion-requests/{id}/confirm with body {} on committed asset capture
+Expected:
+200 OK replaying stored response_payload
+no duplicate snapshots, no duplicate reconciliation batches, no duplicate adjustments
+```
+
+Test C (Expense Confirm Unchanged):
+```text
+POST /api/v1/ingestion-requests/{id}/confirm with body {} on expense draft
+Expected:
+commits single transaction/installment
+returns expense response with transaction_id (expense workflow completely undisturbed)
+```
+
+## Asset Capture Rejection (`POST /api/v1/ingestion-requests/{id}/reject`)
+Test:
+```text
+POST /api/v1/ingestion-requests/{id}/reject with {"reason": "User discarded asset capture"}
+Expected:
+ingestion_request.status -> rejected
+zero snapshots created, zero adjustments, zero account_state mutations
+```
+
+## Dedicated Single-Account Snapshot Endpoint (`POST /api/v1/accounts/{account_id}/snapshots`)
+Test:
+```text
+Valid known-account numeric payload: {"as_of": "...", "balance": "82315.42", "currency": "CNY", "source": "dashboard_manual"}
+Expected:
+processed for known account
+
+Image payload submitted to single-account endpoint: {"image": {...}}
+Expected:
+rejected with 400 Bad Request / 422 Unprocessable Entity
+all screenshot-based recognition MUST use POST /api/v1/asset-captures
+```
+
+## Status & Workflow Scoping Isolation
+Test:
+```text
+Verify ingestion_requests.status takes only: received, processing, needs_confirmation, committed, rejected, failed
+Verify reconciliation_batches.status takes only: processing, ready, needs_review, committed, rejected, failed
+Verify reconciliation_batches NEVER take needs_confirmation
+Verify ingestion_requests NEVER take needs_review
+Verify each reconciliation_batch is scoped to exactly 1 account_id (NOT NULL)
+Verify multi-account Asset Capture links batches via source_request_id (no parent batch table)
 ```
 
 ## Dashboard Risk Distribution Calculation
@@ -2361,10 +2470,17 @@ Required automated and manual acceptance:
 ```text
 Account risk_level validation (credit must have NULL risk_level)
 Category description persistence and prompt injection
+Migration 0010 execution (ALTER TABLE accounts DROP COLUMN institution) with backend deployment sequencing
 Gemini static transport schema verification (no dynamic dicts, no additionalProperties)
 Multi-account asset capture API (POST /api/v1/asset-captures)
-Multi-account atomicity and deterministic locking order (UUID order)
-Aggregate total cross-check math (sum match vs ASSET_TOTAL_MISMATCH)
+Exact quantized aggregate total cross-check (exact equality pass vs ASSET_TOTAL_MISMATCH; skip on currency diff)
+Generic alias ambiguity guard (unmapped observation forced to needs_confirmation)
+Multi-account atomicity and deterministic locking order (UUID order, ALL OR NOTHING)
+Polymorphic ingestion draft revision (PATCH /api/v1/ingestion-requests/{id}/draft for asset_capture)
+Bodyless ingestion confirmation (POST /api/v1/ingestion-requests/{id}/confirm returns Asset Capture results; repeated replay idempotency)
+Dedicated single-account snapshot endpoint (numeric-only, reject image payload)
+Status terminology and workflow isolation (needs_confirmation on requests, needs_review on batches, 1 request + 0..N batches via source_request_id)
+Expense Shortcut and confirmation behavior completely unchanged
 Dashboard risk allocation calculation (positive cash/savings/investment, exclude credit, NULL as unclassified)
 Dedicated Asset Capture Shortcut verification
 Staging runtime acceptance before Phase 13

@@ -101,7 +101,7 @@ All future development must follow this strict reading and authority order:
 12. **Document Privacy**: Statement PDFs are deleted immediately upon successful parsing (max 24h retention on failure); PDF passwords are kept in memory only and never persisted.
 13. **Backend Exclusivity**: Dashboard is a pure UI client consuming Backend REST APIs; it never holds direct database credentials or executes accounting business logic.
 14. **Account Semantics & Risk Allocation**: `account_type` is strictly `cash`, `savings`, `credit`, `investment`. No `institution` entity or column is maintained; single institutions are modeled as multiple independent accounts. `asset_class`, `liquidity_level`, and account hierarchies are prohibited. `Account.risk_level` is nullable user metadata; credit accounts MUST have `risk_level = NULL` and are strictly excluded from risk distribution. `Category.description` carries semantic classification rules; category `priority` is prohibited.
-15. **Multi-Account Asset Capture**: `POST /api/v1/asset-captures` is a dedicated Product v1 business intent for extracting balances across multiple accounts from a single banking/investment screenshot. Gemini extraction uses static Pydantic schemas without dynamic dicts or `additionalProperties`. Displayed aggregate totals are cross-check only and NEVER create a snapshot (`ASSET_TOTAL_MISMATCH` on discrepancy). Persistence locks affected `account_state` rows in ascending UUID order and atomically writes snapshots, adjustments, and investment P&L in a single DB transaction (ALL OR NOTHING).
+15. **Multi-Account Asset Capture**: `POST /api/v1/asset-captures` is a dedicated Product v1 business intent for extracting balances across multiple accounts from a single banking/investment screenshot. Gemini extraction uses static Pydantic schemas without dynamic dicts or `additionalProperties`. Displayed aggregate totals are cross-check only and NEVER create a snapshot (exact quantized comparison; `ASSET_TOTAL_MISMATCH` on non-zero discrepancy). One Asset Capture produces 1 `ingestion_request` (`needs_confirmation` on ambiguity) + 0..N account-scoped `reconciliation_batches` (`needs_review`). Dashboard edits draft via `PATCH /draft` (`observations: [{account_id, observed_balance, currency}]`) and confirms via bodyless `POST /confirm` (replaying stored Asset Capture response on repeated calls). Persistence locks affected `account_state` rows in ascending UUID order and atomically writes snapshots, adjustments, and investment P&L in a single DB transaction (ALL OR NOTHING).
 
 ---
 
@@ -109,9 +109,9 @@ All future development must follow this strict reading and authority order:
 
 1. **Phase 12.5 (Account / Asset Model & Multi-Account Asset Capture)**:
    - 12.5A: Architecture re-freeze and documentation (Current).
-   - 12.5B: Schema migration (`0010_asset_model_freeze.sql`: `risk_level`, `description`, `asset_capture` request_kind).
-   - 12.5C: Backend domain, repositories, and APIs (`Account` risk_level, `Category` description, `POST /api/v1/asset-captures`, static Gemini transport).
-   - 12.5D: Dashboard UI (Risk distribution chart/table, category descriptions, asset capture review).
+   - 12.5B: Schema migration (`0010_asset_model_freeze.sql`: `risk_level`, `description`, `asset_capture` request_kind, and `DROP COLUMN institution` with backend deployment sequencing).
+   - 12.5C: Backend domain, repositories, and APIs (`Account` risk_level, `Category` description, `POST /api/v1/asset-captures`, static Gemini transport, polymorphic `PATCH /draft` & bodyless `POST /confirm`, dedicated single-account snapshot endpoint cleanup).
+   - 12.5D: Dashboard UI (Risk distribution chart/table, category descriptions, asset capture review & draft correction).
    - 12.5E: Dedicated iOS Asset Capture Shortcut.
    - 12.5F: Automated test matrix and staging acceptance.
 2. **Phase 13 (Production Fresh Cutover)**: Deploy target backend and database to production, establish real opening balances, provision production devices, switch daily Shortcut, and archive legacy systems. **Strictly blocked until Phase 12.5 passes.**

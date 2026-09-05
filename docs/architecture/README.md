@@ -73,8 +73,9 @@ If legacy documentation or existing prototype code conflicts with target archite
 - **`opening_balance`**: Initial ledger baseline transaction at `ledger_start_date`. Excluded from income and expense metrics.
 
 ### 3.4 Workflow Statuses
-- **`needs_confirmation`**: Used for **ingestion requests** (e.g. Shortcut captures with low confidence, ambiguous accounts, or validation warnings) that require user approval before financial commit.
-- **`needs_review`**: Used for **reconciliation batches and candidates** where automated matching is ambiguous, capital flow is unclear, or residual exceeds threshold.
+- **`needs_confirmation`**: Belongs **strictly to `ingestion_requests.status`** (e.g. Expense or Asset Capture captures with low confidence, ambiguous accounts, or validation warnings) that require user approval before financial commit. While unconfirmed, zero financial facts are committed.
+- **`needs_review`**: Belongs **strictly to `reconciliation_batches.status`** (and reconciliation candidates) where automated matching is ambiguous, capital flow is unclear, or residual exceeds threshold.
+- Reconciliation batches NEVER take `needs_confirmation`; Ingestion requests NEVER take `needs_review`. One Asset Capture produces 1 `ingestion_request` + 0..N account-scoped `reconciliation_batches` linked by `source_request_id`.
 
 ### 3.5 Candidate Types (Reconciliation Enum)
 The canonical set of reconciliation candidate types across all architecture contracts is:

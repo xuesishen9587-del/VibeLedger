@@ -615,21 +615,22 @@ Request:
 {}
 ```
 
-Backend:
+The confirmation request body remains strictly bodyless (`{}`). The backend dispatches confirmation behavior polymorphically by `ingestion_request.request_kind`:
 
+### Case A: `request_kind = 'expense'`
+Backend:
 ```text
 lock ingestion_request
 verify status = needs_confirmation
 revalidate draft against current account/category config
 lock account_state
-commit transaction
+commit transaction or installment
 update request -> committed
 store replayable response
 audit
 ```
 
 Response:
-
 ```json
 {
   "status": "committed",
@@ -639,7 +640,57 @@ Response:
 }
 ```
 
-Repeated confirm after commit returns the committed result.
+### Case B: `request_kind = 'asset_capture'`
+Backend:
+```text
+lock ingestion_request
+verify status = needs_confirmation
+revalidate complete current asset draft (draft_payload)
+sort all affected canonical account_ids in ascending UUID order
+lock all account_state rows in sorted order (FOR UPDATE)
+atomically commit all snapshots, per-account reconciliation batches, adjustments, and investment P&L in ONE DB transaction
+update all associated reconciliation_batches -> committed
+update ingestion_request -> committed
+store replayable response
+audit
+```
+
+Response:
+```json
+{
+  "status": "committed",
+  "request_id": "8a7c6b5d-4e3f-2a1b-0c9d-8e7f6a5b4c3d",
+  "captured_at": "2026-09-04T12:30:00+08:00",
+  "displayed_total": "355849.31",
+  "displayed_total_currency": "CNY",
+  "results": [
+    {
+      "account_id": "11111111-1111-1111-1111-111111111111",
+      "account_name": "ABC_Debit",
+      "account_type": "cash",
+      "snapshot_id": "aaaa1111-2222-3333-4444-555566667777",
+      "snapshot_type": "balance",
+      "observed_balance": "25391.20",
+      "currency": "CNY",
+      "residual_amount": "0.00",
+      "adjustment_transaction_id": null
+    },
+    {
+      "account_id": "33333333-3333-3333-3333-333333333333",
+      "account_name": "ABC_Wealth",
+      "account_type": "investment",
+      "snapshot_id": "cccc3333-4444-5555-6666-777788889999",
+      "snapshot_type": "investment_valuation",
+      "observed_balance": "130458.11",
+      "currency": "CNY",
+      "investment_pnl": "1458.11",
+      "pnl_period_id": "dddd4444-5555-6666-7777-888899990000"
+    }
+  ]
+}
+```
+
+Repeated confirm after commit returns the committed result (replaying stored `response_payload` for both expense and asset_capture).
 
 ---
 
@@ -674,11 +725,13 @@ The same `request_id` and same original client idempotency key remain in use.
 
 ## 7.3 Structured revision from Dashboard
 
-Dashboard may edit deterministic fields directly.
+Dashboard may edit deterministic fields directly. This endpoint is polymorphic based on `ingestion_request.request_kind`:
 
 ```http
 PATCH /api/v1/ingestion-requests/{request_id}/draft
 ```
+
+### For `request_kind = 'expense'`:
 
 Request example:
 
@@ -693,7 +746,37 @@ Request example:
 }
 ```
 
-Backend validates the complete resulting draft.
+### For `request_kind = 'asset_capture'`:
+
+The Dashboard uses this endpoint to resolve unmapped accounts (`account_id: null` -> valid `account_id`), correct wrong account mappings, or fix OCR-misrecognized observed balances/currencies prior to calling `POST /confirm`:
+
+Request example:
+
+```json
+{
+  "observations": [
+    {
+      "account_id": "11111111-1111-1111-1111-111111111111",
+      "observed_balance": "25391.20",
+      "currency": "CNY"
+    },
+    {
+      "account_id": "22222222-2222-2222-2222-222222222222",
+      "observed_balance": "200000.00",
+      "currency": "CNY"
+    },
+    {
+      "account_id": "33333333-3333-3333-3333-333333333333",
+      "observed_balance": "130458.11",
+      "currency": "CNY"
+    }
+  ]
+}
+```
+
+Backend validates the complete resulting draft:
+- every `account_id` must exist, be `active`, belong to the authenticated household, and match the specified `currency`;
+- all `account_id` entries in the draft must be unique (no duplicate observation mappings to the same account).
 
 ---
 
@@ -856,11 +939,19 @@ AI Invariants:
 Fields representing aggregate totals (such as "Total Assets", "总资产", "资产合计", "总市值", "Portfolio Total"):
 1. **Never create an Account Snapshot** (strictly avoids double-counting against constituent accounts).
 2. **Serve as cross-check data only**.
-3. When constituent observations and `displayed_total` share the same currency, backend computes:
-   $$\text{residual} = |\sum \text{observation.balance} - \text{displayed\_total}|$$
-4. If a material mismatch exists:
-   - Sets `failure_code = 'ASSET_TOTAL_MISMATCH'`.
-   - Forces the workflow into `status = 'needs_confirmation'`.
+3. **Exact Aggregate Total Comparison (Same Currency)**:
+   When constituent observations and `displayed_total` share the same currency, the engine executes an exact quantized cross-check:
+   a. Quantize each constituent observation balance and `displayed_total` to the currency minor unit using existing money-domain rules (e.g. 2 decimal places for CNY/USD, 0 for JPY).
+   b. Sum quantized constituent observations.
+   c. Exact equality after quantization = pass.
+   d. Any non-zero difference after quantization:
+      - Sets `failure_code = 'ASSET_TOTAL_MISMATCH'`.
+      - Forces the overall ingestion request into `status = 'needs_confirmation'`.
+4. **Different Currencies or Unavailable Common Total**:
+   - If constituent currencies differ, or a valid common comparison is unavailable:
+     - Do not fabricate FX rates solely to make the screenshot total reconcile.
+     - Skip this aggregate equality auto-check.
+     - Continue deterministic validation of individual observations.
 
 ---
 
@@ -887,9 +978,30 @@ Fields representing aggregate totals (such as "Total Assets", "总资产", "资�
    - `investment` accounts: `snapshot_type = 'investment_valuation'`. Computes:
      $$\text{Investment P\&L} = \text{Closing Valuation} - \text{Opening Valuation} - \text{Contributions} + \text{Withdrawals}$$
      Investment valuation changes update net worth and investment analytics, but **never become household cash income**.
-4. **ALL OR NOTHING**:
-   - Before writing, all affected canonical `account_id`s are sorted in ascending UUID order and locked (`account_state FOR UPDATE`) to prevent deadlocks.
-   - All snapshots, reconciliation adjustments, and investment P&L records are written in **one single database transaction**.
+4. **Workflow & Status Isolation**:
+   - One Asset Capture is represented by:
+     $$\mathbf{1\text{ ingestion\_request}} + \mathbf{0..N\text{ account-scoped reconciliation\_batches}}$$
+   - Each `reconciliation_batch` remains scoped to exactly ONE account (`account_id NOT NULL`), linked via `source_request_id = ingestion_requests.id`.
+   - Do NOT introduce a parent reconciliation batch, `asset_capture_batches` table, or account hierarchy.
+   - The `ingestion_request` is the overall multi-account workflow and grouping boundary.
+   - **Status Distinction**:
+     - `needs_confirmation` = `ingestion_requests.status` only.
+     - `needs_review` = `reconciliation_batches.status` only.
+   - When an Asset Capture requires confirmation:
+     - `ingestion_request.status = 'needs_confirmation'`.
+     - Zero financial facts are partially committed: account snapshots, adjustment transactions, investment P&L, and `account_state` effects remain uncommitted.
+     - Dashboard edits the ingestion draft via `PATCH /api/v1/ingestion-requests/{id}/draft` and confirms via bodyless `POST /api/v1/ingestion-requests/{id}/confirm` or rejects via `POST /api/v1/ingestion-requests/{id}/reject`.
+5. **ALL OR NOTHING Atomicity**:
+   - At final confirm or high-confidence auto-commit:
+     - All affected accounts are validated.
+     - All affected canonical `account_id`s are sorted in ascending UUID order.
+     - `account_state` rows are locked strictly in sorted order (`FOR UPDATE`) to prevent deadlocks.
+     - All snapshots, reconciliation adjustments, and investment P&L records are written in **one single database transaction**.
+     - All resulting account-scoped reconciliation batches become `committed` together.
+     - The `ingestion_request` becomes `committed` in the same transaction.
+   - On reject (`POST /api/v1/ingestion-requests/{id}/reject`):
+     - `ingestion_request` becomes `rejected`.
+     - Any associated nonterminal reconciliation workflow state produces zero financial facts.
    - If any account fails validation or unexpected error occurs: `ROLLBACK ALL`. No partial snapshot application.
 
 ---
@@ -991,9 +1103,13 @@ Returned when account mapping is ambiguous, aggregate total mismatch occurs, or 
 
 Asset capture requests fully participate in the standard ingestion lifecycle:
 - **Recovery**: `GET /api/v1/ingestion-requests/by-key/{idempotency_key}`
+- **Structured Correction**: `PATCH /api/v1/ingestion-requests/{id}/draft`
+  - Dashboard submits corrected/approved observation mappings (`observations: [{account_id, observed_balance, currency}]`) to resolve unmapped accounts or correct OCR misrecognitions prior to confirmation.
 - **Confirmation**: `POST /api/v1/ingestion-requests/{id}/confirm`
-  - User submits approved/corrected observation mapping.
-  - Backend locks affected `account_state` rows in ascending UUID order and atomically writes snapshots and reconciliation effects.
+  - Request body is strictly bodyless (`{}`).
+  - Backend revalidates the current asset draft, sorts affected canonical `account_id`s in ascending UUID order, locks `account_state` rows (`FOR UPDATE`), and atomically writes snapshots, per-account reconciliation batches, adjustments, and investment P&L in ONE database transaction.
+  - Returns the Asset Capture committed response (containing the `results` array, NOT an expense `transaction_id`).
+  - Repeated confirmation replays the stored committed response.
 - **Rejection**: `POST /api/v1/ingestion-requests/{id}/reject`
   - Marks request as `rejected`, writes no financial changes.
 
@@ -1001,7 +1117,11 @@ Asset capture requests fully participate in the standard ingestion lifecycle:
 
 # 9. Account Snapshot API
 
-Account Snapshot is a dedicated authoritative observation entry.
+Account Snapshot is a dedicated authoritative observation entry for a **KNOWN ACCOUNT** (`account_id` already known).
+
+> [!IMPORTANT]
+> `POST /api/v1/accounts/{account_id}/snapshots` is strictly for known-account numeric/manual authoritative snapshot entry (used by Dashboard manual entry or automated balance sync when `account_id` is predetermined).
+> **ALL screenshot-based bank / Alipay / brokerage asset overview recognition MUST use `POST /api/v1/asset-captures`.** There is NO second image-based Shortcut ingestion path on this single-account endpoint.
 
 ---
 
@@ -1020,20 +1140,6 @@ Request:
   "balance": "82315.42",
   "currency": "CNY",
   "source": "dashboard_manual"
-}
-```
-
-For Shortcut image recognition:
-
-```json
-{
-  "idempotency_key": "...",
-  "as_of": "2026-08-19T09:55:00+08:00",
-  "image": {
-    "mime_type": "image/jpeg",
-    "base64": "..."
-  },
-  "source": "shortcut"
 }
 ```
 
@@ -1112,7 +1218,7 @@ Request:
 }
 ```
 
-or image-based Shortcut capture.
+This endpoint is strictly for known-account numeric authoritative valuation entry (e.g. Dashboard manual entry). All screenshot-based brokerage overview recognition must use `POST /api/v1/asset-captures`.
 
 Backend:
 

@@ -73,8 +73,9 @@ If legacy documentation or existing prototype code conflicts with target archite
 - **`opening_balance`**: Initial ledger baseline transaction at `ledger_start_date`. Excluded from income and expense metrics.
 
 ### 3.4 Workflow Statuses
-- **`needs_confirmation`**: Used for **ingestion requests** (e.g. Shortcut captures with low confidence, ambiguous accounts, or validation warnings) that require user approval before financial commit.
-- **`needs_review`**: Used for **reconciliation batches and candidates** where automated matching is ambiguous, capital flow is unclear, or residual exceeds threshold.
+- **`needs_confirmation`**: Belongs **strictly to `ingestion_requests.status`** (e.g. Expense or Asset Capture captures with low confidence, ambiguous accounts, or validation warnings) that require user approval before financial commit. While unconfirmed, zero financial facts are committed.
+- **`needs_review`**: Belongs **strictly to `reconciliation_batches.status`** (and reconciliation candidates) where automated matching is ambiguous, capital flow is unclear, or residual exceeds threshold.
+- Reconciliation batches NEVER take `needs_confirmation`; Ingestion requests NEVER take `needs_review`. One Asset Capture produces 1 `ingestion_request` + 0..N account-scoped `reconciliation_batches` linked by `source_request_id`.
 
 ### 3.5 Candidate Types (Reconciliation Enum)
 The canonical set of reconciliation candidate types across all architecture contracts is:
@@ -108,3 +109,14 @@ The canonical match statuses on `statement_lines` are:
 - **`status = 'committed'`** $\iff$ `deleted_at IS NULL` AND `delete_reason IS NULL`
 - **`status = 'voided'`** $\iff$ `deleted_at IS NOT NULL` AND `delete_reason IS NOT NULL`
 - Soft delete and void are the identical financial lifecycle operation; voiding atomically reverses `account_state` projections exactly once and preserves audit trails.
+
+### 3.10 Ingestion Request Kinds
+- **`expense`**: Single-expense receipt/payment capture from iPhone Shortcut or Dashboard.
+- **`transfer`**: Two-legged internal transfer capture.
+- **`snapshot`**: Single-account manual or Dashboard balance observation.
+- **`asset_capture`**: Dedicated multi-account asset overview capture from a single banking or investment screenshot (`POST /api/v1/asset-captures`). Strictly restricted to ASSET accounts (`cash`, `savings`, `investment`); credit accounts are excluded from candidate accounts and rejected by deterministic validation (`ASSET_ACCOUNT_TYPE_INVALID`). Displayed credit-card liabilities are ignored. Confirmed via bodyless `POST /confirm` (empty object `{}` tolerated). Commits all observed account snapshots atomically or rolls back completely.
+
+### 3.11 Account Types & Risk Allocation
+- **`account_type`**: Exactly `cash`, `savings`, `credit`, `investment`. A single financial institution or platform is modeled as multiple independent canonical Accounts. The `institution` entity, `asset_class`, `liquidity_level`, and account hierarchies are strictly out of scope.
+- **`risk_level`**: User-configured metadata (`very_low`, `low`, `medium`, `high`, `NULL`). Used for Dashboard household wealth risk distribution. Credit accounts MUST have `risk_level = NULL` and are excluded from risk distribution. Asset accounts with `NULL` risk level are displayed as "unclassified" (未分类).
+- **Canonical Expense Categories & Category `description`**: Product v1 defines exactly 14 canonical active Expense categories whose names are immutable (`CANONICAL_EXPENSE_CATEGORY_IMMUTABLE`). Category `description` carries semantic classification rules (e.g. `Child` override semantics) passed to Gemini. Category `priority` is prohibited. Income categories remain fully customizable.

@@ -1,10 +1,11 @@
 # VibeLedger Project Context & Agent Handoff
 
-> Current stage:  
-> **Phases 0–11 implemented, verified, reviewed, and merged to `main`.**  
-> **Phase 11.5 (Pre-production Deployment & Runtime Readiness) in progress.**  
-> **Phase 12 (Real iPhone Shortcut v2 acceptance) ready to execute once Staging is deployed.**  
-> **Phase 13 (Production Fresh Cutover) scheduled after Phase 12 verification.**
+> Current stage:
+> **Phases 0–11 implemented, verified, reviewed, and merged to `main`.**
+> **Phase 11.5 (Pre-production Deployment & Runtime Readiness) staging runtime accepted.**
+> **Phase 12 (Real iPhone Shortcut v2 acceptance) completed in staging.**
+> **Phase 12.5 (Account / Asset Model Architecture Re-Freeze & Implementation) in progress.**
+> **Phase 13 (Production Fresh Cutover) strictly blocked until Phase 12.5 passes.**
 
 ---
 
@@ -12,8 +13,8 @@
 
 VibeLedger is a dedicated AI financial ledger for a two-person household:
 - **Daily Ingestion**: iPhone Shortcut captures single-expense screenshots, which Gemini parses into structured financial records.
-- **Authoritative Calibration**: Periodic bank/credit card Statement PDFs and Account Snapshots provide ground-truth reconciliation to prevent ledger drift.
-- **Reporting Focus**: Holistic family balance sheet, cash flows, liabilities, and investment valuations. No couple AA, split-billing, or intra-household debt tracking.
+- **Asset Calibration**: Periodic bank/credit card Statement PDFs, Single Snapshots, and Multi-Account Asset Overview Captures provide ground-truth calibration to prevent ledger drift.
+- **Reporting Focus**: Holistic family balance sheet, cash flows, liabilities, risk distribution, and investment valuations. No couple AA, split-billing, or intra-household debt tracking.
 
 ---
 
@@ -99,11 +100,18 @@ All future development must follow this strict reading and authority order:
 11. **Historical Correction Flow**: Statement-confirmed transactions can only be corrected through an explicit two-step preview/commit API with optimistic concurrency control (`row_version`), updating `account_state` deltas and writing append-only audit events without altering raw Statement evidence.
 12. **Document Privacy**: Statement PDFs are deleted immediately upon successful parsing (max 24h retention on failure); PDF passwords are kept in memory only and never persisted.
 13. **Backend Exclusivity**: Dashboard is a pure UI client consuming Backend REST APIs; it never holds direct database credentials or executes accounting business logic.
+14. **Account Semantics & Risk Allocation**: `account_type` is strictly `cash`, `savings`, `credit`, `investment`. No `institution` entity or column is maintained; single institutions are modeled as multiple independent accounts. `asset_class`, `liquidity_level`, and account hierarchies are prohibited. `Account.risk_level` is nullable user metadata; credit accounts MUST have `risk_level = NULL` and are strictly excluded from risk distribution. Product v1 defines exactly 14 canonical active Expense categories whose names are immutable (`CANONICAL_EXPENSE_CATEGORY_IMMUTABLE`); `Category.description` carries semantic classification rules (e.g. `Child` priority semantics); category `priority` column is strictly prohibited. Income categories remain customizable.
+15. **Multi-Account Asset Capture**: `POST /api/v1/asset-captures` is a dedicated Product v1 business intent for extracting balances across multiple accounts from a single banking/investment screenshot. Eligible account types are strictly `cash`, `savings`, `investment`; `credit` accounts MUST NOT be passed to Gemini candidates and any mapping to credit is rejected with `ASSET_ACCOUNT_TYPE_INVALID`. Displayed credit-card liabilities/balances in screenshots are ignored and do not participate in asset totals. Gemini extraction uses static Pydantic schemas without dynamic dicts or `additionalProperties`. Displayed aggregate totals are cross-check only and NEVER create a snapshot (exact quantized comparison; `ASSET_TOTAL_MISMATCH` on non-zero discrepancy). One Asset Capture produces 1 `ingestion_request` (`needs_confirmation` on ambiguity) + 0..N account-scoped `reconciliation_batches` (`needs_review`). Dashboard edits draft via `PATCH /draft` (`observations: [{account_id, observed_balance, currency}]`) and confirms via bodyless `POST /confirm` (no request body required; empty object `{}` tolerated; replaying stored Asset Capture response on repeated calls). Persistence locks affected `account_state` rows in ascending UUID order and atomically writes snapshots, adjustments, and investment P&L in a single DB transaction (ALL OR NOTHING).
 
 ---
 
 ## 6. Current Next Steps
 
-1. **Phase 11.5 (Pre-production Deployment & Runtime Readiness)**: Setup isolated staging environment (`ENVIRONMENT=staging`, `vibeledger_staging`), execute target migrations, bootstrap initial staging identity and accounts via `bootstrap_staging.py`, generate staging HS256 Browser JWT, verify `/health` and `/ready` (`database=ok`, `gemini=ok`), and provision staging iPhone device token.
-2. **Phase 12 (iPhone Shortcut v2 Cutover)**: Test real-device Shortcut captures, draft confirmations, and recovery workflows against live staging HTTPS backend.
-3. **Phase 13 (Production Fresh Cutover)**: Deploy target backend and database to production, establish real opening balances, provision production devices, switch daily Shortcut, and archive legacy systems.
+1. **Phase 12.5 (Account / Asset Model & Multi-Account Asset Capture)**:
+   - 12.5A: Architecture re-freeze and documentation (Current).
+   - 12.5B: Schema migration (`0010_asset_model_freeze.sql`: `risk_level`, `description`, `asset_capture` request_kind, and `DROP COLUMN institution` with backend deployment sequencing).
+   - 12.5C: Backend domain, repositories, and APIs (`Account` risk_level, `Category` description, `POST /api/v1/asset-captures`, static Gemini transport, polymorphic `PATCH /draft` & bodyless `POST /confirm`, dedicated single-account snapshot endpoint cleanup).
+   - 12.5D: Dashboard UI (Risk distribution chart/table, category descriptions, asset capture review & draft correction).
+   - 12.5E: Dedicated iOS Asset Capture Shortcut.
+   - 12.5F: Automated test matrix and staging acceptance.
+2. **Phase 13 (Production Fresh Cutover)**: Deploy target backend and database to production, establish real opening balances, provision production devices, switch daily Shortcut, and archive legacy systems. **Strictly blocked until Phase 12.5 passes.**

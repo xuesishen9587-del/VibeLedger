@@ -37,6 +37,9 @@
 - 信用卡最低还款、逾期、提前结清分期。
 - 精确汇兑损益核算。
 - 历史旧数据迁移。
+- `institution`（金融机构）实体或机构层级模型。
+- `asset_class`、`liquidity_level`、`parent_account_id` 或任何账户父子层级关系。
+- Category `priority`（分类优先级）。
 
 ---
 
@@ -46,22 +49,36 @@
 
 表示真实金融账户。
 
-主要类型：
+主要类型（`account_type`，严格限定为以下四类）：
 
-- `cash`
-- `savings`
-- `credit`
-- `investment`
+- `cash`：可直接用于支付或日常消费的流动资金。包括银行活期存款余额、借记卡活期余额、微信零钱/零钱通直接消费余额、支付宝余额等。
+- `savings`：通常不直接用于日常刷卡/扫码消费的储蓄资金，主要是银行定期存款。
+- `investment`：具有投资、净值波动或理财属性的资产账户。包括银行理财产品、债券基金、股票/指数基金、证券投资账户及其他按市值估值的资产账户。
+- `credit`：负债类账户。包括信用卡账户、花呗等消费信贷负债。
+
+账户建模示例：
+
+- `ABC_Debit` -> `cash`（农行借记卡活期）
+- `ABC_Term` -> `savings`（农行定期存款）
+- `ABC_Wealth` -> `investment`（农行理财产品）
+- `ABC_Cup_Credit` -> `credit`（农行银联信用卡）
+- `Alipay` -> `cash`（支付宝日常余额）
+- `Alipay_BondFund` -> `investment`（支付宝端内持有的债券基金）
+- `Alipay_EquityFund` -> `investment`（支付宝端内持有的股票基金）
+
+现实中的一个金融机构或服务平台（如中国农业银行、支付宝），在领域模型中根据资金属性拆分为多个相互独立的标准化 Account。
+**领域模型中不引入 `institution` 实体，也不在 Account 上保留 `institution` 属性。**
+**不引入 `asset_class`、`liquidity_level`、`parent_account_id` 或任何账户父子层级关系。**
 
 核心属性：
 
 ```text
 id
 name
-institution
 account_type
 currency
-owner_user_id
+risk_level           nullable
+owner_user_id        nullable
 status
 billing_day          nullable
 due_day              nullable
@@ -69,6 +86,13 @@ linked_cash_account_id nullable
 created_at
 updated_at
 ```
+
+`risk_level`（风险等级）：
+- 允许取值：`very_low`（极低风险）、`low`（低风险）、`medium`（中风险）、`high`（高风险）、`NULL`。
+- 纯用户配置的元数据，用于 Dashboard 家庭整体财富与风险分布展示。
+- **Gemini 严禁推断、设置或修改 `risk_level`。**
+- **负债类账户（`account_type = 'credit'`）的 `risk_level` 必须为 `NULL`**，绝不参与家庭资产风险分布统计。
+- 资产类账户（`cash` / `savings` / `investment`）创建时允许暂不指定风险等级（`risk_level = NULL`），在 Dashboard 风险分布中归入“未分类”（unclassified）。
 
 规则：
 
@@ -350,6 +374,7 @@ last_seen_at
 id
 name
 type
+description          nullable
 status
 ```
 
@@ -360,7 +385,39 @@ expense
 income
 ```
 
-允许 Dashboard 自定义。
+### 3.3.1 Product v1 标准支出分类（Canonical Expense Categories）
+
+Product v1 支出分类体系严格固定为以下 14 个标准分类，其语义规则由 `description` 承载：
+
+1. **Grocery**：超市采购、日常日用品、米面粮油水果等。
+2. **Dine**：外食、外卖、咖啡、奶茶、零食等即时餐饮消费。
+3. **Child**：孩子的一切费用，包括母婴、玩具、育儿嫂、儿童医疗、儿童教育等。只要消费主体明确是孩子，即使同时具有 Health / Education / Clothing 等属性，也归入 Child。
+4. **Home & Utilities**：房租房贷、物业、水电暖网、大件家电、快递费、家庭维修等维持家庭运转的支出。
+5. **Digital & Gadgets**：手机、电脑、耳机、充电线及其他数码 3C 产品。
+6. **Clothing**：成人衣物、鞋帽、配饰。
+7. **Beauty**：成人护肤、化妆、洗护、剪发、美发等皮肤和头发管理。
+8. **Transportation**：打车、地铁、公共交通、加油、停车、车辆保养、通行费等。
+9. **Health**：成人药品、看病、体检、商业医疗保险。
+10. **Education**：成人自我提升，包括书籍、培训、大模型及软件订阅费。
+11. **Gift & Socials**：人情往来、送礼、红包、宴请、聚会、孝敬父母的现金红包。
+12. **Parents**：专为父母老人购买的特定物品或直接开销，不含现金红包。
+13. **Fun & Games**：日常娱乐，包括游戏充值、电影、按摩、游乐园等。
+14. **Trips & Occasions**：旅游度假、结婚纪念日等非日常特定重大支出。
+
+### 3.3.2 分类规则约束与不变式
+
+- **支出分类固定性（Expense Categories Fixed）**：
+  - Product v1 不支持任意新增支出分类；
+  - 不支持重命名标准支出分类；
+  - 不支持通过常规用户操作停用或删除标准支出分类。
+  - Dashboard 仅可展示或维护其 `description`（语义说明），标准名称严格固定。
+- **语义描述机制（Category.description）**：
+  - 标准分类的语义描述由数据库迁移或系统初始化脚本（Bootstrap）配置入库，绝不在 Gemini Prompt 中硬编码。
+  - Gemini 消费记账提取时，必须同时接收 14 个活跃支出分类的 `name` 与 `description`。
+- **严禁引入 `priority`（优先级）字段**：
+  - 分类边界完全通过 `name` 与 `description` 的语义规则覆盖（如 Child 覆盖儿童相关的一切衣食住行教育医疗）。
+- **收入分类（Income Categories）**：
+  - 收入分类独立于上述 14 支出分类约束，维持既有的自定义与管理能力。
 
 ---
 
@@ -374,7 +431,11 @@ account_id
 alias
 ```
 
-账户识别规则不得继续硬编码在 Python Literal 中。
+规则：
+- 账户识别规则不得继续硬编码在 Python Literal 中。
+- **别名全局可能存在重叠/歧义**：同一金融机构名下的不同账户（例如 `ABC_Debit`、`ABC_Term`、`ABC_Wealth`）通常配置有包含机构名称的别名（如“农行”、“农业银行”），以及通用业务别名（如“活期存款”、“定期存款”、“理财产品”）。
+- **通用泛指别名（如“活期”、“定期”、“理财”）在有多个活跃账户匹配时，绝对不足以单独作为确定性账户解析的依据**。
+- AI 可利用整屏上下文（如页面顶部的银行名称 + 区块标题“定期存款”）解析对应账户，但 Backend 必须进行严格确定性校验：账户必须存在、处于 active 状态、属于同一家庭、且具有唯一确定性映射；若匹配存在歧义或无法解析，必须转入 `needs_confirmation`。
 
 ---
 
@@ -750,19 +811,23 @@ investment_pnl
 # 11. Workflow Confirmation & Review Rules
 
 系统严格区分 **Ingestion 阶段的确认（`needs_confirmation`）** 与 **Reconciliation 阶段的审核（`needs_review`）**：
+- `needs_confirmation` **仅属于 `ingestion_requests.status`**（客户端/AI 捕获草稿生命周期）；
+- `needs_review` **仅属于 `reconciliation_batches.status`**（对账引擎差异裁决生命周期）。
+- 二者状态绝不混淆：`reconciliation_batches` 不包含 `needs_confirmation` 状态，`ingestion_requests` 亦不包含 `needs_review` 状态。
 
 ### 11.1 Ingestion / Shortcut 阶段 MUST `needs_confirmation`
 
-发生在客户端提交消费截图或草稿处理期间：
+发生在客户端提交消费或多账户资产截图草稿处理期间：
 
 ```text
-找不到唯一扣款账户 / 多个账户候选
+找不到唯一扣款/资产账户 / 多个账户候选
 金额、币种置信度不足或存在确定性校验冲突
+多账户资产截屏中分项和与显示总额不符（ASSET_TOTAL_MISMATCH）
 分类置信度不足（若需人工确认分类）
-用户在正式提交前发起自然语言修正
+用户在正式提交前发起自然语言修正或 Dashboard 草稿修正
 ```
 
-草稿处于 `needs_confirmation` 期间，**绝不生成正式 Transaction，绝不修改账户余额**。
+草稿处于 `needs_confirmation` 期间，**绝不生成正式 Transaction / Snapshot，绝不修改账户余额**。
 
 ### 11.2 Reconciliation / 对账阶段 MUST `needs_review`
 
@@ -1008,6 +1073,105 @@ Investment P&L：
 
 ---
 
+# 15.5 Core Flow D — Multi-Account Asset Capture
+
+专用于家庭资产截屏（网银首页、理财平台资产总览）的多账户权威余额/估值提取。与单笔消费记账（Expense capture）严格隔离。
+
+```text
+Dedicated Asset Capture Shortcut
+↓
+Generate idempotency_key
+↓
+Capture asset overview screenshot
+↓
+POST /api/v1/asset-captures
+↓
+Gemini static structured extraction (no additionalProperties)
+↓
+Extract observations (account_name, balance, currency) + displayed_total
+↓
+Deterministic validation & aggregate cross-check
+↓
+┌─ High confidence + unambiguous resolution + total cross-check pass
+│       ↓
+│   Sort affected account IDs (ascending UUID order)
+│       ↓
+│   Lock account_state rows (FOR UPDATE)
+│       ↓
+│   Atomic commit:
+│   - save account_snapshots (balance / investment_valuation)
+│   - execute per-account reconciliation / investment P&L
+│   - update all associated reconciliation_batches -> committed
+│   - update ingestion_request -> committed (ONE DB transaction)
+│       ↓
+│   committed (Returns Asset Capture response)
+│
+└─ Ambiguous resolution / ASSET_TOTAL_MISMATCH / large residual
+        ↓
+    needs_confirmation (ingestion_requests only; zero financial facts committed)
+        ↓
+    Dashboard edits draft (PATCH /api/v1/ingestion-requests/{id}/draft)
+        ↓
+    Dashboard confirms (POST /api/v1/ingestion-requests/{id}/confirm; no body required)
+        ↓
+    Atomic commit of all accounts only after confirmation
+```
+
+### 15.5.1 核心规则与不变式
+
+1. **多账户单图提取与资产账户边界（Asset Account Scope Boundary）**：
+   - `POST /api/v1/asset-captures` 是纯**资产观测工作流**。
+   - **合格账户类型（Eligible Account Types）**：严格限定为 `cash`、`savings`、`investment`。
+   - **不合格账户类型（Ineligible Account Types）**：**`credit`（负债账户）绝对不属于资产捕获范畴**。
+   - 接口不强制要求 `account_id`。单张截屏允许同时识别同一金融机构或平台下的多个资产账户余额（如：活期存款、定期存款、理财产品）。
+   - 示例：一张农业银行截图显示活期 25,391.20 CNY、定期 200,000.00 CNY、理财 130,458.11 CNY、总资产 355,849.31 CNY。系统分别解析为 `ABC_Debit`、`ABC_Term`、`ABC_Wealth` 三笔独立资产观测。
+2. **汇总总额防重、精确量化核对与截屏负债排除规则（Aggregate Total & Liability Exclusion）**：
+   - 截屏中出现的“总资产”、“资产合计”、“总市值”、“Total Assets”、“Asset Total”等总计字段，**仅作为交叉校验数据（cross-check data）**。
+   - **汇总项绝不得生成独立的 Account Snapshot**，彻底杜绝与分项重复计入。
+   - **截屏负债排除规则**：若资产概览截屏中同时显示了信用卡负债、信用卡欠款、已出账单、可用额度等：
+     - 这些数值**绝对不得转化为 AssetObservation**；
+     - **绝对不得参与资产总额分项求和校验**；
+     - **绝对不得生成普通账户快照**；
+     - 它们继续属于既有的信用卡快照（Credit Card Snapshot）与账单对账（Statement Reconciliation）领域。
+   - **同币种精确量化校验**：
+     1. 将各分项观测金额与截屏显示的汇总金额（`displayed_total`）按照货币小单位（如 CNY/USD 2 位小数，JPY 0 位小数）进行精确量化（Quantize）。
+     2. 计算量化后的分项观测金额之和。
+     3. 量化后若分项之和严格等于汇总金额（Exact Equality），则校验通过。
+     4. 若量化后存在任何非零差额（Any non-zero difference），判定为总额不符：标记 `failure_code = 'ASSET_TOTAL_MISMATCH'`，整体 `ingestion_request` 强制转入 `needs_confirmation`，阻止自动提交。
+   - **异币种或无共同比较基准**：
+     - 严禁为了凑齐截屏总额而捏造或估算 FX 汇率。
+     - 跳过此项总额严格等式自检，继续执行针对各独立分项观测的确定性验证。
+3. **确定性账户映射与候选账户隔离（Candidate Isolation & Account Resolution）**：
+   - **候选账户隔离**：Gemini 资产提取提示词中，**仅接收家庭活跃且属于 `cash` / `savings` / `investment` 的账户列表**（名称、`account_type`、币种及别名）。**严禁向 Gemini 提供 `credit` 账户**。
+   - **通用别名防歧义**：通用泛指别名（如“活期”、“定期”）在存在多个活跃账户候选时，绝不足以作为唯一确定映射。
+   - **后端确定性校验**：后端执行严格确定性验证（账户存在、active、同家庭、唯一映射、币种匹配，且 `account_type IN ('cash', 'savings', 'investment')`）。
+   - **误映射信用账户阻断**：若任何观测项被错误映射至 `credit` 账户，后端直接判定非法：标记 `failure_code = 'ASSET_ACCOUNT_TYPE_INVALID'`，整体转入 `needs_confirmation`，绝不提交任何财务事实。
+   - 若无法唯一确定则转入 `needs_confirmation`。Gemini 绝不能新建账户。
+4. **持久化与核算语义（Persistence & Accounting Semantics）**：
+   - 资产截屏绝不直接强改 `account_state`。
+   - 标准流水线：`screenshot -> AI observations -> canonical resolution -> authoritative snapshots -> reconciliation / investment valuation -> account_state`。
+   - `cash` / `savings` 账户生成 `snapshot_type = 'balance'` 的快照；
+   - `investment` 账户生成 `snapshot_type = 'investment_valuation'` 的快照，并计算 `investment_pnl = closing - opening - contributions + withdrawals`。估值变动计入净资产与投资分析，绝不计入家庭现金收入。
+5. **多账户原子性与工作流边界（Workflow Boundary & Atomicity）**：
+   - 单次 Asset Capture 业务在系统层表现为：
+     $$\mathbf{1\text{ ingestion\_request}} + \mathbf{0..N\text{ account-scoped reconciliation\_batches}}$$
+   - 每个 `reconciliation_batch` 严格对应单一账户（`account_id NOT NULL`），并通过 `source_request_id` 关联至本次 `ingestion_request`。
+   - **严禁引入父对账批次表、`asset_capture_batches` 表或账户层级关系**。`ingestion_request` 是多账户截屏捕获的唯一工作流与分组边界。
+   - **待确认状态**：若存在映射歧义、总额不符或非法账户类型，整体 `ingestion_requests.status = 'needs_confirmation'`。此时**绝不部分提交任何财务事实**，所有快照、对账调整、投资损益及 `account_state` 均保持未提交。
+   - **修正流程**：Dashboard 调用多态草稿修正接口 `PATCH /api/v1/ingestion-requests/{id}/draft`（传入 `observations: [{account_id, observed_balance, currency}]`）修正未匹配账户或金额，随后调用确认接口 `POST /api/v1/ingestion-requests/{id}/confirm`。
+   - **确认接口无 Body（NONE REQUIRED）**：`POST /api/v1/ingestion-requests/{id}/confirm` **无需请求体（Request body: NONE REQUIRED）**；客户端发送空 JSON 对象 `{}` 仅作兼容容忍，绝非强制要求。
+   - **原子提交（ALL OR NOTHING）**：
+     - 确认或高置信自动提交时，先将涉及的所有 canonical `account_id` 按 UUID 升序排序，严格按序锁定 `account_state` 行（`FOR UPDATE`），杜绝死锁。
+     - 在单一数据库事务内完成所有 Snapshot、各账户对账调整与投资损益写入。
+     - 所有关联的 `reconciliation_batches` 与该 `ingestion_request` 在同一事务内一同转为 `committed`。
+     - 确认接口返回 Asset Capture 提交结果（多账户 `results` 数组，绝非单笔交易的 `transaction_id`）；重复提交幂等重放已存储结果。
+     - 若调用 reject，`ingestion_request` 转为 `rejected`，不产生任何财务事实。
+6. **请求幂等（Idempotency）**：
+   - 新增 `request_kind = 'asset_capture'`。
+   - 单次截屏生成一条 `ingestion_requests`，以 `(device_id, idempotency_key)` 为幂等边界。重试相同 payload 幂等返回已有结果；不同 payload 报 409 冲突。
+
+---
+
 # 16. Dashboard Reporting
 
 核心指标：
@@ -1037,6 +1201,24 @@ last_authoritative_snapshot_at
 ```
 
 不要求所有账户每月完成 Statement。
+
+### 16.1 资产与风险分布（Asset & Risk Distribution）
+
+Dashboard 提供两重视角的家庭资产配置分布：
+
+1. **账户类型分布（Account Type Allocation）**：
+   - 按 `cash`、`savings`、`investment` 展示总资产占比；负债 `credit` 单独展示。
+2. **风险等级分布（Risk Level Allocation）**：
+   - **纳入统计范围**：仅包含正余额的 `cash`、正余额的 `savings`，以及正估值的 `investment` 资产。
+   - **严格排除范围**：**所有 `credit` 负债账户绝对不参与风险分布统计**。
+   - **未分类处理**：若资产账户未设置 `risk_level`（即 `risk_level = NULL`），在风险图表与统计中归入“未分类”（unclassified）。
+   - **展示分级**：
+     - `very_low` -> 极低风险（如活期存款、银行现金理财）
+     - `low` -> 低风险（如定期存款、纯债基金）
+     - `medium` -> 中风险（如平衡配置基金、固收+）
+     - `high` -> 高风险（如股票型基金、股票投资账户）
+     - `NULL` -> 未分类（unclassified）
+   - **币种折算**：所有非报告币种资产，统一按照基准汇率服务（Reference FX）转换为家庭报告币种（reporting_currency）进行聚合统计。
 
 ---
 

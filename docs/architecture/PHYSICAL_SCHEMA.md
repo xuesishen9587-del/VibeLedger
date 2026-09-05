@@ -250,9 +250,9 @@ Account metadata only.
 | `id` | UUID | PK |
 | `household_id` | UUID | FK -> households, NOT NULL |
 | `name` | TEXT | NOT NULL |
-| `institution` | TEXT | nullable |
 | `account_type` | TEXT | NOT NULL; `cash / savings / credit / investment` |
 | `currency` | CHAR(3) | NOT NULL |
+| `risk_level` | TEXT | nullable; `very_low / low / medium / high / NULL` |
 | `owner_user_id` | UUID | FK -> users, nullable |
 | `linked_cash_account_id` | UUID | self FK -> accounts, nullable |
 | `billing_day` | SMALLINT | nullable, 1..31 |
@@ -262,11 +262,27 @@ Account metadata only.
 | `created_at` | TIMESTAMPTZ | NOT NULL default now() |
 | `updated_at` | TIMESTAMPTZ | NOT NULL default now() |
 
+> [!IMPORTANT]
+> **Migration 0010 & Column Removal**:
+> The target domain model has no `Account.institution`. Phase 12.5 migration `0010_asset_model_freeze.sql` is responsible for bringing the existing staging schema to this target by executing the equivalent of:
+> ```sql
+> ALTER TABLE accounts DROP COLUMN institution;
+> ```
+> The final migrated schema after 0010 MUST NOT contain `accounts.institution`.
+>
+> **Zero-Downtime Deployment Sequencing Requirement**:
+> 1. Runtime backend code must first remove all references and dependencies on `accounts.institution` (entities, queries, inserts, serializers) as part of the same Phase 12.5 staging upgrade.
+> 2. Deploy the compatible backend revision first (or coordinate deployment and migration atomically), ensuring no running backend revision issues queries selecting or inserting `accounts.institution` after the column has been dropped.
+> 3. Execute `0010_asset_model_freeze.sql` to drop the column.
+> A single real institution/platform is modeled as multiple independent Accounts (e.g. `ABC_Debit`, `ABC_Term`, `ABC_Wealth`). No `institution` entity or column is maintained in the target schema.
+
 Checks:
 
 ```sql
 CHECK (account_type IN ('cash', 'savings', 'credit', 'investment'));
 CHECK (currency ~ '^[A-Z]{3}$');
+CHECK (risk_level IS NULL OR risk_level IN ('very_low', 'low', 'medium', 'high'));
+CHECK (account_type <> 'credit' OR risk_level IS NULL);
 CHECK (billing_day IS NULL OR billing_day BETWEEN 1 AND 31);
 CHECK (due_day IS NULL OR due_day BETWEEN 1 AND 31);
 CHECK (status IN ('active', 'inactive'));
@@ -282,6 +298,10 @@ Indexes:
 ```sql
 CREATE INDEX ix_accounts_household_type
 ON accounts (household_id, account_type, status);
+
+CREATE INDEX ix_accounts_household_risk
+ON accounts (household_id, risk_level)
+WHERE status = 'active';
 
 CREATE INDEX ix_accounts_owner
 ON accounts (owner_user_id);
@@ -365,9 +385,17 @@ Do not enforce global alias uniqueness. Ambiguous aliases are valid and must cau
 | `household_id` | UUID | FK -> households, NOT NULL |
 | `name` | TEXT | NOT NULL |
 | `category_type` | TEXT | NOT NULL; `expense / income` |
+| `description` | TEXT | nullable; semantic classification policy |
 | `status` | TEXT | NOT NULL default `active`; `active / inactive` |
 | `created_at` | TIMESTAMPTZ | NOT NULL default now() |
 | `updated_at` | TIMESTAMPTZ | NOT NULL default now() |
+
+> [!NOTE]
+> **Product v1 Expense Category Taxonomy**:
+> Product v1 freezes exactly 14 canonical active Expense categories (`Grocery`, `Dine`, `Child`, `Home & Utilities`, `Digital & Gadgets`, `Clothing`, `Beauty`, `Transportation`, `Health`, `Education`, `Gift & Socials`, `Parents`, `Fun & Games`, `Trips & Occasions`), initialized and seeded via migration or bootstrap with canonical descriptions.
+> Arbitrary creation, renaming, or deactivation of Expense categories is not supported in Product v1.
+> `description` provides semantic classification guidelines for AI (e.g. child spending policy). No `priority` column is added.
+> Income categories remain customizable.
 
 ```sql
 CHECK (category_type IN ('expense', 'income'));
@@ -391,7 +419,7 @@ Request-level idempotency belongs here, not on transaction rows.
 | `id` | UUID | PK |
 | `device_id` | UUID | FK -> devices, NOT NULL |
 | `idempotency_key` | TEXT | NOT NULL |
-| `request_kind` | TEXT | NOT NULL; `expense / transfer / snapshot` |
+| `request_kind` | TEXT | NOT NULL; `expense / transfer / snapshot / asset_capture` |
 | `request_hash` | BYTEA | NOT NULL |
 | `status` | TEXT | NOT NULL default `received`; see below |
 | `captured_at` | TIMESTAMPTZ | nullable |
@@ -420,7 +448,7 @@ Constraints:
 UNIQUE (device_id, idempotency_key);
 
 CHECK (length(idempotency_key) BETWEEN 8 AND 200);
-CHECK (request_kind IN ('expense', 'transfer', 'snapshot'));
+CHECK (request_kind IN ('expense', 'transfer', 'snapshot', 'asset_capture'));
 CHECK (status IN (
   'received',
   'processing',
@@ -445,6 +473,14 @@ Rule:
 
 - same key + same `request_hash` -> return stored state/response;
 - same key + different hash -> reject as `IDEMPOTENCY_KEY_REUSE`.
+
+Multi-Account Asset Capture Workflow Rules:
+- A single Asset Capture produces exactly 1 `ingestion_requests` row (`request_kind = 'asset_capture'`).
+- `needs_confirmation` is an `ingestion_requests.status` value only (indicating client/AI draft awaiting user confirmation).
+- While in `needs_confirmation`, zero financial facts (snapshots, transactions, adjustments, investment P&L) are written or partially committed.
+- The `ingestion_request` serves as the overall multi-account workflow and grouping boundary.
+- Once confirmed, all associated account-scoped `reconciliation_batches` and the `ingestion_request` transition to `committed` within the same single database transaction.
+- If rejected, `ingestion_requests.status` becomes `rejected`, leaving zero financial facts.
 
 ---
 
@@ -1055,6 +1091,13 @@ Rules:
 - repeated upload creates a new batch;
 - replay safety comes from transaction matching, not PDF deduplication.
 
+Status and Scoping Invariants:
+- `needs_review` is a `reconciliation_batches.status` value only (indicating reconciliation variance awaiting human resolution).
+- `reconciliation_batches` NEVER take `needs_confirmation` status.
+- Each `reconciliation_batch` remains strictly scoped to exactly ONE account (`account_id NOT NULL`).
+- For multi-account Asset Captures, 0..N account-scoped `reconciliation_batches` are created, each linked to the parent ingestion request via `source_request_id = ingestion_requests.id`.
+- There is NO parent reconciliation batch table, NO `asset_capture_batches` table, and NO account hierarchy.
+
 ---
 
 ## 10.2 `statement_lines`
@@ -1429,7 +1472,48 @@ commit request
 COMMIT
 ```
 
-## 13.3 Shortcut confirmation
+## 13.3 Multi-Account Asset Capture
+
+One Asset Capture image may observe balances across multiple canonical accounts.
+All observations MUST be committed atomically within a single database transaction:
+
+```text
+BEGIN
+
+lock ingestion_request (idempotency boundary)
+
+1. resolve and validate all candidate accounts (must be active, same household, unique match)
+2. sort all affected canonical account_ids in deterministic ascending UUID order:
+   account_ids = sorted([id_1, id_2, ..., id_k])
+
+3. lock every affected account_state row in sorted order:
+   FOR account_id IN account_ids:
+       SELECT * FROM account_state WHERE account_id = :account_id FOR UPDATE
+
+4. validate all account states and currencies
+5. cross-check sum of observations against displayed total (where currencies match)
+
+6. FOR each observation:
+   IF account_type IN ('cash', 'savings'):
+       INSERT INTO account_snapshots (snapshot_type='balance', ...)
+       execute reconciliation adjustment if residual within policy
+   IF account_type == 'investment':
+       INSERT INTO account_snapshots (snapshot_type='investment_valuation', ...)
+       calculate and INSERT INTO investment_pnl_periods if applicable
+   UPDATE account_state
+     SET ledger_balance = ..., last_authoritative_snapshot_at = ...
+   INSERT INTO audit_events
+
+7. UPDATE ingestion_requests SET status = 'committed', committed_at = now()
+
+COMMIT
+```
+
+Invariants:
+- **ALL OR NOTHING**: If any account fails validation, any residual requires review, or any unexpected error occurs, the entire transaction is rolled back (`ROLLBACK ALL`). No partial screenshot effects.
+- **Deadlock Avoidance**: Enforced by locking affected `account_state` rows strictly in ascending UUID order across all concurrent captures and transactions.
+
+## 13.4 Shortcut confirmation
 
 Low-confidence request:
 
@@ -1442,7 +1526,7 @@ NO account_state mutation
 
 Only confirm commits financial state.
 
-## 13.4 Reconciliation preview
+## 13.5 Reconciliation preview
 
 May create:
 
@@ -1456,7 +1540,7 @@ without a long transaction.
 
 It MUST NOT mutate committed ledger state.
 
-## 13.5 Reconciliation atomic commit
+## 13.6 Reconciliation atomic commit
 
 ```text
 BEGIN
@@ -1701,7 +1785,10 @@ Do not model yet:
 - early installment payoff;
 - exact realized/unrealized FX accounting;
 - legacy data migration;
-- mandatory monthly close.
+- mandatory monthly close;
+- `institution` table or column (single institutions are modeled as multiple independent Accounts);
+- `asset_class`, `liquidity_level`, `parent_account_id`, or account hierarchy;
+- category `priority`.
 
 ---
 

@@ -84,6 +84,11 @@ The normal high-confidence capture path consists of exactly **one backend reques
 }
 ```
 
+> [!NOTE]
+> **Legacy Fields vs Target Contract Invariants**:
+> Legacy response fields captured in S0 fixtures (such as `from_amount`, `from_currency`, and `account_leg_status` in foreign-card fixture `02`) represent compatibility evidence characterizing the accepted current staging runtime. They are **not** automatically requirements of the Astra-simplified target architecture unless the canonical `CONTRACTS.md` explicitly retains them.
+> Specifically, per `CONTRACTS.md` §4, foreign-currency capture in the simplified target commits original amount/currency and frozen reference reporting conversion data, and no longer promises `from_amount` or estimated card settlement legs.
+
 #### B. Needs Confirmation Response (HTTP 200)
 
 ```json
@@ -218,9 +223,9 @@ The existing accepted runtime is anchored on migration files `0001_extensions.sq
 
 | Test Suite | Directory | Command | Result |
 | :--- | :--- | :--- | :--- |
-| **Backend Unit Tests** | `ai-ledger-backend/tests/unit` | `python -m unittest discover -s tests/unit -p "test_*.py"` | **180 Passed** (0 failures, 0 errors) |
+| **Backend Unit Tests** | `ai-ledger-backend/tests/unit` | `python -m unittest discover -s tests/unit -p "test_*.py"` | **191 Passed** (180 baseline + 11 S0 boundary, 0 failures, 0 errors) |
 | **Dashboard Unit/Flow Tests** | `ai-ledger-dashboard/tests` | `python -m unittest discover -s tests -p "test_*.py"` | **36 Passed** (0 failures, 0 errors) |
-| **S0 Boundary & Safety Suite** | `ai-ledger-backend/tests/unit` | `python -m unittest tests/unit/test_expense_shortcut_boundary_unit.py` | **10 Passed** (New S0 suite) |
+| **S0 Boundary & Safety Suite** | `ai-ledger-backend/tests/unit` | `python -m unittest tests/unit/test_expense_shortcut_boundary_unit.py` | **11 Passed** (0 failures, 0 errors) |
 
 ### 5.2 Test Isolation & Database Safety Invariant
 

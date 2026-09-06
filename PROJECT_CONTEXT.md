@@ -46,13 +46,18 @@ audit/work-queue user interfaces.
 
 ## Next implementation work
 
-Start **S0** in the implementation plan: preserve accepted expense wire fixtures and
-the actual Shortcut behavior, record a safe runnable baseline, and specify/test the
-interrupted pending-key cancellation race. Then S1 fresh schema/identity, S2 spending,
-metadata review and monthly schedules, S3 balances/wealth and statement import,
-S4 investment estimates/confirmation/Dashboard/login, S5 removal and staging acceptance.
-S6 production cutover is later and separately authorized. Do not implement the old
-proposed `0010_asset_model_freeze.sql` first or rewrite applied migration bytes.
+**S0** (freeze working boundary and runnable baseline) is **completed** on commit
+`f9ca292cfd0a7437fcc274d236e160344566daa5`. Sanitized wire fixtures, the Shortcut
+compatibility boundary specification, migration checksums, and offline boundary
+characterization tests are committed and verified.
+
+The next implementation slice is **S1** (fresh database, identities and settings):
+add the 16-table simplified baseline under `migrations/simplified/0001_simplified.sql`,
+strict lineage selection, least-privilege runtime role, and idempotent seed script.
+Then S2 spending, metadata review and monthly schedules, S3 balances/wealth and statement
+import, S4 investment estimates/confirmation/Dashboard/login, S5 removal and staging
+acceptance. S6 production cutover is later and separately authorized. Do not implement
+the old proposed `0010_asset_model_freeze.sql` first or rewrite applied migration bytes.
 
 Consumer choices are specified, not blockers: last reported wealth, due-period
 installment spending, editable seeded categories, statement preview before Save,

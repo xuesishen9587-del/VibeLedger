@@ -19,6 +19,9 @@ these documents together, not by adding another parallel “freeze” specificat
 [PROJECT_CONTEXT](../../PROJECT_CONTEXT.md) is the short status handoff, not another
 domain contract. [The staging runbook](../deployment/STAGING_DEPLOYMENT.md) records
 the previous accepted deployment and is not yet the simplified deployment procedure.
+Implementation slice S0 evidence (sanitized wire fixtures and Shortcut compatibility baseline)
+is recorded in [SHORTCUT_COMPATIBILITY_BOUNDARY](SHORTCUT_COMPATIBILITY_BOUNDARY.md); it is
+implementation evidence for S0, not a fourth canonical specification.
 
 The core model is independent spending records and dated account balance observations.
 Monthly recurring/installment schedules record due spending. Selected-account

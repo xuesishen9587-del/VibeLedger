@@ -33,6 +33,11 @@ from app.repositories import simplified_schema as repo
 # Seed Definitions from TARGET_DOMAIN_MODEL.md
 # ----------------------------------------------------------------------
 
+class BootstrapDriftError(Exception):
+    """Raised when existing database state drifts incompatibly from expected bootstrap configuration."""
+    pass
+
+
 EXPENSE_CATEGORIES = [
     ("Grocery", "Groceries, household consumables, ingredients", False),
     ("Dine", "Restaurants, takeaway, coffee, drinks and ready-to-eat snacks", False),
@@ -77,6 +82,7 @@ def bootstrap_simplified_environment(
 ) -> Dict[str, Any]:
     """
     Idempotently bootstraps a fresh Astra-simplified household, owner, categories, and starter accounts.
+    Fails fast with BootstrapDriftError if any existing record has drifted incompatibly.
     Returns a summary dictionary of created and verified items.
     """
     if started_on is None:
@@ -93,10 +99,41 @@ def bootstrap_simplified_environment(
 
     with conn.cursor() as cur:
         # 1. Household
-        cur.execute("SELECT id FROM households WHERE lower(name) = lower(%s);", (household_name.strip(),))
+        cur.execute(
+            """
+            SELECT id, reporting_currency, started_on, timezone, investment_review_change_ratio, status
+            FROM households
+            WHERE lower(name) = lower(%s);
+            """,
+            (household_name.strip(),),
+        )
         row = cur.fetchone()
         if row:
             hh_id = uuid.UUID(str(row[0]))
+            curr_reporting_currency = str(row[1])
+            curr_started_on = row[2]
+            curr_timezone = str(row[3])
+            curr_ratio = Decimal(str(row[4]))
+            curr_status = str(row[5])
+
+            if curr_status != "active":
+                raise BootstrapDriftError(f"Household '{household_name}' exists but is not active (status='{curr_status}')")
+            if curr_reporting_currency != reporting_currency:
+                raise BootstrapDriftError(
+                    f"Household '{household_name}' reporting_currency drift: expected '{reporting_currency}', found '{curr_reporting_currency}'"
+                )
+            if curr_started_on != started_on:
+                raise BootstrapDriftError(
+                    f"Household '{household_name}' started_on drift: expected '{started_on}', found '{curr_started_on}'"
+                )
+            if curr_timezone != tz_name:
+                raise BootstrapDriftError(
+                    f"Household '{household_name}' timezone drift: expected '{tz_name}', found '{curr_timezone}'"
+                )
+            if curr_ratio != Decimal(str(investment_review_change_ratio)):
+                raise BootstrapDriftError(
+                    f"Household '{household_name}' investment_review_change_ratio drift: expected '{investment_review_change_ratio}', found '{curr_ratio}'"
+                )
         else:
             new_hh = repo.create_household(
                 conn,
@@ -136,12 +173,23 @@ def bootstrap_simplified_environment(
         for cat_name, cat_desc, is_fallback in EXPENSE_CATEGORIES:
             cur.execute(
                 """
-                SELECT id FROM categories
+                SELECT id, category_type, description, is_fallback, status
+                FROM categories
                 WHERE household_id = %s AND category_type = 'expense' AND lower(name) = lower(%s);
                 """,
                 (str(hh_id), cat_name),
             )
-            if cur.fetchone():
+            row = cur.fetchone()
+            if row:
+                cat_type, description, fallback_val, status = row[1], row[2], row[3], row[4]
+                if status != "active":
+                    raise BootstrapDriftError(f"Category '{cat_name}' (expense) exists but is not active (status='{status}')")
+                if cat_type != "expense":
+                    raise BootstrapDriftError(f"Category '{cat_name}' category_type drift: expected 'expense', found '{cat_type}'")
+                if bool(fallback_val) != bool(is_fallback):
+                    raise BootstrapDriftError(f"Category '{cat_name}' is_fallback drift: expected {is_fallback}, found {fallback_val}")
+                if (description or "").strip() != (cat_desc or "").strip():
+                    raise BootstrapDriftError(f"Category '{cat_name}' description drift: expected '{cat_desc}', found '{description}'")
                 summary["categories_verified"] += 1
             else:
                 repo.create_category(
@@ -157,12 +205,23 @@ def bootstrap_simplified_environment(
         for cat_name, cat_desc, is_fallback in INCOME_CATEGORIES:
             cur.execute(
                 """
-                SELECT id FROM categories
+                SELECT id, category_type, description, is_fallback, status
+                FROM categories
                 WHERE household_id = %s AND category_type = 'income' AND lower(name) = lower(%s);
                 """,
                 (str(hh_id), cat_name),
             )
-            if cur.fetchone():
+            row = cur.fetchone()
+            if row:
+                cat_type, description, fallback_val, status = row[1], row[2], row[3], row[4]
+                if status != "active":
+                    raise BootstrapDriftError(f"Category '{cat_name}' (income) exists but is not active (status='{status}')")
+                if cat_type != "income":
+                    raise BootstrapDriftError(f"Category '{cat_name}' category_type drift: expected 'income', found '{cat_type}'")
+                if bool(fallback_val) != bool(is_fallback):
+                    raise BootstrapDriftError(f"Category '{cat_name}' is_fallback drift: expected {is_fallback}, found {fallback_val}")
+                if (description or "").strip() != (cat_desc or "").strip():
+                    raise BootstrapDriftError(f"Category '{cat_name}' description drift: expected '{cat_desc}', found '{description}'")
                 summary["categories_verified"] += 1
             else:
                 repo.create_category(
@@ -179,12 +238,25 @@ def bootstrap_simplified_environment(
         for acc_name, acc_scope, acc_type, acc_currency, risk_lvl in STARTER_ACCOUNTS:
             cur.execute(
                 """
-                SELECT id FROM accounts
+                SELECT id, balance_scope, account_type, currency, risk_level, status
+                FROM accounts
                 WHERE household_id = %s AND lower(name) = lower(%s);
                 """,
                 (str(hh_id), acc_name),
             )
-            if cur.fetchone():
+            row = cur.fetchone()
+            if row:
+                balance_scope, account_type, currency, risk_level, status = row[1], row[2], row[3], row[4], row[5]
+                if status != "active":
+                    raise BootstrapDriftError(f"Account '{acc_name}' exists but is not active (status='{status}')")
+                if balance_scope != acc_scope:
+                    raise BootstrapDriftError(f"Account '{acc_name}' balance_scope drift: expected '{acc_scope}', found '{balance_scope}'")
+                if account_type != acc_type:
+                    raise BootstrapDriftError(f"Account '{acc_name}' account_type drift: expected '{acc_type}', found '{account_type}'")
+                if currency != acc_currency:
+                    raise BootstrapDriftError(f"Account '{acc_name}' currency drift: expected '{acc_currency}', found '{currency}'")
+                if risk_level != risk_lvl:
+                    raise BootstrapDriftError(f"Account '{acc_name}' risk_level drift: expected '{risk_lvl}', found '{risk_level}'")
                 summary["accounts_verified"] += 1
             else:
                 repo.create_account(

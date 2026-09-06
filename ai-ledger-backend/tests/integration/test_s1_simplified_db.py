@@ -23,6 +23,8 @@ import uuid
 from decimal import Decimal
 from datetime import date, datetime
 
+import threading
+
 import psycopg2
 from psycopg2 import sql, errors
 
@@ -42,6 +44,7 @@ from scripts.bootstrap_simplified import (
     EXPENSE_CATEGORIES,
     INCOME_CATEGORIES,
     STARTER_ACCOUNTS,
+    BootstrapDriftError,
     bootstrap_simplified_environment,
 )
 
@@ -322,22 +325,67 @@ class TestS1SimplifiedPostgresIntegration(unittest.TestCase):
             conn.close()
 
     def test_composite_foreign_keys_prevent_cross_household_references(self):
-        """Validates that foreign keys enforce household isolation in PostgreSQL."""
+        """Validates that composite foreign keys enforce strict household isolation across all entities in PostgreSQL."""
         runner.run_migrations(schema=self.test_schema, lineage=LINEAGE_SIMPLIFIED)
 
         conn = get_connection(self.test_schema)
         try:
+            # Setup Household A
             hh_a = repo.create_household(conn, name="Household A")
             hh_a_id = uuid.UUID(str(hh_a["id"]))
             user_a = repo.create_user(conn, auth_subject="sub_a", email="a@test.local", display_name="User A")
             user_a_id = uuid.UUID(str(user_a["id"]))
             repo.add_household_member(conn, hh_a_id, user_a_id, role="owner")
+            dev_a = repo.create_device(
+                conn,
+                household_id=hh_a_id,
+                user_id=user_a_id,
+                name="Device A",
+                platform="ios",
+                token_hash=b"a" * 32,
+            )
+            dev_a_id = uuid.UUID(str(dev_a["id"]))
+            cat_a = repo.create_category(conn, hh_a_id, "Grocery A", "expense")
+            cat_a_id = uuid.UUID(str(cat_a["id"]))
+            acc_a = repo.create_account(
+                conn,
+                household_id=hh_a_id,
+                name="Account A",
+                balance_scope="main cash",
+                account_type="cash",
+                currency="CNY",
+                owner_user_id=user_a_id,
+            )
+            acc_a_id = uuid.UUID(str(acc_a["id"]))
+            req_a = repo.create_ingestion_request(
+                conn,
+                household_id=hh_a_id,
+                user_id=user_a_id,
+                actor_scope=f"user:{user_a_id}",
+                idempotency_key="idemp-key-valid-a",
+                request_kind="expense",
+                operation="POST /api/v1/expenses",
+            )
+            req_a_id = uuid.UUID(str(req_a["id"]))
 
+            # Setup Household B
             hh_b = repo.create_household(conn, name="Household B")
             hh_b_id = uuid.UUID(str(hh_b["id"]))
+            user_b = repo.create_user(conn, auth_subject="sub_b", email="b@test.local", display_name="User B")
+            user_b_id = uuid.UUID(str(user_b["id"]))
+            repo.add_household_member(conn, hh_b_id, user_b_id, role="owner")
+            dev_b = repo.create_device(
+                conn,
+                household_id=hh_b_id,
+                user_id=user_b_id,
+                name="Device B",
+                platform="ios",
+                token_hash=b"b" * 32,
+            )
+            dev_b_id = uuid.UUID(str(dev_b["id"]))
             conn.commit()
 
-            # Cross-household: device in Household B referencing user in Household A fails FK
+            # 1. Cross-household: device in Household B referencing user in Household A fails FK
             with self.assertRaises(errors.ForeignKeyViolation):
                 repo.create_device(
                     conn,
@@ -349,7 +397,7 @@ class TestS1SimplifiedPostgresIntegration(unittest.TestCase):
                 )
             conn.rollback()
 
-            # Cross-household: account in Household B referencing user in Household A fails FK
+            # 2. Cross-household: account in Household B referencing user in Household A fails FK
             with self.assertRaises(errors.ForeignKeyViolation):
                 repo.create_account(
                     conn,
@@ -361,6 +409,160 @@ class TestS1SimplifiedPostgresIntegration(unittest.TestCase):
                     owner_user_id=user_a_id,
                 )
             conn.rollback()
+
+            # 3. Cross-household: ingestion_request in HH A referencing device in HH B fails fk_ingestion_requests_device
+            with self.assertRaises(errors.ForeignKeyViolation):
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        INSERT INTO ingestion_requests (
+                            id, household_id, user_id, device_id, actor_scope,
+                            idempotency_key, request_kind, operation, status
+                        ) VALUES (
+                            gen_random_uuid(), %s, %s, %s, 'device:test',
+                            'idemp-key-leak-device', 'expense', 'POST /expenses', 'processing'
+                        );
+                        """,
+                        (str(hh_a_id), str(user_a_id), str(dev_b_id)),
+                    )
+            conn.rollback()
+
+            # 4. Cross-household: spending_schedules in HH A referencing device in HH B fails fk_spending_schedules_device
+            with self.assertRaises(errors.ForeignKeyViolation):
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        INSERT INTO spending_schedules (
+                            id, household_id, created_by_user_id, created_by_device_id,
+                            name, kind, amount_per_period, currency, start_month,
+                            day_of_month, merchant, category_id
+                        ) VALUES (
+                            gen_random_uuid(), %s, %s, %s,
+                            'Schedule A', 'recurring', 100, 'CNY', '2026-01-01',
+                            1, 'Merchant', %s
+                        );
+                        """,
+                        (str(hh_a_id), str(user_a_id), str(dev_b_id), str(cat_a_id)),
+                    )
+            conn.rollback()
+
+            # 5. Cross-household: transactions in HH A referencing device in HH B fails fk_transactions_device
+            with self.assertRaises(errors.ForeignKeyViolation):
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        INSERT INTO transactions (
+                            id, household_id, transaction_type, occurred_on, date_source,
+                            original_amount, original_currency, category_id, source,
+                            created_by_user_id, created_by_device_id, source_request_id
+                        ) VALUES (
+                            gen_random_uuid(), %s, 'expense', '2026-01-01', 'manual',
+                            10, 'CNY', %s, 'shortcut',
+                            %s, %s, %s
+                        );
+                        """,
+                        (str(hh_a_id), str(cat_a_id), str(user_a_id), str(dev_b_id), str(req_a_id)),
+                    )
+            conn.rollback()
+
+            # 6. Cross-household: transactions in HH A referencing user_b as deleter fails fk_transactions_deleter
+            with self.assertRaises(errors.ForeignKeyViolation):
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        INSERT INTO transactions (
+                            id, household_id, transaction_type, occurred_on, date_source,
+                            original_amount, original_currency, category_id, source,
+                            created_by_user_id, source_request_id, status,
+                            deleted_at, deleted_by_user_id, delete_reason
+                        ) VALUES (
+                            gen_random_uuid(), %s, 'expense', '2026-01-01', 'manual',
+                            10, 'CNY', %s, 'dashboard_manual',
+                            %s, %s, 'voided',
+                            now(), %s, 'Deleted'
+                        );
+                        """,
+                        (str(hh_a_id), str(cat_a_id), str(user_a_id), str(req_a_id), str(user_b_id)),
+                    )
+            conn.rollback()
+
+            # 7. Cross-household: account_snapshots in HH A referencing device in HH B fails fk_snapshots_device
+            with self.assertRaises(errors.ForeignKeyViolation):
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        INSERT INTO account_snapshots (
+                            id, household_id, account_id, as_of, time_basis, balance,
+                            currency, source, created_by_user_id, created_by_device_id, source_request_id
+                        ) VALUES (
+                            gen_random_uuid(), %s, %s, now(), 'explicit', 100,
+                            'CNY', 'manual', %s, %s, %s
+                        );
+                        """,
+                        (str(hh_a_id), str(acc_a_id), str(user_a_id), str(dev_b_id), str(req_a_id)),
+                    )
+            conn.rollback()
+
+            # 8. Cross-household: account_snapshots in HH A referencing user_b as voider fails fk_snapshots_voider
+            with self.assertRaises(errors.ForeignKeyViolation):
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        INSERT INTO account_snapshots (
+                            id, household_id, account_id, as_of, time_basis, balance,
+                            currency, source, created_by_user_id, source_request_id, status,
+                            voided_at, voided_by_user_id, void_reason
+                        ) VALUES (
+                            gen_random_uuid(), %s, %s, now(), 'explicit', 100,
+                            'CNY', 'manual', %s, %s, 'voided',
+                            now(), %s, 'Voided'
+                        );
+                        """,
+                        (str(hh_a_id), str(acc_a_id), str(user_a_id), str(req_a_id), str(user_b_id)),
+                    )
+            conn.rollback()
+
+            # 9. Cross-household: audit_events in HH A referencing user_b as actor fails fk_audit_events_user
+            with self.assertRaises(errors.ForeignKeyViolation):
+                repo.insert_audit_event(
+                    conn,
+                    household_id=hh_a_id,
+                    actor_type="user",
+                    actor_user_id=user_b_id,
+                    entity_type="household",
+                    entity_id=hh_a_id,
+                    action="create",
+                )
+            conn.rollback()
+
+            # 10. Cross-household: audit_events in HH A referencing dev_b as actor fails fk_audit_events_device
+            with self.assertRaises(errors.ForeignKeyViolation):
+                repo.insert_audit_event(
+                    conn,
+                    household_id=hh_a_id,
+                    actor_type="device",
+                    actor_device_id=dev_b_id,
+                    entity_type="household",
+                    entity_id=hh_a_id,
+                    action="create",
+                )
+            conn.rollback()
+
+            # Positive validation: inserting valid records in HH A using HH A's own member and device succeeds
+            valid_evt = repo.insert_audit_event(
+                conn,
+                household_id=hh_a_id,
+                actor_type="user",
+                actor_user_id=user_a_id,
+                actor_device_id=dev_a_id,
+                entity_type="household",
+                entity_id=hh_a_id,
+                action="create",
+                reason="Valid audit in HH A",
+            )
+            self.assertIsNotNone(valid_evt["id"])
+            conn.commit()
+
         finally:
             conn.close()
 
@@ -462,6 +664,186 @@ class TestS1SimplifiedPostgresIntegration(unittest.TestCase):
                 locked = repo.acquire_household_finance_lock(conn, hh_id)
                 self.assertEqual(str(locked["id"]), str(hh_id))
                 self.assertEqual(locked["status"], "active")
+        finally:
+            conn.close()
+
+    def test_household_finance_write_lock_two_connection_concurrency(self):
+        """Validates acquire_household_finance_lock blocks concurrent connection on same household but not different household."""
+        runner.run_migrations(schema=self.test_schema, lineage=LINEAGE_SIMPLIFIED)
+
+        conn_a = get_connection(self.test_schema)
+        conn_b = get_connection(self.test_schema)
+        try:
+            hh_a = repo.create_household(conn_a, name="Lock HH A")
+            hh_a_id = uuid.UUID(str(hh_a["id"]))
+            hh_b = repo.create_household(conn_a, name="Lock HH B")
+            hh_b_id = uuid.UUID(str(hh_b["id"]))
+            conn_a.commit()
+
+            # Step 1: Different household lock on conn_b succeeds immediately while conn_a holds hh_a
+            conn_a.autocommit = False
+            with conn_a.cursor() as cur:
+                cur.execute("SELECT id FROM households WHERE id = %s FOR UPDATE;", (str(hh_a_id),))
+
+            conn_b.autocommit = False
+            with conn_b.cursor() as cur:
+                cur.execute("SELECT id FROM households WHERE id = %s FOR UPDATE;", (str(hh_b_id),))
+            conn_b.commit()
+
+            # Step 2: Connection B attempts to acquire lock on HH A in a thread
+            b_attempt_started = threading.Event()
+            b_lock_acquired = threading.Event()
+            b_error = []
+
+            def worker_b():
+                try:
+                    b_attempt_started.set()
+                    with conn_b.cursor() as cur:
+                        cur.execute("SELECT id FROM households WHERE id = %s FOR UPDATE;", (str(hh_a_id),))
+                    b_lock_acquired.set()
+                except Exception as e:
+                    b_error.append(e)
+
+            t = threading.Thread(target=worker_b)
+            t.start()
+
+            b_attempt_started.wait(timeout=3.0)
+            # Verify B has NOT acquired lock because A is holding it
+            self.assertFalse(b_lock_acquired.wait(timeout=0.3), "Connection B must be blocked waiting for lock on HH A")
+
+            # Connection A commits, releasing the lock on HH A
+            conn_a.commit()
+
+            # Connection B now unblocks and acquires lock
+            self.assertTrue(b_lock_acquired.wait(timeout=3.0), "Connection B must acquire lock on HH A after Connection A commits")
+            conn_b.commit()
+            t.join(timeout=2.0)
+            self.assertEqual(len(b_error), 0, f"Worker B encountered error: {b_error}")
+        finally:
+            conn_a.close()
+            conn_b.close()
+
+    def test_least_privilege_database_roles(self):
+        """Validates least-privilege separation: vibeledger_runtime has DML, no DDL, immutable audit, and no migrations write."""
+        runner.run_migrations(schema=self.test_schema, lineage=LINEAGE_SIMPLIFIED)
+
+        # Execute setup_roles_simplified.sql with test schema
+        roles_sql_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+            "scripts",
+            "setup_roles_simplified.sql",
+        )
+        with open(roles_sql_path, "r", encoding="utf-8") as f:
+            roles_sql = f.read().replace("__DB_SCHEMA__", self.test_schema)
+
+        conn = get_connection(self.test_schema)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(roles_sql)
+            conn.commit()
+
+            # Test runtime permissions using SET ROLE vibeledger_runtime
+            with conn.cursor() as cur:
+                cur.execute("SET ROLE vibeledger_runtime;")
+
+                # 1. DML: SELECT and INSERT on households succeed
+                cur.execute("SELECT COUNT(*) FROM households;")
+                hh_id = uuid.uuid4()
+                cur.execute(
+                    """
+                    INSERT INTO households (id, name, started_on)
+                    VALUES (%s, 'Runtime HH', '2026-01-01');
+                    """,
+                    (str(hh_id),),
+                )
+
+                # 2. Schema DDL: CREATE TABLE fails with InsufficientPrivilege
+                with self.assertRaises(errors.InsufficientPrivilege):
+                    cur.execute("CREATE TABLE evil_table (id INT);")
+                conn.rollback()
+                cur.execute("SET ROLE vibeledger_runtime;")
+
+                # 3. audit_events: INSERT succeeds
+                cur.execute(
+                    """
+                    INSERT INTO audit_events (household_id, actor_type, entity_type, entity_id, action, reason)
+                    VALUES (%s, 'system', 'household', %s, 'create', 'test audit');
+                    """,
+                    (str(hh_id), str(hh_id)),
+                )
+                # audit_events: UPDATE fails with InsufficientPrivilege / RaiseException
+                with self.assertRaises((errors.InsufficientPrivilege, errors.RaiseException)):
+                    cur.execute("UPDATE audit_events SET reason = 'hacked' WHERE household_id = %s;", (str(hh_id),))
+                conn.rollback()
+                cur.execute("SET ROLE vibeledger_runtime;")
+
+                # audit_events: DELETE fails with InsufficientPrivilege / RaiseException
+                with self.assertRaises((errors.InsufficientPrivilege, errors.RaiseException)):
+                    cur.execute("DELETE FROM audit_events WHERE household_id = %s;", (str(hh_id),))
+                conn.rollback()
+                cur.execute("SET ROLE vibeledger_runtime;")
+
+                # 4. schema_migrations: SELECT succeeds
+                cur.execute("SELECT COUNT(*) FROM schema_migrations;")
+
+                # schema_migrations: INSERT fails with InsufficientPrivilege
+                with self.assertRaises(errors.InsufficientPrivilege):
+                    cur.execute("INSERT INTO schema_migrations VALUES ('bad.sql', 'hash', now());")
+                conn.rollback()
+
+                cur.execute("RESET ROLE;")
+            conn.commit()
+        finally:
+            conn.close()
+
+    def test_bootstrap_drift_detection_in_real_postgres(self):
+        """Validates that configuration drift triggers BootstrapDriftError in real PostgreSQL."""
+        runner.run_migrations(schema=self.test_schema, lineage=LINEAGE_SIMPLIFIED)
+
+        conn = get_connection(self.test_schema)
+        try:
+            with transaction(conn):
+                bootstrap_simplified_environment(conn, household_name="Drift HH")
+
+            # Case 1: Household currency drift
+            with conn.cursor() as cur:
+                cur.execute("UPDATE households SET reporting_currency = 'USD' WHERE name = 'Drift HH';")
+            conn.commit()
+
+            with self.assertRaises(BootstrapDriftError):
+                with transaction(conn):
+                    bootstrap_simplified_environment(conn, household_name="Drift HH", reporting_currency="CNY")
+            conn.rollback()
+
+            # Reset currency
+            with conn.cursor() as cur:
+                cur.execute("UPDATE households SET reporting_currency = 'CNY' WHERE name = 'Drift HH';")
+            conn.commit()
+
+            # Case 2: Category status drift
+            with conn.cursor() as cur:
+                cur.execute("UPDATE categories SET status = 'inactive' WHERE name = 'Grocery' AND category_type = 'expense';")
+            conn.commit()
+
+            with self.assertRaises(BootstrapDriftError):
+                with transaction(conn):
+                    bootstrap_simplified_environment(conn, household_name="Drift HH")
+            conn.rollback()
+
+            # Reset category
+            with conn.cursor() as cur:
+                cur.execute("UPDATE categories SET status = 'active' WHERE name = 'Grocery' AND category_type = 'expense';")
+            conn.commit()
+
+            # Case 3: Account balance_scope drift
+            with conn.cursor() as cur:
+                cur.execute("UPDATE accounts SET balance_scope = 'tampered' WHERE name = 'Cash Wallet';")
+            conn.commit()
+
+            with self.assertRaises(BootstrapDriftError):
+                with transaction(conn):
+                    bootstrap_simplified_environment(conn, household_name="Drift HH")
+            conn.rollback()
         finally:
             conn.close()
 

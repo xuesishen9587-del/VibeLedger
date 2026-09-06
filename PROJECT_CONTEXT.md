@@ -51,22 +51,19 @@ audit/work-queue user interfaces.
 compatibility boundary specification, migration checksums, and offline boundary
 characterization tests are committed and verified.
 
-**S1** (fresh database, identities and settings) implementation is completed:
-the 16-table simplified baseline under `migrations/simplified/0001_simplified.sql`,
-strict lineage selection (`LegacyMigrationLineageDetectedError`), readiness check verification,
-remote Supabase safety guards, simplified repositories with strict household scoping on
-all mutations and row locks (`lock_ingestion_request`, `touch_device`), short household-scoped
-finance-write lock primitive (`acquire_household_finance_lock`, `lock_ingestion_requests_in_order`),
-least-privilege operator/runtime role configuration (`scripts/setup_roles_simplified.sql` and
-`docs/architecture/DATABASE_ROLES.md`), idempotent seed script (`scripts/bootstrap_simplified.py`),
-and real PostgreSQL integration test suite (`tests/integration/test_s1_simplified_db.py`).
+**S1** (fresh database, identities and settings) implementation and remediation completed:
+* 16-table simplified baseline under `migrations/simplified/0001_simplified.sql` with strict composite foreign keys on all household entities (`fk_ingestion_requests_device`, `fk_spending_schedules_device`, `fk_transactions_device`, `fk_transactions_deleter`, `fk_snapshots_device`, `fk_snapshots_voider`, `fk_audit_events_user`, `fk_audit_events_device`).
+* Strict lineage selection (`LegacyMigrationLineageDetectedError`) and readiness check verification.
+* Remote Supabase safety guards rejecting non-local databases in test mode.
+* Simplified repositories with strict household scoping on all mutations, queries, and row locks (`lock_ingestion_request`, `touch_device`).
+* Short household-scoped finance-write lock primitive (`acquire_household_finance_lock`, `lock_ingestion_requests_in_order`).
+* Least-privilege operator/runtime role configuration (`scripts/setup_roles_simplified.sql` and `docs/architecture/DATABASE_ROLES.md`).
+* Idempotent seed script with fail-fast configuration drift detection (`BootstrapDriftError` in `scripts/bootstrap_simplified.py`).
+* Comprehensive offline unit test suite (24 tests in `tests/unit/test_s1_foundation_unit.py`, 215 tests backend total).
+* Real PostgreSQL integration test suite (13 test methods in `tests/integration/test_s1_simplified_db.py` covering catalog inspection, constraints, composite FK isolation, audit immutability, two-connection concurrency, least-privilege roles, and drift detection).
 
-**S1 acceptance gate status**: Acceptance is **pending real PostgreSQL execution**.
-On the current host environment, Docker / local PostgreSQL 17 is not available, so tests
-requiring a live database fixture skipped gracefully. In accordance with CONTRACTS safety
-rules, remote databases (e.g. Supabase) cannot be substituted for disposable test runs.
-Full S1 acceptance will complete once Docker or a local PostgreSQL 17 instance is available
-to run `ai-ledger-backend/scripts/run_local_integration.ps1`. Do not start S2 until accepted.
+**S1 acceptance gate status**: Implementation and remediation are complete; acceptance is **pending real PostgreSQL execution**.
+On the current host environment, Docker / local PostgreSQL 17 is not installed/running, so tests requiring a live database fixture skip gracefully. In accordance with CONTRACTS safety rules, remote databases (e.g. Supabase) cannot be substituted for disposable test runs. Full S1 acceptance will complete once Docker or a local PostgreSQL 17 instance is available to run `ai-ledger-backend/scripts/run_local_integration.ps1`. Do not start S2 until accepted.
 
 Consumer choices are specified, not blockers: last reported wealth, due-period
 installment spending, editable seeded categories, statement preview before Save,

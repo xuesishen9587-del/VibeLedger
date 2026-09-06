@@ -40,6 +40,7 @@ from scripts.bootstrap_simplified import (
     EXPENSE_CATEGORIES,
     INCOME_CATEGORIES,
     STARTER_ACCOUNTS,
+    BootstrapDriftError,
     bootstrap_simplified_environment,
 )
 
@@ -585,28 +586,135 @@ class TestS1AccountCategoryUIFoundations(unittest.TestCase):
         self.assertEqual(summary1["categories_created"], 18)
         self.assertEqual(summary1["accounts_created"], 3)
 
-        # Second pass: all exist
+        # Second pass: all exist and match perfectly
         hh_uuid = uuid.uuid4()
         user_uuid = uuid.uuid4()
-        mock_cur.fetchone.side_effect = [
-            (str(hh_uuid),),  # household lookup
-            (str(user_uuid),),  # user lookup
-            ("owner",),  # membership lookup
-            # 15 expense categories (all found)
-            ("cat1",), ("cat2",), ("cat3",), ("cat4",), ("cat5",),
-            ("cat6",), ("cat7",), ("cat8",), ("cat9",), ("cat10",),
-            ("cat11",), ("cat12",), ("cat13",), ("cat14",), ("cat15",),
-            # 3 income categories (all found)
-            ("inc1",), ("inc2",), ("inc3",),
-            # 3 starter accounts (all found)
-            ("acc1",), ("acc2",), ("acc3",),
+        second_pass_side_effects = [
+            (str(hh_uuid), "CNY", date(2026, 1, 1), "Asia/Singapore", Decimal("0.2000"), "active"),  # household
+            (str(user_uuid),),  # user
+            ("owner",),  # membership
         ]
+        # 15 expense categories
+        for _, desc, fallback in EXPENSE_CATEGORIES:
+            second_pass_side_effects.append((str(uuid.uuid4()), "expense", desc, fallback, "active"))
+        # 3 income categories
+        for _, desc, fallback in INCOME_CATEGORIES:
+            second_pass_side_effects.append((str(uuid.uuid4()), "income", desc, fallback, "active"))
+        # 3 starter accounts
+        for _, scope, acc_type, curr, risk in STARTER_ACCOUNTS:
+            second_pass_side_effects.append((str(uuid.uuid4()), scope, acc_type, curr, risk, "active"))
+
+        mock_cur.fetchone.side_effect = second_pass_side_effects
 
         summary2 = bootstrap_simplified_environment(mock_conn, household_name="Test Household")
         self.assertEqual(summary2["categories_created"], 0)
         self.assertEqual(summary2["categories_verified"], 18)
         self.assertEqual(summary2["accounts_created"], 0)
         self.assertEqual(summary2["accounts_verified"], 3)
+
+    def test_bootstrap_detects_household_drift(self):
+        """Verify bootstrap_simplified_environment raises BootstrapDriftError on drifted household fields."""
+        mock_conn = MagicMock()
+        mock_cur = MagicMock()
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cur
+        hh_uuid = uuid.uuid4()
+
+        # 1. Currency drift
+        mock_cur.fetchone.side_effect = [
+            (str(hh_uuid), "USD", date(2026, 1, 1), "Asia/Singapore", Decimal("0.2000"), "active")
+        ]
+        with self.assertRaises(BootstrapDriftError) as ctx:
+            bootstrap_simplified_environment(mock_conn, household_name="Test Household", reporting_currency="CNY")
+        self.assertIn("reporting_currency drift", str(ctx.exception))
+
+        # 2. Timezone drift
+        mock_cur.fetchone.side_effect = [
+            (str(hh_uuid), "CNY", date(2026, 1, 1), "America/New_York", Decimal("0.2000"), "active")
+        ]
+        with self.assertRaises(BootstrapDriftError) as ctx:
+            bootstrap_simplified_environment(mock_conn, household_name="Test Household", tz_name="Asia/Singapore")
+        self.assertIn("timezone drift", str(ctx.exception))
+
+        # 3. Ratio drift
+        mock_cur.fetchone.side_effect = [
+            (str(hh_uuid), "CNY", date(2026, 1, 1), "Asia/Singapore", Decimal("0.5000"), "active")
+        ]
+        with self.assertRaises(BootstrapDriftError) as ctx:
+            bootstrap_simplified_environment(mock_conn, household_name="Test Household", investment_review_change_ratio=Decimal("0.2000"))
+        self.assertIn("investment_review_change_ratio drift", str(ctx.exception))
+
+        # 4. Inactive household
+        mock_cur.fetchone.side_effect = [
+            (str(hh_uuid), "CNY", date(2026, 1, 1), "Asia/Singapore", Decimal("0.2000"), "archived")
+        ]
+        with self.assertRaises(BootstrapDriftError) as ctx:
+            bootstrap_simplified_environment(mock_conn, household_name="Test Household")
+        self.assertIn("exists but is not active", str(ctx.exception))
+
+    def test_bootstrap_detects_category_drift(self):
+        """Verify bootstrap_simplified_environment raises BootstrapDriftError on drifted category fields."""
+        mock_conn = MagicMock()
+        mock_cur = MagicMock()
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cur
+        hh_uuid = uuid.uuid4()
+        user_uuid = uuid.uuid4()
+
+        # Inactive category
+        mock_cur.fetchone.side_effect = [
+            (str(hh_uuid), "CNY", date(2026, 1, 1), "Asia/Singapore", Decimal("0.2000"), "active"),
+            (str(user_uuid),),
+            ("owner",),
+            (str(uuid.uuid4()), "expense", EXPENSE_CATEGORIES[0][1], False, "inactive"),
+        ]
+        with self.assertRaises(BootstrapDriftError) as ctx:
+            bootstrap_simplified_environment(mock_conn, household_name="Test Household")
+        self.assertIn("is not active", str(ctx.exception))
+
+        # Description drift
+        mock_cur.fetchone.side_effect = [
+            (str(hh_uuid), "CNY", date(2026, 1, 1), "Asia/Singapore", Decimal("0.2000"), "active"),
+            (str(user_uuid),),
+            ("owner",),
+            (str(uuid.uuid4()), "expense", "Altered Description", False, "active"),
+        ]
+        with self.assertRaises(BootstrapDriftError) as ctx:
+            bootstrap_simplified_environment(mock_conn, household_name="Test Household")
+        self.assertIn("description drift", str(ctx.exception))
+
+    def test_bootstrap_detects_account_drift(self):
+        """Verify bootstrap_simplified_environment raises BootstrapDriftError on drifted account fields."""
+        mock_conn = MagicMock()
+        mock_cur = MagicMock()
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cur
+        hh_uuid = uuid.uuid4()
+        user_uuid = uuid.uuid4()
+
+        # Setup side effects leading to account check
+        base_side_effects = [
+            (str(hh_uuid), "CNY", date(2026, 1, 1), "Asia/Singapore", Decimal("0.2000"), "active"),
+            (str(user_uuid),),
+            ("owner",),
+        ]
+        for _, desc, fallback in EXPENSE_CATEGORIES:
+            base_side_effects.append((str(uuid.uuid4()), "expense", desc, fallback, "active"))
+        for _, desc, fallback in INCOME_CATEGORIES:
+            base_side_effects.append((str(uuid.uuid4()), "income", desc, fallback, "active"))
+
+        # Currency drift on Cash Wallet
+        mock_cur.fetchone.side_effect = base_side_effects + [
+            (str(uuid.uuid4()), "Wallet cash on hand", "cash", "USD", None, "active")
+        ]
+        with self.assertRaises(BootstrapDriftError) as ctx:
+            bootstrap_simplified_environment(mock_conn, household_name="Test Household")
+        self.assertIn("currency drift", str(ctx.exception))
+
+        # Balance scope drift on Cash Wallet
+        mock_cur.fetchone.side_effect = base_side_effects + [
+            (str(uuid.uuid4()), "Wrong Scope", "cash", "CNY", None, "active")
+        ]
+        with self.assertRaises(BootstrapDriftError) as ctx:
+            bootstrap_simplified_environment(mock_conn, household_name="Test Household")
+        self.assertIn("balance_scope drift", str(ctx.exception))
 
 
 if __name__ == "__main__":

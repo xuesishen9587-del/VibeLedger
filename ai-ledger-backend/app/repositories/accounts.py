@@ -18,11 +18,13 @@ def create_household(
     reporting_currency: str = 'CNY',
     started_on: Optional[date] = None,
     ledger_start_date: Optional[date] = None,
+    tz_name: str = 'Asia/Singapore',
     status: str = 'active'
 ) -> Dict[str, Any]:
     return repo_household_members.create_household(
         conn, household_id, name, reporting_currency,
-        started_on=started_on, ledger_start_date=ledger_start_date, status=status
+        started_on=started_on, ledger_start_date=ledger_start_date,
+        tz_name=tz_name, status=status
     )
 
 def get_household(conn, household_id: UUID) -> Optional[Dict[str, Any]]:
@@ -114,6 +116,22 @@ def get_device(conn, device_id: UUID) -> Optional[Dict[str, Any]]:
 
 def get_device_by_token_hash(conn, token_hash: bytes) -> Optional[Dict[str, Any]]:
     return repo_devices.get_device_by_token_hash(conn, token_hash)
+
+def create_category(conn, *args, **kwargs) -> Dict[str, Any]:
+    if len(args) >= 2 and (isinstance(args[0], UUID) or (isinstance(args[0], str) and len(args[0]) == 36 and '-' in args[0])) and (isinstance(args[1], UUID) or (isinstance(args[1], str) and len(args[1]) == 36 and '-' in args[1])):
+        category_id = UUID(str(args[0]))
+        household_id = UUID(str(args[1]))
+        name = str(args[2]) if len(args) > 2 else kwargs.get("name", "")
+        category_type = str(args[3]) if len(args) > 3 else kwargs.get("category_type", "expense")
+        description = args[4] if len(args) > 4 else kwargs.get("description")
+        is_fallback = args[5] if len(args) > 5 else kwargs.get("is_fallback", False)
+        status = args[6] if len(args) > 6 else kwargs.get("status", "active")
+        return repo_categories.create_category(
+            conn, household_id=household_id, name=name, category_type=category_type,
+            description=description, is_fallback=is_fallback, category_id=category_id,
+            status=status
+        )
+    return repo_categories.create_category(conn, *args, **kwargs)
 
 # --- Simplified Account Repository ---
 

@@ -80,7 +80,8 @@ def build_error_response(
                 "message": message,
                 "retryable": retryable,
                 "details": details or {}
-            }
+            },
+            "detail": message
         }
     )
 

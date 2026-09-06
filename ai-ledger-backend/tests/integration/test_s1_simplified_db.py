@@ -321,6 +321,55 @@ class TestS1SimplifiedPostgresIntegration(unittest.TestCase):
                 repo.create_category(conn, hh_id, "Other 2", "expense", is_fallback=True)
             conn.rollback()
 
+            # 6. Ingestion request: NULL request_hash on expense fails chk_ingestion_requests_hash
+            with self.assertRaises(errors.CheckViolation):
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        INSERT INTO ingestion_requests (
+                            id, household_id, user_id, actor_scope, idempotency_key,
+                            request_kind, operation, request_hash, status
+                        ) VALUES (
+                            gen_random_uuid(), %s, %s, 'user:test', 'idemp-key-null-hash',
+                            'expense', 'POST /expenses', NULL, 'processing'
+                        );
+                        """,
+                        (str(hh_id), str(user_id)),
+                    )
+            conn.rollback()
+
+            # 7. Ingestion request: NULL request_hash on command cancel succeeds
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO ingestion_requests (
+                        id, household_id, user_id, actor_scope, idempotency_key,
+                        request_kind, operation, request_hash, status
+                    ) VALUES (
+                        gen_random_uuid(), %s, %s, 'user:test', 'idemp-key-cancel-cmd',
+                        'command', 'cancel', NULL, 'processing'
+                    );
+                    """,
+                    (str(hh_id), str(user_id)),
+                )
+            conn.commit()
+
+            # 8. Ingestion request: valid 64-char SHA256 hex hash on expense succeeds
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO ingestion_requests (
+                        id, household_id, user_id, actor_scope, idempotency_key,
+                        request_kind, operation, request_hash, status
+                    ) VALUES (
+                        gen_random_uuid(), %s, %s, 'user:test', 'idemp-key-sha-hash',
+                        'expense', 'POST /expenses', %s, 'processing'
+                    );
+                    """,
+                    (str(hh_id), str(user_id), 'e' * 64),
+                )
+            conn.commit()
+
         finally:
             conn.close()
 
@@ -417,10 +466,10 @@ class TestS1SimplifiedPostgresIntegration(unittest.TestCase):
                         """
                         INSERT INTO ingestion_requests (
                             id, household_id, user_id, device_id, actor_scope,
-                            idempotency_key, request_kind, operation, status
+                            idempotency_key, request_kind, operation, request_hash, status
                         ) VALUES (
                             gen_random_uuid(), %s, %s, %s, 'device:test',
-                            'idemp-key-leak-device', 'expense', 'POST /expenses', 'processing'
+                            'idemp-key-leak-device', 'expense', 'POST /expenses', 'a' * 64, 'processing'
                         );
                         """,
                         (str(hh_a_id), str(user_a_id), str(dev_b_id)),

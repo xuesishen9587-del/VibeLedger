@@ -5,6 +5,7 @@ Provides household-scoped SQL repository operations for the simplified 16-table 
 
 from datetime import date, datetime, timezone
 from decimal import Decimal
+import hashlib
 import json
 from typing import Any, Dict, List, Optional
 import uuid
@@ -636,6 +637,10 @@ def create_ingestion_request(
 
     if request_kind not in ("expense", "balance_capture", "statement", "command"):
         raise ValueError(f"Invalid request_kind: {request_kind}")
+
+    if request_hash is None and not (request_kind == "command" and operation == "cancel"):
+        raw_to_hash = json.dumps(draft_payload, sort_keys=True) if draft_payload else idempotency_key
+        request_hash = hashlib.sha256(f"{operation}:{raw_to_hash}".encode("utf-8")).hexdigest()
 
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute(

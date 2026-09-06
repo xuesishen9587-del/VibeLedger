@@ -362,13 +362,21 @@ class TestAccountsApiDb(BaseDbTestCase):
         conn = get_connection(self.test_schema)
         try:
             with transaction(conn):
-                bad_snap_id = uuid4()
+                req_id = uuid4()
                 with conn.cursor() as cur:
                     cur.execute("""
+                        INSERT INTO ingestion_requests (
+                            id, household_id, user_id, device_id, actor_scope,
+                            idempotency_key, request_kind, operation, request_hash, status
+                        ) VALUES (%s, %s, %s, %s, 'device:test', %s, 'command', 'snapshot', %s, 'committed');
+                    """, (req_id, self.household_id, self.user_id, self.device_id, f"key_{uuid4().hex[:16]}", '0'*64))
+
+                    bad_snap_id = uuid4()
+                    cur.execute("""
                         INSERT INTO account_snapshots (
-                            id, household_id, account_id, as_of, balance, currency, source, status, created_by_user_id
-                        ) VALUES (%s, %s, %s, '2026-06-01 10:00:00+00', 50.00, 'CNY', 'manual', 'active', %s);
-                    """, (bad_snap_id, self.household_id, acc_id, self.user_id))
+                            id, household_id, account_id, as_of, time_basis, balance, currency, source, status, created_by_user_id, source_request_id
+                        ) VALUES (%s, %s, %s, '2026-06-01 10:00:00+00', 'explicit', 50.00, 'CNY', 'manual', 'active', %s, %s);
+                    """, (bad_snap_id, self.household_id, acc_id, self.user_id, req_id))
         finally:
             conn.close()
 
@@ -386,14 +394,22 @@ class TestAccountsApiDb(BaseDbTestCase):
         conn = get_connection(self.test_schema)
         try:
             with transaction(conn):
-                # Mark previous snapshot inactive so it doesn't count as later active
+                req_zero_id = uuid4()
                 with conn.cursor() as cur:
-                    cur.execute("UPDATE account_snapshots SET status = 'inactive' WHERE id = %s;", (bad_snap_id,))
+                    cur.execute("""
+                        INSERT INTO ingestion_requests (
+                            id, household_id, user_id, device_id, actor_scope,
+                            idempotency_key, request_kind, operation, request_hash, status
+                        ) VALUES (%s, %s, %s, %s, 'device:test', %s, 'command', 'snapshot', %s, 'committed');
+                    """, (req_zero_id, self.household_id, self.user_id, self.device_id, f"key_{uuid4().hex[:16]}", '0'*64))
+
+                    # Mark previous snapshot voided so it doesn't count as later active
+                    cur.execute("UPDATE account_snapshots SET status = 'voided', voided_at = now(), void_reason = 'closed' WHERE id = %s;", (bad_snap_id,))
                     cur.execute("""
                         INSERT INTO account_snapshots (
-                            id, household_id, account_id, as_of, balance, currency, source, status, created_by_user_id
-                        ) VALUES (%s, %s, %s, '2026-06-01 12:00:00+00', 0.000000, 'CNY', 'manual', 'active', %s);
-                    """, (zero_snap_id, self.household_id, acc_id, self.user_id))
+                            id, household_id, account_id, as_of, time_basis, balance, currency, source, status, created_by_user_id, source_request_id
+                        ) VALUES (%s, %s, %s, '2026-06-01 12:00:00+00', 'explicit', 0.000000, 'CNY', 'manual', 'active', %s, %s);
+                    """, (zero_snap_id, self.household_id, acc_id, self.user_id, req_zero_id))
         finally:
             conn.close()
 

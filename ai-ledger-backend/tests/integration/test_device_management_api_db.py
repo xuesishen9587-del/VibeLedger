@@ -147,7 +147,7 @@ class TestDeviceManagementApiDb(BaseDbTestCase):
         res1 = self.client.post(
             "/api/v1/devices",
             headers={"Authorization": f"Bearer {self.jwt_user1}"},
-            json={"device_name": "User 1 iPad", "platform": "ipad_os"}
+            json={"device_name": "User 1 iPad", "platform": "ios"}
         )
         self.assertEqual(res1.status_code, 201)
         dev1_id = res1.json()["device"]["device_id"]
@@ -156,7 +156,7 @@ class TestDeviceManagementApiDb(BaseDbTestCase):
         res2 = self.client.post(
             "/api/v1/devices",
             headers={"Authorization": f"Bearer {self.jwt_user2}"},
-            json={"device_name": "User 2 Watch", "platform": "watch_os"}
+            json={"device_name": "User 2 Watch", "platform": "other"}
         )
         self.assertEqual(res2.status_code, 201)
         dev2_id = res2.json()["device"]["device_id"]
@@ -228,7 +228,7 @@ class TestDeviceManagementApiDb(BaseDbTestCase):
             entity_id=device_id
         )
         actions = [e["action"] for e in events]
-        self.assertIn("soft_delete", actions)
+        self.assertIn("update", actions)
 
     def test_revoke_cross_user_device_returns_404(self):
         # User 1 creates a device

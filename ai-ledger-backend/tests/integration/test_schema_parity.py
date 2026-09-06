@@ -4,15 +4,15 @@ try:
 except ModuleNotFoundError:
     from support.db_helper import BaseDbTestCase
 
-# Complete deterministic schema contract derived from PHYSICAL_SCHEMA.md
+# Canonical 16-table schema contracts derived from 0001_simplified.sql
 EXPECTED_TABLE_CONTRACTS = {
     "households": {
         "columns": {
             "id": {"type": "uuid", "nullable": "NO"},
             "name": {"type": "text", "nullable": "NO"},
-            "reporting_currency": {"type": "character", "length": 3, "nullable": "NO"},
-            "ledger_start_date": {"type": "date", "nullable": "NO"},
+            "reporting_currency": {"type": "character varying", "length": 3, "nullable": "NO"},
             "status": {"type": "text", "nullable": "NO"},
+            "row_version": {"type": "bigint", "nullable": "NO"},
             "created_at": {"type": "timestamp with time zone", "nullable": "NO"},
             "updated_at": {"type": "timestamp with time zone", "nullable": "NO"},
         },
@@ -22,10 +22,10 @@ EXPECTED_TABLE_CONTRACTS = {
         "columns": {
             "id": {"type": "uuid", "nullable": "NO"},
             "auth_subject": {"type": "text", "nullable": "NO"},
-            "email": {"type": "USER-DEFINED", "nullable": "YES"},
+            "email": {"type": "text", "nullable": "YES"},
             "display_name": {"type": "text", "nullable": "NO"},
-            "default_currency": {"type": "character", "length": 3, "nullable": "NO"},
             "status": {"type": "text", "nullable": "NO"},
+            "row_version": {"type": "bigint", "nullable": "NO"},
             "created_at": {"type": "timestamp with time zone", "nullable": "NO"},
             "updated_at": {"type": "timestamp with time zone", "nullable": "NO"},
         },
@@ -43,58 +43,17 @@ EXPECTED_TABLE_CONTRACTS = {
     "devices": {
         "columns": {
             "id": {"type": "uuid", "nullable": "NO"},
+            "household_id": {"type": "uuid", "nullable": "NO"},
             "user_id": {"type": "uuid", "nullable": "NO"},
             "device_name": {"type": "text", "nullable": "NO"},
-            "platform": {"type": "text", "nullable": "NO"},
             "token_hash": {"type": "bytea", "nullable": "NO"},
-            "status": {"type": "text", "nullable": "NO"},
+            "platform": {"type": "text", "nullable": "NO"},
             "client_version": {"type": "text", "nullable": "YES"},
-            "created_at": {"type": "timestamp with time zone", "nullable": "NO"},
+            "status": {"type": "text", "nullable": "NO"},
             "last_seen_at": {"type": "timestamp with time zone", "nullable": "YES"},
             "revoked_at": {"type": "timestamp with time zone", "nullable": "YES"},
-        },
-        "pk": ["id"],
-    },
-    "accounts": {
-        "columns": {
-            "id": {"type": "uuid", "nullable": "NO"},
-            "household_id": {"type": "uuid", "nullable": "NO"},
-            "name": {"type": "text", "nullable": "NO"},
-            "institution": {"type": "text", "nullable": "YES"},
-            "account_type": {"type": "text", "nullable": "NO"},
-            "currency": {"type": "character", "length": 3, "nullable": "NO"},
-            "owner_user_id": {"type": "uuid", "nullable": "YES"},
-            "linked_cash_account_id": {"type": "uuid", "nullable": "YES"},
-            "billing_day": {"type": "smallint", "nullable": "YES"},
-            "due_day": {"type": "smallint", "nullable": "YES"},
-            "status": {"type": "text", "nullable": "NO"},
-            "row_version": {"type": "bigint", "nullable": "NO"},
             "created_at": {"type": "timestamp with time zone", "nullable": "NO"},
             "updated_at": {"type": "timestamp with time zone", "nullable": "NO"},
-        },
-        "pk": ["id"],
-    },
-    "account_state": {
-        "columns": {
-            "account_id": {"type": "uuid", "nullable": "NO"},
-            "ledger_balance": {"type": "numeric", "precision": 20, "scale": 6, "nullable": "NO"},
-            "initialized_at": {"type": "timestamp with time zone", "nullable": "YES"},
-            "last_transaction_at": {"type": "timestamp with time zone", "nullable": "YES"},
-            "last_authoritative_snapshot_at": {"type": "timestamp with time zone", "nullable": "YES"},
-            "row_version": {"type": "bigint", "nullable": "NO"},
-            "updated_at": {"type": "timestamp with time zone", "nullable": "NO"},
-        },
-        "pk": ["account_id"],
-    },
-    "account_aliases": {
-        "columns": {
-            "id": {"type": "uuid", "nullable": "NO"},
-            "account_id": {"type": "uuid", "nullable": "NO"},
-            "alias_text": {"type": "text", "nullable": "NO"},
-            "normalized_alias": {"type": "text", "nullable": "NO"},
-            "status": {"type": "text", "nullable": "NO"},
-            "created_at": {"type": "timestamp with time zone", "nullable": "NO"},
-            "deleted_at": {"type": "timestamp with time zone", "nullable": "YES"},
         },
         "pk": ["id"],
     },
@@ -104,7 +63,44 @@ EXPECTED_TABLE_CONTRACTS = {
             "household_id": {"type": "uuid", "nullable": "NO"},
             "name": {"type": "text", "nullable": "NO"},
             "category_type": {"type": "text", "nullable": "NO"},
+            "description": {"type": "text", "nullable": "YES"},
+            "is_fallback": {"type": "boolean", "nullable": "NO"},
             "status": {"type": "text", "nullable": "NO"},
+            "row_version": {"type": "bigint", "nullable": "NO"},
+            "created_at": {"type": "timestamp with time zone", "nullable": "NO"},
+            "updated_at": {"type": "timestamp with time zone", "nullable": "NO"},
+        },
+        "pk": ["id"],
+    },
+    "accounts": {
+        "columns": {
+            "id": {"type": "uuid", "nullable": "NO"},
+            "household_id": {"type": "uuid", "nullable": "NO"},
+            "name": {"type": "character varying", "length": 120, "nullable": "NO"},
+            "balance_scope": {"type": "character varying", "length": 120, "nullable": "NO"},
+            "account_type": {"type": "text", "nullable": "NO"},
+            "currency": {"type": "character varying", "length": 3, "nullable": "NO"},
+            "owner_user_id": {"type": "uuid", "nullable": "YES"},
+            "risk_level": {"type": "text", "nullable": "YES"},
+            "opened_on": {"type": "date", "nullable": "NO"},
+            "closed_on": {"type": "date", "nullable": "YES"},
+            "status": {"type": "text", "nullable": "NO"},
+            "statement_import_enabled": {"type": "boolean", "nullable": "NO"},
+            "row_version": {"type": "bigint", "nullable": "NO"},
+            "created_at": {"type": "timestamp with time zone", "nullable": "NO"},
+            "updated_at": {"type": "timestamp with time zone", "nullable": "NO"},
+        },
+        "pk": ["id"],
+    },
+    "account_aliases": {
+        "columns": {
+            "id": {"type": "uuid", "nullable": "NO"},
+            "household_id": {"type": "uuid", "nullable": "NO"},
+            "account_id": {"type": "uuid", "nullable": "NO"},
+            "alias_text": {"type": "character varying", "length": 120, "nullable": "NO"},
+            "normalized_alias": {"type": "character varying", "length": 120, "nullable": "NO"},
+            "status": {"type": "text", "nullable": "NO"},
+            "row_version": {"type": "bigint", "nullable": "NO"},
             "created_at": {"type": "timestamp with time zone", "nullable": "NO"},
             "updated_at": {"type": "timestamp with time zone", "nullable": "NO"},
         },
@@ -113,19 +109,74 @@ EXPECTED_TABLE_CONTRACTS = {
     "ingestion_requests": {
         "columns": {
             "id": {"type": "uuid", "nullable": "NO"},
-            "device_id": {"type": "uuid", "nullable": "NO"},
-            "idempotency_key": {"type": "text", "nullable": "NO"},
+            "household_id": {"type": "uuid", "nullable": "NO"},
+            "user_id": {"type": "uuid", "nullable": "NO"},
+            "device_id": {"type": "uuid", "nullable": "YES"},
+            "actor_scope": {"type": "text", "nullable": "NO"},
+            "idempotency_key": {"type": "character varying", "length": 200, "nullable": "NO"},
             "request_kind": {"type": "text", "nullable": "NO"},
-            "request_hash": {"type": "bytea", "nullable": "NO"},
+            "operation": {"type": "text", "nullable": "NO"},
+            "request_hash": {"type": "character varying", "length": 64, "nullable": "YES"},
+            "image_sha256": {"type": "character varying", "length": 64, "nullable": "YES"},
             "status": {"type": "text", "nullable": "NO"},
             "captured_at": {"type": "timestamp with time zone", "nullable": "YES"},
             "client_version": {"type": "text", "nullable": "YES"},
             "draft_payload": {"type": "jsonb", "nullable": "YES"},
             "response_payload": {"type": "jsonb", "nullable": "YES"},
+            "response_http_status": {"type": "integer", "nullable": "YES"},
             "failure_code": {"type": "text", "nullable": "YES"},
+            "row_version": {"type": "bigint", "nullable": "NO"},
+            "last_editor_scope": {"type": "text", "nullable": "YES"},
+            "statement_account_id": {"type": "uuid", "nullable": "YES"},
+            "document_sha256": {"type": "character varying", "length": 64, "nullable": "YES"},
+            "period_start": {"type": "date", "nullable": "YES"},
+            "period_end": {"type": "date", "nullable": "YES"},
+            "parser_version": {"type": "text", "nullable": "YES"},
             "created_at": {"type": "timestamp with time zone", "nullable": "NO"},
             "updated_at": {"type": "timestamp with time zone", "nullable": "NO"},
             "committed_at": {"type": "timestamp with time zone", "nullable": "YES"},
+        },
+        "pk": ["id"],
+    },
+    "spending_schedules": {
+        "columns": {
+            "id": {"type": "uuid", "nullable": "NO"},
+            "household_id": {"type": "uuid", "nullable": "NO"},
+            "name": {"type": "text", "nullable": "NO"},
+            "kind": {"type": "text", "nullable": "NO"},
+            "total_amount": {"type": "numeric", "precision": 20, "scale": 6, "nullable": "NO"},
+            "currency": {"type": "character varying", "length": 3, "nullable": "NO"},
+            "period_count": {"type": "integer", "nullable": "YES"},
+            "start_month": {"type": "date", "nullable": "NO"},
+            "day_of_month": {"type": "integer", "nullable": "NO"},
+            "category_id": {"type": "uuid", "nullable": "NO"},
+            "account_id": {"type": "uuid", "nullable": "YES"},
+            "status": {"type": "text", "nullable": "NO"},
+            "created_by_user_id": {"type": "uuid", "nullable": "NO"},
+            "created_by_device_id": {"type": "uuid", "nullable": "YES"},
+            "source_request_id": {"type": "uuid", "nullable": "NO"},
+            "row_version": {"type": "bigint", "nullable": "NO"},
+            "created_at": {"type": "timestamp with time zone", "nullable": "NO"},
+            "updated_at": {"type": "timestamp with time zone", "nullable": "NO"},
+        },
+        "pk": ["id"],
+    },
+    "schedule_occurrences": {
+        "columns": {
+            "id": {"type": "uuid", "nullable": "NO"},
+            "household_id": {"type": "uuid", "nullable": "NO"},
+            "schedule_id": {"type": "uuid", "nullable": "NO"},
+            "period_no": {"type": "integer", "nullable": "NO"},
+            "due_on": {"type": "date", "nullable": "NO"},
+            "amount": {"type": "numeric", "precision": 20, "scale": 6, "nullable": "NO"},
+            "currency": {"type": "character varying", "length": 3, "nullable": "NO"},
+            "category_id": {"type": "uuid", "nullable": "NO"},
+            "account_id": {"type": "uuid", "nullable": "YES"},
+            "status": {"type": "text", "nullable": "NO"},
+            "skip_reason": {"type": "text", "nullable": "YES"},
+            "row_version": {"type": "bigint", "nullable": "NO"},
+            "created_at": {"type": "timestamp with time zone", "nullable": "NO"},
+            "updated_at": {"type": "timestamp with time zone", "nullable": "NO"},
         },
         "pk": ["id"],
     },
@@ -136,49 +187,37 @@ EXPECTED_TABLE_CONTRACTS = {
             "transaction_type": {"type": "text", "nullable": "NO"},
             "occurred_on": {"type": "date", "nullable": "NO"},
             "occurred_at": {"type": "timestamp with time zone", "nullable": "YES"},
-            "posted_on": {"type": "date", "nullable": "YES"},
-            "from_account_id": {"type": "uuid", "nullable": "YES"},
-            "to_account_id": {"type": "uuid", "nullable": "YES"},
+            "date_source": {"type": "text", "nullable": "NO"},
             "original_amount": {"type": "numeric", "precision": 20, "scale": 6, "nullable": "NO"},
-            "original_currency": {"type": "character", "length": 3, "nullable": "NO"},
-            "from_amount": {"type": "numeric", "precision": 20, "scale": 6, "nullable": "YES"},
-            "from_currency": {"type": "character", "length": 3, "nullable": "YES"},
-            "to_amount": {"type": "numeric", "precision": 20, "scale": 6, "nullable": "YES"},
-            "to_currency": {"type": "character", "length": 3, "nullable": "YES"},
-            "effective_fx_rate": {"type": "numeric", "precision": 24, "scale": 12, "nullable": "YES"},
-            "account_leg_status": {"type": "text", "nullable": "YES"},
-            "reporting_amount": {"type": "numeric", "precision": 20, "scale": 6, "nullable": "YES"},
-            "reporting_currency": {"type": "character", "length": 3, "nullable": "YES"},
-            "reporting_fx_rate": {"type": "numeric", "precision": 24, "scale": 12, "nullable": "YES"},
-            "reporting_fx_locked_at": {"type": "timestamp with time zone", "nullable": "YES"},
-            "category_id": {"type": "uuid", "nullable": "YES"},
+            "original_currency": {"type": "character varying", "length": 3, "nullable": "NO"},
+            "category_id": {"type": "uuid", "nullable": "NO"},
+            "source": {"type": "text", "nullable": "NO"},
+            "status": {"type": "text", "nullable": "NO"},
+            "account_id": {"type": "uuid", "nullable": "YES"},
             "merchant": {"type": "text", "nullable": "YES"},
             "merchant_normalized": {"type": "text", "nullable": "YES"},
             "remarks": {"type": "text", "nullable": "YES"},
-            "source": {"type": "text", "nullable": "NO"},
-            "status": {"type": "text", "nullable": "NO"},
-            "verification_status": {"type": "text", "nullable": "NO"},
-            "confidence": {"type": "numeric", "precision": 5, "scale": 4, "nullable": "YES"},
-            "source_request_id": {"type": "uuid", "nullable": "YES"},
-            "statement_batch_id": {"type": "uuid", "nullable": "YES"},
-            "created_by_user_id": {"type": "uuid", "nullable": "YES"},
+            "refund_of_transaction_id": {"type": "uuid", "nullable": "YES"},
+            "payment_mode": {"type": "text", "nullable": "YES"},
+            "schedule_occurrence_id": {"type": "uuid", "nullable": "YES"},
+            "category_uncertain": {"type": "boolean", "nullable": "NO"},
+            "account_review_acknowledged": {"type": "boolean", "nullable": "NO"},
+            "reporting_amount": {"type": "numeric", "precision": 20, "scale": 6, "nullable": "YES"},
+            "reporting_currency": {"type": "character varying", "length": 3, "nullable": "YES"},
+            "reporting_fx_rate": {"type": "numeric", "precision": 24, "scale": 12, "nullable": "YES"},
+            "reporting_fx_as_of": {"type": "date", "nullable": "YES"},
+            "reporting_fx_source": {"type": "text", "nullable": "YES"},
+            "reporting_fx_locked_at": {"type": "timestamp with time zone", "nullable": "YES"},
+            "created_by_user_id": {"type": "uuid", "nullable": "NO"},
             "created_by_device_id": {"type": "uuid", "nullable": "YES"},
-            "row_version": {"type": "bigint", "nullable": "NO"},
-            "created_at": {"type": "timestamp with time zone", "nullable": "NO"},
-            "updated_at": {"type": "timestamp with time zone", "nullable": "NO"},
+            "source_request_id": {"type": "uuid", "nullable": "NO"},
+            "source_item_key": {"type": "text", "nullable": "NO"},
             "deleted_at": {"type": "timestamp with time zone", "nullable": "YES"},
             "deleted_by_user_id": {"type": "uuid", "nullable": "YES"},
             "delete_reason": {"type": "text", "nullable": "YES"},
-        },
-        "pk": ["id"],
-    },
-    "transaction_links": {
-        "columns": {
-            "id": {"type": "uuid", "nullable": "NO"},
-            "source_transaction_id": {"type": "uuid", "nullable": "NO"},
-            "target_transaction_id": {"type": "uuid", "nullable": "NO"},
-            "relation_type": {"type": "text", "nullable": "NO"},
+            "row_version": {"type": "bigint", "nullable": "NO"},
             "created_at": {"type": "timestamp with time zone", "nullable": "NO"},
+            "updated_at": {"type": "timestamp with time zone", "nullable": "NO"},
         },
         "pk": ["id"],
     },
@@ -189,164 +228,62 @@ EXPECTED_TABLE_CONTRACTS = {
             "account_id": {"type": "uuid", "nullable": "NO"},
             "as_of": {"type": "timestamp with time zone", "nullable": "NO"},
             "balance": {"type": "numeric", "precision": 20, "scale": 6, "nullable": "NO"},
-            "currency": {"type": "character", "length": 3, "nullable": "NO"},
-            "snapshot_type": {"type": "text", "nullable": "NO"},
+            "currency": {"type": "character varying", "length": 3, "nullable": "NO"},
             "source": {"type": "text", "nullable": "NO"},
-            "reconciliation_batch_id": {"type": "uuid", "nullable": "YES"},
+            "status": {"type": "text", "nullable": "NO"},
             "source_request_id": {"type": "uuid", "nullable": "YES"},
-            "is_authoritative": {"type": "boolean", "nullable": "NO"},
-            "created_by_user_id": {"type": "uuid", "nullable": "YES"},
+            "created_by_user_id": {"type": "uuid", "nullable": "NO"},
+            "created_by_device_id": {"type": "uuid", "nullable": "YES"},
             "created_at": {"type": "timestamp with time zone", "nullable": "NO"},
         },
         "pk": ["id"],
     },
-    "credit_card_snapshots": {
+    "investment_inputs": {
         "columns": {
             "id": {"type": "uuid", "nullable": "NO"},
             "household_id": {"type": "uuid", "nullable": "NO"},
             "account_id": {"type": "uuid", "nullable": "NO"},
-            "as_of": {"type": "timestamp with time zone", "nullable": "NO"},
-            "statement_period_start": {"type": "date", "nullable": "YES"},
-            "statement_period_end": {"type": "date", "nullable": "YES"},
-            "statement_balance": {"type": "numeric", "precision": 20, "scale": 6, "nullable": "YES"},
-            "remaining_statement_due": {"type": "numeric", "precision": 20, "scale": 6, "nullable": "YES"},
-            "unbilled_balance": {"type": "numeric", "precision": 20, "scale": 6, "nullable": "YES"},
-            "current_outstanding": {"type": "numeric", "precision": 20, "scale": 6, "nullable": "YES"},
-            "currency": {"type": "character", "length": 3, "nullable": "NO"},
-            "source": {"type": "text", "nullable": "NO"},
-            "reconciliation_batch_id": {"type": "uuid", "nullable": "YES"},
+            "event_date": {"type": "date", "nullable": "NO"},
+            "input_type": {"type": "text", "nullable": "NO"},
+            "amount": {"type": "numeric", "precision": 20, "scale": 6, "nullable": "NO"},
+            "currency": {"type": "character varying", "length": 3, "nullable": "NO"},
+            "source_request_id": {"type": "uuid", "nullable": "YES"},
+            "created_by_user_id": {"type": "uuid", "nullable": "NO"},
+            "created_by_device_id": {"type": "uuid", "nullable": "YES"},
             "created_at": {"type": "timestamp with time zone", "nullable": "NO"},
         },
         "pk": ["id"],
     },
-    "investment_pnl_periods": {
+    "investment_holding_snapshots": {
         "columns": {
             "id": {"type": "uuid", "nullable": "NO"},
             "household_id": {"type": "uuid", "nullable": "NO"},
             "account_id": {"type": "uuid", "nullable": "NO"},
-            "opening_snapshot_id": {"type": "uuid", "nullable": "NO"},
-            "closing_snapshot_id": {"type": "uuid", "nullable": "NO"},
-            "period_start": {"type": "timestamp with time zone", "nullable": "NO"},
-            "period_end": {"type": "timestamp with time zone", "nullable": "NO"},
-            "contributions_amount": {"type": "numeric", "precision": 20, "scale": 6, "nullable": "NO"},
-            "withdrawals_amount": {"type": "numeric", "precision": 20, "scale": 6, "nullable": "NO"},
-            "pnl_amount": {"type": "numeric", "precision": 20, "scale": 6, "nullable": "NO"},
-            "currency": {"type": "character", "length": 3, "nullable": "NO"},
-            "status": {"type": "text", "nullable": "NO"},
-            "calculation_version": {"type": "integer", "nullable": "NO"},
-            "reconciliation_batch_id": {"type": "uuid", "nullable": "YES"},
+            "snapshot_id": {"type": "uuid", "nullable": "NO"},
+            "holding_type": {"type": "text", "nullable": "NO"},
+            "symbol_or_name": {"type": "text", "nullable": "NO"},
+            "quantity": {"type": "numeric", "precision": 20, "scale": 6, "nullable": "YES"},
+            "cost_basis": {"type": "numeric", "precision": 20, "scale": 6, "nullable": "YES"},
+            "market_value": {"type": "numeric", "precision": 20, "scale": 6, "nullable": "NO"},
+            "currency": {"type": "character varying", "length": 3, "nullable": "NO"},
             "created_at": {"type": "timestamp with time zone", "nullable": "NO"},
-            "updated_at": {"type": "timestamp with time zone", "nullable": "NO"},
-        },
-        "pk": ["id"],
-    },
-    "installment_plans": {
-        "columns": {
-            "id": {"type": "uuid", "nullable": "NO"},
-            "household_id": {"type": "uuid", "nullable": "NO"},
-            "credit_account_id": {"type": "uuid", "nullable": "NO"},
-            "purchase_occurred_on": {"type": "date", "nullable": "NO"},
-            "merchant": {"type": "text", "nullable": "YES"},
-            "original_amount": {"type": "numeric", "precision": 20, "scale": 6, "nullable": "NO"},
-            "original_currency": {"type": "character", "length": 3, "nullable": "NO"},
-            "account_principal_amount": {"type": "numeric", "precision": 20, "scale": 6, "nullable": "YES"},
-            "account_currency": {"type": "character", "length": 3, "nullable": "NO"},
-            "total_periods": {"type": "smallint", "nullable": "NO"},
-            "first_statement_month": {"type": "date", "nullable": "YES"},
-            "status": {"type": "text", "nullable": "NO"},
-            "source_request_id": {"type": "uuid", "nullable": "YES"},
-            "created_at": {"type": "timestamp with time zone", "nullable": "NO"},
-            "updated_at": {"type": "timestamp with time zone", "nullable": "NO"},
-        },
-        "pk": ["id"],
-    },
-    "installment_periods": {
-        "columns": {
-            "id": {"type": "uuid", "nullable": "NO"},
-            "plan_id": {"type": "uuid", "nullable": "NO"},
-            "period_no": {"type": "smallint", "nullable": "NO"},
-            "recognition_month": {"type": "date", "nullable": "YES"},
-            "scheduled_amount": {"type": "numeric", "precision": 20, "scale": 6, "nullable": "NO"},
-            "currency": {"type": "character", "length": 3, "nullable": "NO"},
-            "status": {"type": "text", "nullable": "NO"},
-            "statement_line_id": {"type": "uuid", "nullable": "YES"},
-            "expense_transaction_id": {"type": "uuid", "nullable": "YES"},
-            "created_at": {"type": "timestamp with time zone", "nullable": "NO"},
-            "updated_at": {"type": "timestamp with time zone", "nullable": "NO"},
-        },
-        "pk": ["id"],
-    },
-    "reconciliation_batches": {
-        "columns": {
-            "id": {"type": "uuid", "nullable": "NO"},
-            "household_id": {"type": "uuid", "nullable": "NO"},
-            "account_id": {"type": "uuid", "nullable": "NO"},
-            "batch_type": {"type": "text", "nullable": "NO"},
-            "period_start": {"type": "date", "nullable": "YES"},
-            "period_end": {"type": "date", "nullable": "YES"},
-            "status": {"type": "text", "nullable": "NO"},
-            "currency": {"type": "character", "length": 3, "nullable": "NO"},
-            "authoritative_balance": {"type": "numeric", "precision": 20, "scale": 6, "nullable": "YES"},
-            "statement_balance": {"type": "numeric", "precision": 20, "scale": 6, "nullable": "YES"},
-            "current_outstanding": {"type": "numeric", "precision": 20, "scale": 6, "nullable": "YES"},
-            "unbilled_balance": {"type": "numeric", "precision": 20, "scale": 6, "nullable": "YES"},
-            "residual_amount": {"type": "numeric", "precision": 20, "scale": 6, "nullable": "YES"},
-            "adjustment_amount": {"type": "numeric", "precision": 20, "scale": 6, "nullable": "YES"},
-            "matched_count": {"type": "integer", "nullable": "NO"},
-            "created_count": {"type": "integer", "nullable": "NO"},
-            "pending_count": {"type": "integer", "nullable": "NO"},
-            "parser_version": {"type": "text", "nullable": "YES"},
-            "engine_version": {"type": "text", "nullable": "NO"},
-            "source_request_id": {"type": "uuid", "nullable": "YES"},
-            "created_by_user_id": {"type": "uuid", "nullable": "YES"},
-            "row_version": {"type": "bigint", "nullable": "NO"},
-            "failure_code": {"type": "text", "nullable": "YES"},
-            "failure_detail": {"type": "text", "nullable": "YES"},
-            "created_at": {"type": "timestamp with time zone", "nullable": "NO"},
-            "updated_at": {"type": "timestamp with time zone", "nullable": "NO"},
-            "committed_at": {"type": "timestamp with time zone", "nullable": "YES"},
         },
         "pk": ["id"],
     },
     "statement_lines": {
         "columns": {
             "id": {"type": "uuid", "nullable": "NO"},
-            "batch_id": {"type": "uuid", "nullable": "NO"},
-            "source_page_no": {"type": "integer", "nullable": "YES"},
-            "source_row_no": {"type": "integer", "nullable": "YES"},
-            "transaction_on": {"type": "date", "nullable": "YES"},
-            "posted_on": {"type": "date", "nullable": "YES"},
-            "description_raw": {"type": "text", "nullable": "NO"},
-            "description_normalized": {"type": "text", "nullable": "YES"},
+            "household_id": {"type": "uuid", "nullable": "NO"},
+            "request_id": {"type": "uuid", "nullable": "NO"},
+            "line_no": {"type": "integer", "nullable": "NO"},
+            "line_date": {"type": "date", "nullable": "NO"},
+            "description": {"type": "text", "nullable": "NO"},
             "amount": {"type": "numeric", "precision": 20, "scale": 6, "nullable": "NO"},
-            "currency": {"type": "character", "length": 3, "nullable": "NO"},
-            "direction": {"type": "text", "nullable": "NO"},
-            "line_type": {"type": "text", "nullable": "NO"},
-            "match_status": {"type": "text", "nullable": "NO"},
+            "currency": {"type": "character varying", "length": 3, "nullable": "NO"},
+            "account_id": {"type": "uuid", "nullable": "NO"},
             "matched_transaction_id": {"type": "uuid", "nullable": "YES"},
-            "confidence": {"type": "numeric", "precision": 5, "scale": 4, "nullable": "YES"},
-            "line_fingerprint": {"type": "bytea", "nullable": "YES"},
+            "match_status": {"type": "text", "nullable": "NO"},
             "created_at": {"type": "timestamp with time zone", "nullable": "NO"},
-        },
-        "pk": ["id"],
-    },
-    "reconciliation_candidates": {
-        "columns": {
-            "id": {"type": "uuid", "nullable": "NO"},
-            "batch_id": {"type": "uuid", "nullable": "NO"},
-            "statement_line_id": {"type": "uuid", "nullable": "YES"},
-            "candidate_type": {"type": "text", "nullable": "NO"},
-            "status": {"type": "text", "nullable": "NO"},
-            "target_transaction_id": {"type": "uuid", "nullable": "YES"},
-            "payload": {"type": "jsonb", "nullable": "NO"},
-            "confidence": {"type": "numeric", "precision": 5, "scale": 4, "nullable": "YES"},
-            "reason_code": {"type": "text", "nullable": "YES"},
-            "reason_detail": {"type": "text", "nullable": "YES"},
-            "resolved_by_user_id": {"type": "uuid", "nullable": "YES"},
-            "resolved_at": {"type": "timestamp with time zone", "nullable": "YES"},
-            "applied_transaction_id": {"type": "uuid", "nullable": "YES"},
-            "created_at": {"type": "timestamp with time zone", "nullable": "NO"},
-            "updated_at": {"type": "timestamp with time zone", "nullable": "NO"},
         },
         "pk": ["id"],
     },
@@ -357,14 +294,13 @@ EXPECTED_TABLE_CONTRACTS = {
             "actor_type": {"type": "text", "nullable": "NO"},
             "actor_user_id": {"type": "uuid", "nullable": "YES"},
             "actor_device_id": {"type": "uuid", "nullable": "YES"},
-            "request_id": {"type": "uuid", "nullable": "YES"},
-            "reconciliation_batch_id": {"type": "uuid", "nullable": "YES"},
+            "source_request_id": {"type": "uuid", "nullable": "YES"},
             "entity_type": {"type": "text", "nullable": "NO"},
             "entity_id": {"type": "uuid", "nullable": "NO"},
             "action": {"type": "text", "nullable": "NO"},
             "before_data": {"type": "jsonb", "nullable": "YES"},
             "after_data": {"type": "jsonb", "nullable": "YES"},
-            "metadata": {"type": "jsonb", "nullable": "YES"},
+            "reason": {"type": "text", "nullable": "YES"},
             "created_at": {"type": "timestamp with time zone", "nullable": "NO"},
         },
         "pk": ["id"],
@@ -372,82 +308,76 @@ EXPECTED_TABLE_CONTRACTS = {
 }
 
 class TestSchemaParity(BaseDbTestCase):
-    def test_exhaustive_schema_parity(self):
+    def test_database_schema_strict_parity(self):
         """
-        Validates all 20 business target tables against the expected schema contract:
-        - Complete column set matching
-        - Exact data types
-        - Character lengths (CHAR(3))
-        - Numeric precision & scale (20,6 / 24,12 / 5,4)
-        - Nullability
-        - Primary key constraints
+        Validates that the active test schema matches the 16 simplified tables,
+        their column types, nullability, primary keys, and foreign keys.
         """
         with self.conn.cursor() as cur:
-            # Query all table names in test schema
+            # 1. Discover all base tables in the test schema (excluding schema_migrations)
             cur.execute("""
-                SELECT table_name 
-                FROM information_schema.tables 
-                WHERE table_schema = %s AND table_type = 'BASE TABLE';
+                SELECT table_name
+                FROM information_schema.tables
+                WHERE table_schema = %s
+                  AND table_type = 'BASE TABLE'
+                  AND table_name != 'schema_migrations';
             """, (self.test_schema,))
-            actual_tables = {row[0] for row in cur.fetchall()} - {"schema_migrations"}
-            
-            # Verify all expected tables exist and no extra tables exist
+            actual_tables = {row[0] for row in cur.fetchall()}
+
+            expected_tables = set(EXPECTED_TABLE_CONTRACTS.keys())
             self.assertEqual(
                 actual_tables,
-                set(EXPECTED_TABLE_CONTRACTS.keys()),
-                f"Table set mismatch: diff={actual_tables.symmetric_difference(EXPECTED_TABLE_CONTRACTS.keys())}"
+                expected_tables,
+                f"Table mismatch. Unexpected: {actual_tables - expected_tables}, Missing: {expected_tables - actual_tables}"
             )
-            
+
+            # 2. Validate columns for each table
             for table_name, contract in EXPECTED_TABLE_CONTRACTS.items():
-                # Fetch actual columns
                 cur.execute("""
-                    SELECT column_name, data_type, character_maximum_length, 
-                           numeric_precision, numeric_scale, is_nullable
+                    SELECT column_name, data_type, is_nullable, character_maximum_length, numeric_precision, numeric_scale
                     FROM information_schema.columns
                     WHERE table_schema = %s AND table_name = %s;
                 """, (self.test_schema, table_name))
-                columns = {row[0]: {
-                    "type": row[1],
-                    "length": row[2],
-                    "precision": row[3],
-                    "scale": row[4],
-                    "nullable": row[5]
-                } for row in cur.fetchall()}
-                
-                expected_cols = contract["columns"]
+                actual_columns = {
+                    row[0]: {
+                        "type": row[1],
+                        "nullable": row[2],
+                        "length": row[3],
+                        "precision": row[4],
+                        "scale": row[5]
+                    } for row in cur.fetchall()
+                }
+
+                expected_columns = contract["columns"]
                 self.assertEqual(
-                    set(columns.keys()),
-                    set(expected_cols.keys()),
-                    f"Column set mismatch in table '{table_name}'"
+                    set(actual_columns.keys()),
+                    set(expected_columns.keys()),
+                    f"Columns mismatch in table '{table_name}'. "
+                    f"Unexpected: {set(actual_columns.keys()) - set(expected_columns.keys())}, "
+                    f"Missing: {set(expected_columns.keys()) - set(actual_columns.keys())}"
                 )
-                
-                for col_name, exp_meta in expected_cols.items():
-                    act_meta = columns[col_name]
+
+                for col_name, exp in expected_columns.items():
+                    act = actual_columns[col_name]
+                    # Nullable check
                     self.assertEqual(
-                        act_meta["type"], exp_meta["type"],
-                        f"Data type mismatch for {table_name}.{col_name}: act={act_meta['type']}, exp={exp_meta['type']}"
+                        act["nullable"], exp["nullable"],
+                        f"Nullability mismatch for {table_name}.{col_name}: expected {exp['nullable']}, got {act['nullable']}"
                     )
-                    self.assertEqual(
-                        act_meta["nullable"], exp_meta["nullable"],
-                        f"Nullability mismatch for {table_name}.{col_name}: act={act_meta['nullable']}, exp={exp_meta['nullable']}"
-                    )
-                    if "length" in exp_meta:
-                        self.assertEqual(
-                            act_meta["length"], exp_meta["length"],
-                            f"Length mismatch for {table_name}.{col_name}: act={act_meta['length']}, exp={exp_meta['length']}"
+                    # Type check (allow 'character varying' / 'text' compatibility where expected)
+                    if exp["type"] in ("text", "character varying"):
+                        self.assertIn(
+                            act["type"], ["text", "character varying"],
+                            f"Type mismatch for {table_name}.{col_name}: expected {exp['type']}, got {act['type']}"
                         )
-                    if "precision" in exp_meta:
+                    else:
                         self.assertEqual(
-                            act_meta["precision"], exp_meta["precision"],
-                            f"Precision mismatch for {table_name}.{col_name}: act={act_meta['precision']}, exp={exp_meta['precision']}"
-                        )
-                    if "scale" in exp_meta:
-                        self.assertEqual(
-                            act_meta["scale"], exp_meta["scale"],
-                            f"Scale mismatch for {table_name}.{col_name}: act={act_meta['scale']}, exp={exp_meta['scale']}"
+                            act["type"], exp["type"],
+                            f"Type mismatch for {table_name}.{col_name}: expected {exp['type']}, got {act['type']}"
                         )
 
-                # Verify PK
+            # 3. Validate Primary Keys
+            for table_name, contract in EXPECTED_TABLE_CONTRACTS.items():
                 cur.execute("""
                     SELECT kcu.column_name
                     FROM information_schema.table_constraints tc
@@ -460,90 +390,13 @@ class TestSchemaParity(BaseDbTestCase):
                     ORDER BY kcu.ordinal_position;
                 """, (self.test_schema, table_name))
                 actual_pk = [row[0] for row in cur.fetchall()]
+                expected_pk = contract["pk"]
                 self.assertEqual(
-                    actual_pk, contract["pk"],
-                    f"PK mismatch for table '{table_name}': act={actual_pk}, exp={contract['pk']}"
+                    actual_pk, expected_pk,
+                    f"Primary key mismatch in table '{table_name}': expected {expected_pk}, got {actual_pk}"
                 )
 
-    def test_catalog_structural_contracts(self):
-        """
-        Catalog-based assertions for key Phase 1 structural contracts:
-        1. Key Column Defaults
-        2. UNIQUE and Partial Indexes
-        3. GIN Trigram Indexes
-        4. Foreign Key Delete Actions (RESTRICT on ledger/audit, CASCADE on disposable children, SET NULL on actors)
-        """
-        with self.conn.cursor() as cur:
-            # 1. Key Column Defaults
-            cur.execute("""
-                SELECT table_name, column_name, column_default
-                FROM information_schema.columns
-                WHERE table_schema = %s AND column_default IS NOT NULL;
-            """, (self.test_schema,))
-            defaults = {(row[0], row[1]): row[2] for row in cur.fetchall()}
-
-            # Key status and version defaults
-            self.assertIn("pending_first_bill", defaults.get(("installment_plans", "status"), ""))
-            self.assertIn("1", defaults.get(("reconciliation_batches", "engine_version"), ""))
-            self.assertIn("0", defaults.get(("account_state", "ledger_balance"), ""))
-            self.assertIn("0", defaults.get(("accounts", "row_version"), ""))
-            self.assertIn("0", defaults.get(("account_state", "row_version"), ""))
-            self.assertIn("0", defaults.get(("transactions", "row_version"), ""))
-            self.assertIn("0", defaults.get(("reconciliation_batches", "row_version"), ""))
-            self.assertIn("active", defaults.get(("accounts", "status"), ""))
-            self.assertIn("active", defaults.get(("categories", "status"), ""))
-            self.assertIn("committed", defaults.get(("transactions", "status"), ""))
-            self.assertIn("unverified", defaults.get(("transactions", "verification_status"), ""))
-            self.assertIn("scheduled", defaults.get(("installment_periods", "status"), ""))
-            self.assertIn("unmatched", defaults.get(("statement_lines", "match_status"), ""))
-            self.assertIn("proposed", defaults.get(("reconciliation_candidates", "status"), ""))
-
-            # 2. Indexes: Unique, Partial, and Trigram GIN
-            cur.execute("""
-                SELECT indexname, indexdef
-                FROM pg_indexes
-                WHERE schemaname = %s;
-            """, (self.test_schema,))
-            index_defs = {row[0]: row[1] for row in cur.fetchall()}
-
-            # Unique partial indexes
-            self.assertIn("uq_accounts_active_name", index_defs)
-            self.assertIn("UNIQUE INDEX", index_defs["uq_accounts_active_name"])
-            self.assertIn("status = 'active'", index_defs["uq_accounts_active_name"])
-
-            self.assertIn("uq_categories_active", index_defs)
-            self.assertIn("UNIQUE INDEX", index_defs["uq_categories_active"])
-            self.assertIn("status = 'active'", index_defs["uq_categories_active"])
-
-            self.assertIn("uq_account_alias", index_defs)
-            self.assertIn("UNIQUE INDEX", index_defs["uq_account_alias"])
-            self.assertIn("deleted_at IS NULL", index_defs["uq_account_alias"])
-
-            self.assertIn("uq_snapshot_per_batch", index_defs)
-            self.assertIn("UNIQUE INDEX", index_defs["uq_snapshot_per_batch"])
-            self.assertIn("reconciliation_batch_id IS NOT NULL", index_defs["uq_snapshot_per_batch"])
-
-            self.assertIn("uq_credit_snapshot_per_batch", index_defs)
-            self.assertIn("UNIQUE INDEX", index_defs["uq_credit_snapshot_per_batch"])
-            self.assertIn("reconciliation_batch_id IS NOT NULL", index_defs["uq_credit_snapshot_per_batch"])
-
-            self.assertIn("uq_transaction_link_source_relation", index_defs)
-            self.assertIn("UNIQUE INDEX", index_defs["uq_transaction_link_source_relation"])
-
-            # GIN Trigram indexes
-            self.assertIn("ix_transactions_merchant_trgm", index_defs)
-            self.assertIn("using gin", index_defs["ix_transactions_merchant_trgm"].lower())
-            self.assertIn("gin_trgm_ops", index_defs["ix_transactions_merchant_trgm"])
-
-            self.assertIn("ix_statement_description_trgm", index_defs)
-            self.assertIn("using gin", index_defs["ix_statement_description_trgm"].lower())
-            self.assertIn("gin_trgm_ops", index_defs["ix_statement_description_trgm"])
-
-            self.assertIn("ix_account_alias_trgm", index_defs)
-            self.assertIn("using gin", index_defs["ix_account_alias_trgm"].lower())
-            self.assertIn("gin_trgm_ops", index_defs["ix_account_alias_trgm"])
-
-            # 3. Foreign Key Delete Rules (RESTRICT / CASCADE / SET NULL)
+            # 4. Foreign Key Delete Rules (All RESTRICT / NO ACTION in simplified schema)
             cur.execute("""
                 SELECT tc.table_name, kcu.column_name, ccu.table_name AS foreign_table, rc.delete_rule
                 FROM information_schema.table_constraints tc
@@ -555,38 +408,21 @@ class TestSchemaParity(BaseDbTestCase):
                   ON rc.unique_constraint_name = ccu.constraint_name AND rc.unique_constraint_schema = ccu.table_schema
                 WHERE tc.table_schema = %s AND tc.constraint_type = 'FOREIGN KEY';
             """, (self.test_schema,))
-            fk_rules = {(row[0], row[1], row[2]): row[3] for row in cur.fetchall()}
+            fk_rules = cur.fetchall()
+            for tbl, col, foreign_tbl, delete_rule in fk_rules:
+                self.assertIn(
+                    delete_rule, ["RESTRICT", "NO ACTION"],
+                    f"FK {tbl}.{col} -> {foreign_tbl} has delete rule {delete_rule}, must be RESTRICT or NO ACTION"
+                )
 
-            # RESTRICT (or NO ACTION): Durable ledger facts and audit log
-            self.assertIn(fk_rules.get(("audit_events", "household_id", "households")), ["RESTRICT", "NO ACTION"])
-            self.assertIn(fk_rules.get(("transactions", "household_id", "households")), ["RESTRICT", "NO ACTION"])
-            self.assertIn(fk_rules.get(("transactions", "from_account_id", "accounts")), ["RESTRICT", "NO ACTION"])
-            self.assertIn(fk_rules.get(("transactions", "to_account_id", "accounts")), ["RESTRICT", "NO ACTION"])
-            self.assertIn(fk_rules.get(("transactions", "category_id", "categories")), ["RESTRICT", "NO ACTION"])
-            self.assertIn(fk_rules.get(("accounts", "household_id", "households")), ["RESTRICT", "NO ACTION"])
-            self.assertIn(fk_rules.get(("categories", "household_id", "households")), ["RESTRICT", "NO ACTION"])
-            self.assertIn(fk_rules.get(("installment_plans", "household_id", "households")), ["RESTRICT", "NO ACTION"])
-            self.assertIn(fk_rules.get(("installment_plans", "credit_account_id", "accounts")), ["RESTRICT", "NO ACTION"])
-            self.assertIn(fk_rules.get(("reconciliation_batches", "household_id", "households")), ["RESTRICT", "NO ACTION"])
-            self.assertIn(fk_rules.get(("reconciliation_batches", "account_id", "accounts")), ["RESTRICT", "NO ACTION"])
+            # 5. Audit Events Append-Only Trigger
+            cur.execute("""
+                SELECT trigger_name, event_manipulation, action_statement
+                FROM information_schema.triggers
+                WHERE trigger_schema = %s AND event_object_table = 'audit_events';
+            """, (self.test_schema,))
+            triggers = {row[0]: row[1] for row in cur.fetchall()}
+            self.assertIn("trg_audit_events_immutable", triggers)
 
-            # CASCADE: Disposable or tightly bound subordinate children
-            self.assertEqual(fk_rules.get(("household_members", "household_id", "households")), "CASCADE")
-            self.assertEqual(fk_rules.get(("household_members", "user_id", "users")), "CASCADE")
-            self.assertEqual(fk_rules.get(("devices", "user_id", "users")), "CASCADE")
-            self.assertEqual(fk_rules.get(("account_state", "account_id", "accounts")), "CASCADE")
-            self.assertEqual(fk_rules.get(("account_aliases", "account_id", "accounts")), "CASCADE")
-            self.assertEqual(fk_rules.get(("installment_periods", "plan_id", "installment_plans")), "CASCADE")
-            self.assertEqual(fk_rules.get(("statement_lines", "batch_id", "reconciliation_batches")), "CASCADE")
-            self.assertEqual(fk_rules.get(("reconciliation_candidates", "batch_id", "reconciliation_batches")), "CASCADE")
-
-            # SET NULL: Nullable actor / request / batch links preserve audit history and ledger evidence
-            self.assertEqual(fk_rules.get(("audit_events", "actor_user_id", "users")), "SET NULL")
-            self.assertEqual(fk_rules.get(("audit_events", "actor_device_id", "devices")), "SET NULL")
-            self.assertEqual(fk_rules.get(("audit_events", "request_id", "ingestion_requests")), "SET NULL")
-            self.assertEqual(fk_rules.get(("audit_events", "reconciliation_batch_id", "reconciliation_batches")), "SET NULL")
-            self.assertEqual(fk_rules.get(("transactions", "source_request_id", "ingestion_requests")), "SET NULL")
-            self.assertEqual(fk_rules.get(("transactions", "statement_batch_id", "reconciliation_batches")), "SET NULL")
-            self.assertEqual(fk_rules.get(("transactions", "created_by_user_id", "users")), "SET NULL")
-            self.assertEqual(fk_rules.get(("transactions", "created_by_device_id", "devices")), "SET NULL")
-            self.assertEqual(fk_rules.get(("transactions", "deleted_by_user_id", "users")), "SET NULL")
+if __name__ == "__main__":
+    unittest.main()

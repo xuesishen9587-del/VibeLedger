@@ -1,7 +1,7 @@
 from typing import Optional, Dict, Any
 from uuid import UUID, uuid4
 from fastapi import APIRouter, Depends, Query, status, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 
 from app.api.deps import get_db_connection, get_authenticated_actor
 from app.db import transaction
@@ -16,11 +16,15 @@ import app.repositories.audit as audit_repo
 router = APIRouter(prefix="/api/v1/categories", tags=["Categories"])
 
 class CreateCategoryRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     name: str = Field(..., min_length=1, max_length=100, description="Category name")
     type: str = Field(..., pattern="^(expense|income)$", description="Category type (expense or income)")
     description: Optional[str] = Field(None, max_length=500, description="Category description")
 
 class PatchCategoryRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     name: Optional[str] = Field(None, min_length=1, max_length=100, description="New category name")
     description: Optional[str] = Field(None, max_length=500, description="Category description")
     status: Optional[str] = Field(None, pattern="^(active|inactive)$", description="Category status")
@@ -174,17 +178,12 @@ def patch_category(
             category_id=category_id,
             name=clean_name,
             description=clean_desc,
-            expected_version=expected_ver
+            status=payload.status,
+            expected_version=expected_ver,
+            fields_set=payload.model_fields_set
         )
         if not updated:
             raise RowVersionConflictError()
-
-        if payload.status == "inactive" and existing["status"] == "active":
-            deactivated = categories_repo.deactivate_category(
-                conn, household_id, category_id, expected_version=updated["row_version"]
-            )
-            if deactivated:
-                updated = deactivated
 
         actor_type, actor_user_id, actor_device_id = _get_audit_actor_info(device)
         audit_repo.insert_audit_event(

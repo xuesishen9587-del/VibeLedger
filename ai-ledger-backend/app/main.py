@@ -29,6 +29,7 @@ from app.api.routes.investments import router as investments_router
 from app.api.routes.devices import router as devices_router
 from app.api.routes.work_queue import router as work_queue_router
 from app.api.routes.audit import router as audit_router
+from app.api.routes.history import router as history_router
 
 def create_app() -> FastAPI:
     """
@@ -64,6 +65,7 @@ def create_app() -> FastAPI:
     app.include_router(devices_router)
     app.include_router(work_queue_router)
     app.include_router(audit_router)
+    app.include_router(history_router)
 
     @app.get("/health", tags=["Health"])
     @app.get("/api/v1/health", tags=["Health"])

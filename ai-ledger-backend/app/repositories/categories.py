@@ -171,7 +171,9 @@ def update_category(
     category_id: UUID,
     name: Optional[str] = None,
     description: Optional[str] = None,
+    status: Optional[str] = None,
     expected_version: Optional[int] = None,
+    fields_set: Optional[set] = None,
 ) -> Optional[Dict[str, Any]]:
     set_clauses = ["updated_at = now()"]
     params: List[Any] = []
@@ -179,9 +181,21 @@ def update_category(
     if name is not None:
         set_clauses.append("name = %s")
         params.append(name.strip())
-    if description is not None:
-        set_clauses.append("description = %s")
-        params.append(description.strip())
+
+    if fields_set is not None:
+        if "description" in fields_set:
+            set_clauses.append("description = %s")
+            params.append(description.strip() if description else None)
+        if "status" in fields_set and status is not None:
+            set_clauses.append("status = %s")
+            params.append(status)
+    else:
+        if description is not None:
+            set_clauses.append("description = %s")
+            params.append(description.strip())
+        if status is not None:
+            set_clauses.append("status = %s")
+            params.append(status)
 
     set_clauses.append("row_version = row_version + 1")
 

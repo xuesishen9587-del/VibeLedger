@@ -45,7 +45,6 @@ class TestAuthConcurrency(BaseDbTestCase):
             household_id=self.household_id,
             name="Concurrency Household",
             reporting_currency="CNY",
-            ledger_start_date=date(2026, 1, 1),
             status="active"
         )
         self.user_id = uuid4()
@@ -77,7 +76,8 @@ class TestAuthConcurrency(BaseDbTestCase):
             device_name="Concurrency Device",
             token_hash=token_hash,
             platform="ios_shortcuts",
-            status="active"
+            status="active",
+            household_id=self.household_id
         )
         self.conn.commit()
 

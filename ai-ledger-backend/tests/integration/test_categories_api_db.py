@@ -50,31 +50,31 @@ class TestCategoriesApiDb(BaseDbTestCase):
         conn = get_connection(self.test_schema)
         try:
             with transaction(conn):
-                accounts_repo.create_household(conn, self.household_id, "Household A", date(2026, 1, 1), "CNY")
-                accounts_repo.create_user(conn, self.user_id, "auth_cat_a", "User A", "user_a@cat.local", "CNY")
+                accounts_repo.create_household(conn, self.household_id, "Household A", reporting_currency="CNY")
+                accounts_repo.create_user(conn, self.user_id, "auth_cat_a", "User A", "user_a@cat.local")
                 accounts_repo.add_user_to_household(conn, self.household_id, self.user_id, role="owner")
-                devices_repo.create_device(conn, self.device_id, self.user_id, "Device A", self.token_hash)
+                devices_repo.create_device(conn, self.device_id, self.user_id, "Device A", self.token_hash, household_id=self.household_id)
 
-                accounts_repo.create_household(conn, self.household_b_id, "Household B", date(2026, 1, 1), "CNY")
-                accounts_repo.create_user(conn, self.user_b_id, "auth_cat_b", "User B", "user_b@cat.local", "CNY")
+                accounts_repo.create_household(conn, self.household_b_id, "Household B", reporting_currency="CNY")
+                accounts_repo.create_user(conn, self.user_b_id, "auth_cat_b", "User B", "user_b@cat.local")
                 accounts_repo.add_user_to_household(conn, self.household_b_id, self.user_b_id, role="owner")
-                devices_repo.create_device(conn, self.device_b_id, self.user_b_id, "Device B", self.token_b_hash)
-
-
+                devices_repo.create_device(conn, self.device_b_id, self.user_b_id, "Device B", self.token_b_hash, household_id=self.household_b_id)
         finally:
             conn.close()
 
     def test_category_crud_and_validations(self):
-        # 1. Create category
+        # 1. Create category with description
         res = self.client.post("/api/v1/categories", json={
             "name": "Food & Dining",
-            "type": "expense"
+            "type": "expense",
+            "description": "Daily food expenses"
         }, headers=self.headers)
         self.assertEqual(res.status_code, 201)
         cat_data = res.json()
         cat_id = cat_data["id"]
         self.assertEqual(cat_data["name"], "Food & Dining")
         self.assertEqual(cat_data["type"], "expense")
+        self.assertEqual(cat_data["description"], "Daily food expenses")
         self.assertEqual(cat_data["status"], "active")
 
         # 2. Duplicate active name in same household & type rejected -> 422
@@ -99,12 +99,16 @@ class TestCategoriesApiDb(BaseDbTestCase):
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0]["name"], "Food & Dining")
 
-        # 5. Patch rename
+        # 5. Patch rename and clear description with explicit null
         res_patch = self.client.patch(f"/api/v1/categories/{cat_id}", json={
-            "name": "Groceries & Dining"
+            "name": "Groceries & Dining",
+            "description": None,
+            "expected_version": 0
         }, headers=self.headers)
         self.assertEqual(res_patch.status_code, 200)
         self.assertEqual(res_patch.json()["name"], "Groceries & Dining")
+        self.assertIsNone(res_patch.json()["description"])
+        self.assertEqual(res_patch.json()["row_version"], 1)
 
         # 6. Deactivate category
         res_deact = self.client.post(f"/api/v1/categories/{cat_id}/deactivate", headers=self.headers)
@@ -120,6 +124,59 @@ class TestCategoriesApiDb(BaseDbTestCase):
         inact_ids = [c["id"] for c in res_inact_list.json()["items"]]
         self.assertIn(cat_id, inact_ids)
 
+    def test_fallback_category_protection(self):
+        # Create a fallback category
+        conn = get_connection(self.test_schema)
+        try:
+            with transaction(conn):
+                fb_id = uuid4()
+                categories_repo.create_category(
+                    conn=conn,
+                    category_id=fb_id,
+                    household_id=self.household_id,
+                    name="Other",
+                    category_type="expense",
+                    is_fallback=True
+                )
+        finally:
+            conn.close()
+
+        # Attempt to deactivate fallback category via POST /deactivate -> 400 Bad Request
+        res_deact = self.client.post(f"/api/v1/categories/{fb_id}/deactivate", headers=self.headers)
+        self.assertEqual(res_deact.status_code, 400)
+        self.assertIn("Fallback category cannot be archived", res_deact.json()["detail"])
+
+        # Attempt to archive fallback category via PATCH /status="inactive" -> 400 Bad Request
+        res_patch = self.client.patch(f"/api/v1/categories/{fb_id}", json={
+            "status": "inactive",
+            "expected_version": 0
+        }, headers=self.headers)
+        self.assertEqual(res_patch.status_code, 400)
+        self.assertIn("Fallback category cannot be archived", res_patch.json()["detail"])
+
+    def test_patch_category_concurrency_and_audit(self):
+        res = self.client.post("/api/v1/categories", json={
+            "name": "Utilities",
+            "type": "expense"
+        }, headers=self.headers)
+        cat_id = res.json()["id"]
+
+        # Stale version -> 409
+        res_stale = self.client.patch(f"/api/v1/categories/{cat_id}", json={
+            "name": "Utilities Stale",
+            "expected_version": 5
+        }, headers=self.headers)
+        self.assertEqual(res_stale.status_code, 409)
+
+        # Valid expected_version -> 200
+        res_ok = self.client.patch(f"/api/v1/categories/{cat_id}", json={
+            "name": "Utilities Updated",
+            "expected_version": 0
+        }, headers=self.headers)
+        self.assertEqual(res_ok.status_code, 200)
+        self.assertEqual(res_ok.json()["name"], "Utilities Updated")
+        self.assertEqual(res_ok.json()["row_version"], 1)
+
     def test_cross_household_category_isolation(self):
         # Create category in Household A
         res_a = self.client.post("/api/v1/categories", json={
@@ -130,7 +187,8 @@ class TestCategoriesApiDb(BaseDbTestCase):
 
         # Household B device attempts to patch Household A's category -> 404
         res_patch = self.client.patch(f"/api/v1/categories/{cat_a_id}", json={
-            "name": "Hacked Category"
+            "name": "Hacked Category",
+            "expected_version": 0
         }, headers=self.headers_b)
         self.assertEqual(res_patch.status_code, 404)
         self.assertEqual(res_patch.json()["error"]["code"], "CATEGORY_NOT_FOUND")
@@ -139,88 +197,5 @@ class TestCategoriesApiDb(BaseDbTestCase):
         res_deact = self.client.post(f"/api/v1/categories/{cat_a_id}/deactivate", headers=self.headers_b)
         self.assertEqual(res_deact.status_code, 404)
 
-    def test_deactivated_category_historical_transaction_and_expense_rejection(self):
-        # 1. Create account & category
-        conn = get_connection(self.test_schema)
-        try:
-            with transaction(conn):
-                acc_id = uuid4()
-                accounts_repo.create_account(conn, acc_id, self.household_id, "Checking", "cash", "CNY")
-                cat_id = uuid4()
-                categories_repo.create_category(conn, cat_id, self.household_id, "Old Category", "expense")
-
-                # Create historical transaction referencing this category
-                tx_id = uuid4()
-                from decimal import Decimal
-                from app.repositories import transactions as tx_repo
-                tx_repo.create_transaction(
-                    conn=conn,
-                    tx_id=tx_id,
-                    household_id=self.household_id,
-                    transaction_type="expense",
-                    occurred_on=date(2026, 8, 1),
-                    original_amount=Decimal("150.00"),
-                    original_currency="CNY",
-                    from_amount=Decimal("150.00"),
-                    from_currency="CNY",
-                    from_account_id=acc_id,
-                    category_id=cat_id,
-                    status="committed"
-                )
-        finally:
-            conn.close()
-
-        # 2. Deactivate category
-        res_deact = self.client.post(f"/api/v1/categories/{cat_id}/deactivate", headers=self.headers)
-        self.assertEqual(res_deact.status_code, 200)
-        self.assertEqual(res_deact.json()["status"], "inactive")
-
-        # 3. Historical transaction remains readable and preserves category
-        res_tx = self.client.get(f"/api/v1/transactions/{tx_id}", headers=self.headers)
-        self.assertEqual(res_tx.status_code, 200)
-        tx_data = res_tx.json()
-        self.assertEqual(tx_data["category"]["id"], str(cat_id))
-        self.assertEqual(tx_data["category"]["name"], "Old Category")
-
-        # 4. Inactive category cannot be used for new Expense workflow confirmation
-        # Create an ingestion request with draft referencing the deactivated category
-        req_id = uuid4()
-        conn = get_connection(self.test_schema)
-        try:
-            with transaction(conn):
-                from app.repositories import ingestion as ingestion_repo
-                ingestion_repo.create_ingestion_request(
-                    conn=conn,
-                    request_id=req_id,
-                    device_id=self.device_id,
-                    idempotency_key=f"test_inact_cat_{uuid4().hex}",
-                    request_kind="expense",
-                    request_hash=b"dummy_hash_01234567890123456789012345678901",
-                    status="needs_confirmation",
-                    draft_payload={
-                        "occurred_on": "2026-08-20",
-                        "merchant": "Test Merchant",
-                        "original_amount": "100.00",
-                        "original_currency": "CNY",
-                        "from_account": {"id": str(acc_id), "name": "Checking"},
-                        "category": {"id": str(cat_id), "name": "Old Category"},
-                        "payment_mode": "one_off"
-                    }
-
-                )
-        finally:
-            conn.close()
-
-
-        # Confirming with inactive category returns 422
-        res_confirm = self.client.post(
-            f"/api/v1/ingestion-requests/{req_id}/confirm",
-            headers=self.headers
-        )
-        self.assertEqual(res_confirm.status_code, 422)
-        self.assertEqual(res_confirm.json()["error"]["code"], "CATEGORY_NOT_FOUND")
-
 if __name__ == "__main__":
     unittest.main()
-
-

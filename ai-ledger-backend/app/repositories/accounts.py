@@ -337,28 +337,67 @@ def update_account(
     owner_user_id: Optional[UUID] = None,
     risk_level: Optional[str] = None,
     statement_import_enabled: Optional[bool] = None,
+    opened_on: Optional[date] = None,
+    account_type: Optional[str] = None,
+    currency: Optional[str] = None,
     expected_row_version: Optional[int] = None,
     household_id: Optional[UUID] = None,
+    fields_set: Optional[set] = None,
     **kwargs
 ) -> Optional[Dict[str, Any]]:
     set_clauses = ["updated_at = now()"]
     params: List[Any] = []
 
-    if name is not None:
-        set_clauses.append("name = %s")
-        params.append(name.strip())
-    if balance_scope is not None:
-        set_clauses.append("balance_scope = %s")
-        params.append(balance_scope.strip())
-    if owner_user_id is not None:
-        set_clauses.append("owner_user_id = %s")
-        params.append(owner_user_id)
-    if risk_level is not None:
-        set_clauses.append("risk_level = %s")
-        params.append(risk_level)
-    if statement_import_enabled is not None:
-        set_clauses.append("statement_import_enabled = %s")
-        params.append(statement_import_enabled)
+    if fields_set is not None:
+        if "name" in fields_set and name is not None:
+            set_clauses.append("name = %s")
+            params.append(name.strip())
+        if "balance_scope" in fields_set and balance_scope is not None:
+            set_clauses.append("balance_scope = %s")
+            params.append(balance_scope.strip())
+        if "owner_user_id" in fields_set:
+            set_clauses.append("owner_user_id = %s")
+            params.append(owner_user_id)
+        if "risk_level" in fields_set:
+            set_clauses.append("risk_level = %s")
+            params.append(risk_level)
+        if "statement_import_enabled" in fields_set and statement_import_enabled is not None:
+            set_clauses.append("statement_import_enabled = %s")
+            params.append(statement_import_enabled)
+        if "opened_on" in fields_set and opened_on is not None:
+            set_clauses.append("opened_on = %s")
+            params.append(opened_on)
+        if "account_type" in fields_set and account_type is not None:
+            set_clauses.append("account_type = %s")
+            params.append(account_type)
+        if "currency" in fields_set and currency is not None:
+            set_clauses.append("currency = %s")
+            params.append(currency.upper())
+    else:
+        if name is not None:
+            set_clauses.append("name = %s")
+            params.append(name.strip())
+        if balance_scope is not None:
+            set_clauses.append("balance_scope = %s")
+            params.append(balance_scope.strip())
+        if owner_user_id is not None:
+            set_clauses.append("owner_user_id = %s")
+            params.append(owner_user_id)
+        if risk_level is not None:
+            set_clauses.append("risk_level = %s")
+            params.append(risk_level)
+        if statement_import_enabled is not None:
+            set_clauses.append("statement_import_enabled = %s")
+            params.append(statement_import_enabled)
+        if opened_on is not None:
+            set_clauses.append("opened_on = %s")
+            params.append(opened_on)
+        if account_type is not None:
+            set_clauses.append("account_type = %s")
+            params.append(account_type)
+        if currency is not None:
+            set_clauses.append("currency = %s")
+            params.append(currency.upper())
 
     set_clauses.append("row_version = row_version + 1")
 
@@ -403,6 +442,77 @@ def update_account(
             "row_version": row[12],
             "created_at": row[13],
             "updated_at": row[14],
+        }
+
+def validate_closing_snapshot_for_close(
+    conn,
+    household_id: UUID,
+    account_id: UUID,
+    closing_snapshot_id: UUID,
+    account: Dict[str, Any],
+    closed_on: date
+) -> Dict[str, Any]:
+    """
+    Validates all canonical conditions for closing an account:
+    - closing snapshot exists
+    - belongs to household and account
+    - is active
+    - matching currency
+    - is an explicit zero observation (balance == 0)
+    - satisfies lifetime: closed_on >= opened_on, and snapshot as_of <= closed_on
+    - NO later active observation exists
+    """
+    if closed_on < account["opened_on"]:
+        raise ValueError("closed_on cannot be earlier than opened_on")
+
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT id, household_id, account_id, as_of, balance, currency, status
+            FROM account_snapshots
+            WHERE household_id = %s AND account_id = %s AND id = %s;
+            """,
+            (household_id, account_id, closing_snapshot_id)
+        )
+        row = cur.fetchone()
+        if not row:
+            raise ValueError(f"Closing snapshot {closing_snapshot_id} not found for account {account_id}")
+
+        snap_id, snap_hh, snap_acc, snap_as_of, snap_balance, snap_currency, snap_status = row
+
+        if snap_status != "active":
+            raise ValueError(f"Closing snapshot {closing_snapshot_id} is not active (status: {snap_status})")
+
+        if snap_currency != account["currency"]:
+            raise ValueError(f"Closing snapshot currency {snap_currency} does not match account currency {account['currency']}")
+
+        if Decimal(str(snap_balance)) != Decimal("0"):
+            raise ValueError(f"Closing snapshot balance must be explicit zero, got: {snap_balance}")
+
+        # as_of date boundary check
+        snap_date = snap_as_of.date() if hasattr(snap_as_of, "date") else snap_as_of
+        if snap_date > closed_on:
+            raise ValueError(f"Closing snapshot as_of ({snap_date}) cannot be later than closed_on ({closed_on})")
+
+        # Check for any later active observation
+        cur.execute(
+            """
+            SELECT id, as_of FROM account_snapshots
+            WHERE household_id = %s AND account_id = %s AND status = 'active' AND as_of > %s
+            LIMIT 1;
+            """,
+            (household_id, account_id, snap_as_of)
+        )
+        later_snap = cur.fetchone()
+        if later_snap:
+            raise ValueError(f"Cannot close account: later active balance observation exists (snapshot id: {later_snap[0]}, as_of: {later_snap[1]})")
+
+        return {
+            "id": snap_id,
+            "as_of": snap_as_of,
+            "balance": snap_balance,
+            "currency": snap_currency,
+            "status": snap_status
         }
 
 def close_account(
@@ -578,12 +688,40 @@ def create_account_alias(
             (alias_id, household_id, account_id, alias_text, normalized_alias, status)
         )
 
-def get_account_alias(conn, alias_id: UUID, account_id: Optional[UUID] = None) -> Optional[Dict[str, Any]]:
+def list_account_aliases(conn, account_id: UUID, household_id: Optional[UUID] = None) -> List[Dict[str, Any]]:
+    query = "SELECT id, household_id, account_id, alias_text, normalized_alias, status, row_version, created_at, updated_at FROM account_aliases WHERE account_id = %s"
+    params: List[Any] = [account_id]
+    if household_id is not None:
+        query += " AND household_id = %s"
+        params.append(household_id)
+    query += " ORDER BY status ASC, alias_text ASC;"
+    with conn.cursor() as cur:
+        cur.execute(query, tuple(params))
+        rows = cur.fetchall()
+        return [
+            {
+                "id": r[0],
+                "household_id": r[1],
+                "account_id": r[2],
+                "alias_text": r[3],
+                "normalized_alias": r[4],
+                "status": r[5],
+                "row_version": r[6],
+                "created_at": r[7],
+                "updated_at": r[8],
+            }
+            for r in rows
+        ]
+
+def get_account_alias(conn, alias_id: UUID, account_id: Optional[UUID] = None, household_id: Optional[UUID] = None) -> Optional[Dict[str, Any]]:
     query = "SELECT id, household_id, account_id, alias_text, normalized_alias, status, row_version, created_at, updated_at FROM account_aliases WHERE id = %s"
     params: List[Any] = [alias_id]
     if account_id is not None:
         query += " AND account_id = %s"
         params.append(account_id)
+    if household_id is not None:
+        query += " AND household_id = %s"
+        params.append(household_id)
 
     with conn.cursor() as cur:
         cur.execute(query, tuple(params))
@@ -602,19 +740,115 @@ def get_account_alias(conn, alias_id: UUID, account_id: Optional[UUID] = None) -
             "updated_at": row[8],
         }
 
-def check_account_alias_exists(conn, account_id: UUID, normalized_alias: str) -> bool:
+def check_account_alias_exists(conn, account_id: UUID, normalized_alias: str, exclude_alias_id: Optional[UUID] = None, household_id: Optional[UUID] = None) -> bool:
+    query = """
+        SELECT 1 FROM account_aliases
+        WHERE account_id = %s
+          AND normalized_alias = %s
+          AND status = 'active'
+    """
+    params: List[Any] = [account_id, normalized_alias.strip().lower()]
+    if household_id is not None:
+        query += " AND household_id = %s"
+        params.append(household_id)
+    if exclude_alias_id is not None:
+        query += " AND id <> %s"
+        params.append(exclude_alias_id)
+    query += " LIMIT 1;"
+
     with conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT 1 FROM account_aliases
-            WHERE account_id = %s
-              AND normalized_alias = %s
-              AND status = 'active'
-            LIMIT 1;
-            """,
-            (account_id, normalized_alias)
-        )
+        cur.execute(query, tuple(params))
         return cur.fetchone() is not None
+
+def update_account_alias(
+    conn,
+    household_id: UUID,
+    account_id: UUID,
+    alias_id: UUID,
+    expected_version: Optional[int] = None,
+    alias_text: Optional[str] = None,
+    status: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    set_clauses = ["updated_at = now()", "row_version = row_version + 1"]
+    params: List[Any] = []
+    if alias_text is not None:
+        set_clauses.append("alias_text = %s")
+        params.append(alias_text.strip())
+        set_clauses.append("normalized_alias = %s")
+        params.append(alias_text.strip().lower())
+    if status is not None:
+        set_clauses.append("status = %s")
+        params.append(status)
+
+    where_clauses = ["household_id = %s", "account_id = %s", "id = %s"]
+    params.extend([household_id, account_id, alias_id])
+    if expected_version is not None:
+        where_clauses.append("row_version = %s")
+        params.append(expected_version)
+
+    query = f"""
+        UPDATE account_aliases
+        SET {', '.join(set_clauses)}
+        WHERE {' AND '.join(where_clauses)}
+        RETURNING id, household_id, account_id, alias_text, normalized_alias, status, row_version, created_at, updated_at;
+    """
+    with conn.cursor() as cur:
+        cur.execute(query, tuple(params))
+        row = cur.fetchone()
+        if not row:
+            return None
+        return {
+            "id": row[0],
+            "household_id": row[1],
+            "account_id": row[2],
+            "alias_text": row[3],
+            "normalized_alias": row[4],
+            "status": row[5],
+            "row_version": row[6],
+            "created_at": row[7],
+            "updated_at": row[8],
+        }
+
+def deactivate_account_alias(
+    conn,
+    alias_id: UUID,
+    account_id: UUID,
+    household_id: Optional[UUID] = None,
+    expected_version: Optional[int] = None,
+) -> Optional[Dict[str, Any]]:
+    where_clauses = ["account_id = %s", "id = %s", "status = 'active'"]
+    params: List[Any] = [account_id, alias_id]
+    if household_id is not None:
+        where_clauses.append("household_id = %s")
+        params.append(household_id)
+    if expected_version is not None:
+        where_clauses.append("row_version = %s")
+        params.append(expected_version)
+
+    query = f"""
+        UPDATE account_aliases
+        SET status = 'inactive',
+            row_version = row_version + 1,
+            updated_at = now()
+        WHERE {' AND '.join(where_clauses)}
+        RETURNING id, household_id, account_id, alias_text, normalized_alias, status, row_version, created_at, updated_at;
+    """
+    with conn.cursor() as cur:
+        cur.execute(query, tuple(params))
+        row = cur.fetchone()
+        if not row:
+            return None
+        return {
+            "id": row[0],
+            "household_id": row[1],
+            "account_id": row[2],
+            "alias_text": row[3],
+            "normalized_alias": row[4],
+            "status": row[5],
+            "row_version": row[6],
+            "created_at": row[7],
+            "updated_at": row[8],
+        }
 
 # --- Category delegations ---
 create_category = repo_categories.create_category

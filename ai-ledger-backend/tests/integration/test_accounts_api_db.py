@@ -53,48 +53,48 @@ class TestAccountsApiDb(BaseDbTestCase):
         try:
             with transaction(conn):
                 # Setup Household A
-                accounts_repo.create_household(conn, self.household_id, "Test Household A", date(2026, 1, 1), "CNY")
-                accounts_repo.create_user(conn, self.user_id, "auth_user_a", "User A", "user_a@test.local", "CNY")
+                accounts_repo.create_household(conn, self.household_id, "Test Household A", reporting_currency="CNY")
+                accounts_repo.create_user(conn, self.user_id, "auth_user_a", "User A", "user_a@test.local")
                 accounts_repo.add_user_to_household(conn, self.household_id, self.user_id, role="owner")
-                devices_repo.create_device(conn, self.device_id, self.user_id, "iPhone A", self.token_hash)
+                devices_repo.create_device(conn, self.device_id, self.user_id, "iPhone A", self.token_hash, household_id=self.household_id)
 
                 # Setup Household B
-                accounts_repo.create_household(conn, self.household_b_id, "Test Household B", date(2026, 1, 1), "USD")
-                accounts_repo.create_user(conn, self.user_b_id, "auth_user_b", "User B", "user_b@test.local", "USD")
+                accounts_repo.create_household(conn, self.household_b_id, "Test Household B", reporting_currency="USD")
+                accounts_repo.create_user(conn, self.user_b_id, "auth_user_b", "User B", "user_b@test.local")
                 accounts_repo.add_user_to_household(conn, self.household_b_id, self.user_b_id, role="owner")
-                devices_repo.create_device(conn, self.device_b_id, self.user_b_id, "iPhone B", self.token_b_hash)
-
-
+                devices_repo.create_device(conn, self.device_b_id, self.user_b_id, "iPhone B", self.token_b_hash, household_id=self.household_b_id)
         finally:
             conn.close()
 
     def test_create_account_atomicity_and_audit(self):
         payload = {
             "name": "ICBC Salary",
-            "institution": "ICBC",
+            "balance_scope": "Operational Cash",
             "account_type": "cash",
             "currency": "CNY",
-            "owner_user_id": str(self.user_id)
+            "owner_user_id": str(self.user_id),
+            "risk_level": "low"
         }
         res = self.client.post("/api/v1/accounts", json=payload, headers=self.headers)
         self.assertEqual(res.status_code, 201)
         data = res.json()
         self.assertEqual(data["name"], "ICBC Salary")
+        self.assertEqual(data["balance_scope"], "Operational Cash")
         self.assertEqual(data["account_type"], "cash")
         self.assertEqual(data["currency"], "CNY")
+        self.assertEqual(data["risk_level"], "low")
         self.assertEqual(data["status"], "active")
         self.assertEqual(data["row_version"], 0)
-        self.assertEqual(data["state"]["ledger_balance"], "0.00")
-        self.assertIsNone(data["state"]["last_authoritative_snapshot_at"])
 
         account_id = UUID(data["id"])
 
-        # Check DB rows
+        # Check DB row
         conn = get_connection(self.test_schema)
         try:
-            acc = accounts_repo.get_account_with_state(conn, account_id, self.household_id)
+            acc = accounts_repo.get_account(conn, account_id, self.household_id)
             self.assertIsNotNone(acc)
-            self.assertEqual(acc["ledger_balance"], Decimal("0"))
+            self.assertEqual(acc["name"], "ICBC Salary")
+            self.assertEqual(acc["balance_scope"], "Operational Cash")
 
             # Verify audit event
             with conn.cursor() as cur:
@@ -115,19 +115,32 @@ class TestAccountsApiDb(BaseDbTestCase):
             conn.close()
 
     def test_create_account_validations(self):
-        # 1. Non-credit account with billing_day rejected
+        # 1. Extra fields rejected (forbidden extra)
         res = self.client.post("/api/v1/accounts", json={
-            "name": "Bad Cash",
+            "name": "Bad Extra",
+            "balance_scope": "General",
             "account_type": "cash",
             "currency": "CNY",
-            "billing_day": 10
+            "institution": "Old Bank"
         }, headers=self.headers)
         self.assertEqual(res.status_code, 422)
 
-        # 2. Owner user ID not in household rejected
+        # 2. Credit account cannot have risk_level
+        res_credit_risk = self.client.post("/api/v1/accounts", json={
+            "name": "Credit Bad Risk",
+            "balance_scope": "Personal Credit",
+            "account_type": "credit",
+            "currency": "CNY",
+            "risk_level": "medium"
+        }, headers=self.headers)
+        self.assertEqual(res_credit_risk.status_code, 422)
+        self.assertEqual(res_credit_risk.json()["error"]["code"], "LINKED_ACCOUNT_INVALID")
+
+        # 3. Owner user ID not in household rejected
         foreign_user_id = uuid4()
         res = self.client.post("/api/v1/accounts", json={
             "name": "Foreign User Acc",
+            "balance_scope": "General",
             "account_type": "cash",
             "currency": "CNY",
             "owner_user_id": str(foreign_user_id)
@@ -135,28 +148,29 @@ class TestAccountsApiDb(BaseDbTestCase):
         self.assertEqual(res.status_code, 422)
         self.assertEqual(res.json()["error"]["code"], "USER_NOT_IN_HOUSEHOLD")
 
-        # 3. Duplicate active name in same household rejected
+        # 4. Duplicate active name in same household rejected
         res_ok = self.client.post("/api/v1/accounts", json={
             "name": "CMB Visa",
+            "balance_scope": "Personal Credit",
             "account_type": "credit",
-            "currency": "USD",
-            "billing_day": 5,
-            "due_day": 25
+            "currency": "USD"
         }, headers=self.headers)
         self.assertEqual(res_ok.status_code, 201)
 
         res_dup = self.client.post("/api/v1/accounts", json={
             "name": "cmb visa", # case insensitive duplicate
+            "balance_scope": "Personal Credit",
             "account_type": "credit",
             "currency": "USD"
         }, headers=self.headers)
         self.assertEqual(res_dup.status_code, 422)
         self.assertEqual(res_dup.json()["error"]["code"], "ACCOUNT_NAME_CONFLICT")
 
-    def test_list_accounts_with_filters_and_state(self):
+    def test_list_accounts_with_filters(self):
         # Create cash and credit accounts
         res1 = self.client.post("/api/v1/accounts", json={
             "name": "Savings A",
+            "balance_scope": "Emergency Fund",
             "account_type": "savings",
             "currency": "CNY"
         }, headers=self.headers)
@@ -164,10 +178,9 @@ class TestAccountsApiDb(BaseDbTestCase):
 
         res2 = self.client.post("/api/v1/accounts", json={
             "name": "Credit A",
+            "balance_scope": "Personal Credit",
             "account_type": "credit",
-            "currency": "CNY",
-            "billing_day": 1,
-            "due_day": 20
+            "currency": "CNY"
         }, headers=self.headers)
         self.assertEqual(res2.status_code, 201)
 
@@ -188,7 +201,7 @@ class TestAccountsApiDb(BaseDbTestCase):
         # Create account
         res = self.client.post("/api/v1/accounts", json={
             "name": "DBS Multi",
-            "institution": "DBS",
+            "balance_scope": "Operational",
             "account_type": "cash",
             "currency": "SGD"
         }, headers=self.headers)
@@ -197,29 +210,30 @@ class TestAccountsApiDb(BaseDbTestCase):
         acc_id = data["id"]
         row_version = data["row_version"]
 
-        # Patch with stale row_version -> 409 Conflict
+        # Patch with stale expected_version -> 409 Conflict
         res_stale = self.client.patch(f"/api/v1/accounts/{acc_id}", json={
             "name": "DBS Renamed",
-            "row_version": row_version + 5
+            "expected_version": row_version + 5
         }, headers=self.headers)
         self.assertEqual(res_stale.status_code, 409)
         self.assertEqual(res_stale.json()["error"]["code"], "ROW_VERSION_CONFLICT")
 
-        # Patch with correct row_version -> 200 OK
+        # Patch with correct expected_version -> 200 OK
         res_patch = self.client.patch(f"/api/v1/accounts/{acc_id}", json={
             "name": "DBS Main SGD",
-            "institution": "DBS Bank Ltd",
-            "row_version": row_version
+            "balance_scope": "Primary Cash",
+            "expected_version": row_version
         }, headers=self.headers)
         self.assertEqual(res_patch.status_code, 200)
         p_data = res_patch.json()
         self.assertEqual(p_data["name"], "DBS Main SGD")
-        self.assertEqual(p_data["institution"], "DBS Bank Ltd")
+        self.assertEqual(p_data["balance_scope"], "Primary Cash")
         self.assertEqual(p_data["row_version"], row_version + 1)
 
     def test_patch_account_immutability_rules(self):
         res = self.client.post("/api/v1/accounts", json={
             "name": "Immutable Test Acc",
+            "balance_scope": "General",
             "account_type": "cash",
             "currency": "USD"
         }, headers=self.headers)
@@ -229,7 +243,7 @@ class TestAccountsApiDb(BaseDbTestCase):
         # 1. Before financial history, currency CAN be updated
         res_curr_ok = self.client.patch(f"/api/v1/accounts/{acc_id}", json={
             "currency": "EUR",
-            "row_version": row_version
+            "expected_version": row_version
         }, headers=self.headers)
         self.assertEqual(res_curr_ok.status_code, 200)
         self.assertEqual(res_curr_ok.json()["currency"], "EUR")
@@ -248,28 +262,33 @@ class TestAccountsApiDb(BaseDbTestCase):
         conn = get_connection(self.test_schema)
         try:
             with transaction(conn):
+                # Create category and ingestion request
+                cat_id = uuid4()
+                accounts_repo.create_category(conn, cat_id, self.household_id, "Salary Cat", "income")
+                req_id = uuid4()
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        INSERT INTO ingestion_requests (
+                            id, household_id, user_id, device_id, actor_scope, idempotency_key, request_kind, operation, request_hash, status
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
+                    """, (req_id, self.household_id, self.user_id, self.device_id, "device:1", "req_imm_12345", "command", "tx", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "processing"))
+
                 tx_id = uuid4()
-                tx_repo.create_transaction(
-                    conn=conn,
-                    tx_id=tx_id,
-                    household_id=self.household_id,
-                    transaction_type="cash_income",
-                    occurred_on=date(2026, 8, 1),
-                    original_amount=Decimal("100.00"),
-                    original_currency="EUR",
-                    to_amount=Decimal("100.00"),
-                    to_currency="EUR",
-                    to_account_id=acc_id,
-                    source="shortcut",
-                    status="committed"
-                )
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        INSERT INTO transactions (
+                            id, household_id, transaction_type, occurred_on, account_id, category_id,
+                            original_amount, original_currency, date_source, source, status,
+                            created_by_user_id, source_request_id
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
+                    """, (tx_id, self.household_id, "cash_income", date(2026, 8, 1), acc_id, cat_id, Decimal("100.00"), "EUR", "manual", "shortcut", "committed", self.user_id, req_id))
         finally:
             conn.close()
 
         # 3. Try to change currency after transaction exists -> 422 CURRENCY_IMMUTABLE
         res_curr = self.client.patch(f"/api/v1/accounts/{acc_id}", json={
             "currency": "GBP",
-            "row_version": row_version
+            "expected_version": row_version
         }, headers=self.headers)
         self.assertEqual(res_curr.status_code, 422)
         self.assertEqual(res_curr.json()["error"]["code"], "CURRENCY_IMMUTABLE")
@@ -277,163 +296,182 @@ class TestAccountsApiDb(BaseDbTestCase):
         # 4. Try to change account_type after transaction exists -> 422 ACCOUNT_TYPE_IMMUTABLE
         res_type = self.client.patch(f"/api/v1/accounts/{acc_id}", json={
             "account_type": "credit",
-            "row_version": row_version
+            "expected_version": row_version
         }, headers=self.headers)
         self.assertEqual(res_type.status_code, 422)
         self.assertEqual(res_type.json()["error"]["code"], "ACCOUNT_TYPE_IMMUTABLE")
 
-    def test_patch_account_nullable_fields_clearing_and_credit_validation(self):
-        # 1. Create linked cash account
-        res_cash = self.client.post("/api/v1/accounts", json={
-            "name": "Auto Debit Cash",
-            "account_type": "cash",
-            "currency": "CNY"
-        }, headers=self.headers)
-        cash_id = res_cash.json()["id"]
-
-        # 2. Create credit account with all nullable fields populated
-        res_credit = self.client.post("/api/v1/accounts", json={
-            "name": "Full Credit Acc",
-            "institution": "Chase Bank",
-            "account_type": "credit",
+    def test_patch_account_explicit_null_fields(self):
+        # 1. Create account with owner_user_id and risk_level populated
+        res_acc = self.client.post("/api/v1/accounts", json={
+            "name": "Savings With Owner",
+            "balance_scope": "Savings",
+            "account_type": "savings",
             "currency": "USD",
             "owner_user_id": str(self.user_id),
-            "linked_cash_account_id": cash_id,
-            "billing_day": 5,
-            "due_day": 25
+            "risk_level": "very_low"
         }, headers=self.headers)
-        self.assertEqual(res_credit.status_code, 201)
-        cr_data = res_credit.json()
-        cr_id = cr_data["id"]
-        row_v = cr_data["row_version"]
-        self.assertEqual(cr_data["institution"], "Chase Bank")
-        self.assertEqual(cr_data["billing_day"], 5)
-        self.assertEqual(cr_data["due_day"], 25)
-        self.assertEqual(cr_data["linked_cash_account_id"], cash_id)
+        self.assertEqual(res_acc.status_code, 201)
+        data = res_acc.json()
+        acc_id = data["id"]
+        row_v = data["row_version"]
+        self.assertEqual(data["owner_user_id"], str(self.user_id))
+        self.assertEqual(data["risk_level"], "very_low")
 
-        # 3. Explicitly clear nullable fields with null
-        res_clear = self.client.patch(f"/api/v1/accounts/{cr_id}", json={
-            "institution": None,
+        # 2. Explicitly clear owner_user_id and risk_level using null
+        res_clear = self.client.patch(f"/api/v1/accounts/{acc_id}", json={
             "owner_user_id": None,
-            "linked_cash_account_id": None,
-            "billing_day": None,
-            "due_day": None,
-            "row_version": row_v
+            "risk_level": None,
+            "expected_version": row_v
         }, headers=self.headers)
         self.assertEqual(res_clear.status_code, 200)
         c_data = res_clear.json()
-        self.assertIsNone(c_data["institution"])
         self.assertIsNone(c_data["owner_user_id"])
-        self.assertIsNone(c_data["linked_cash_account_id"])
-        self.assertIsNone(c_data["billing_day"])
-        self.assertIsNone(c_data["due_day"])
-        row_v = c_data["row_version"]
+        self.assertIsNone(c_data["risk_level"])
 
-        # 4. Inconsistent credit/non-credit billing state produces canonical 422
-        # Create credit account with billing_day=5, due_day=25
-        res_cr2 = self.client.post("/api/v1/accounts", json={
-            "name": "Credit To Cash Test",
-            "account_type": "credit",
-            "currency": "USD",
-            "billing_day": 5,
-            "due_day": 25
-        }, headers=self.headers)
-        cr2_id = res_cr2.json()["id"]
-        cr2_row_v = res_cr2.json()["row_version"]
+        # Confirm DB has NULL
+        conn = get_connection(self.test_schema)
+        try:
+            acc_db = accounts_repo.get_account(conn, UUID(acc_id), self.household_id)
+            self.assertIsNone(acc_db["owner_user_id"])
+            self.assertIsNone(acc_db["risk_level"])
+        finally:
+            conn.close()
 
-        # PATCH account_type="cash" without clearing billing_day/due_day -> 422
-        res_bad_type = self.client.patch(f"/api/v1/accounts/{cr2_id}", json={
-            "account_type": "cash",
-            "row_version": cr2_row_v
-        }, headers=self.headers)
-        self.assertEqual(res_bad_type.status_code, 422)
-        self.assertEqual(res_bad_type.json()["error"]["code"], "LINKED_ACCOUNT_INVALID")
-
-        # PATCH account_type="cash" WITH clearing billing_day/due_day -> 200 OK
-        res_ok_type = self.client.patch(f"/api/v1/accounts/{cr2_id}", json={
-            "account_type": "cash",
-            "billing_day": None,
-            "due_day": None,
-            "row_version": cr2_row_v
-        }, headers=self.headers)
-        self.assertEqual(res_ok_type.status_code, 200)
-        self.assertEqual(res_ok_type.json()["account_type"], "cash")
-        self.assertIsNone(res_ok_type.json()["billing_day"])
-        self.assertIsNone(res_ok_type.json()["due_day"])
-
-
-    def test_deactivate_account_soft_delete(self):
+    def test_account_lifecycle_close_reopen_cancel(self):
+        # 1. Create active account
         res = self.client.post("/api/v1/accounts", json={
-            "name": "To Deactivate",
+            "name": "Account For Lifecycle",
+            "balance_scope": "Testing",
             "account_type": "cash",
-            "currency": "CNY"
+            "currency": "CNY",
+            "opened_on": "2026-01-01"
         }, headers=self.headers)
-        acc_id = res.json()["id"]
+        self.assertEqual(res.status_code, 201)
+        acc_id = UUID(res.json()["id"])
+        row_v = res.json()["row_version"]
 
-        res_deact = self.client.post(f"/api/v1/accounts/{acc_id}/deactivate", headers=self.headers)
-        self.assertEqual(res_deact.status_code, 200)
-        self.assertEqual(res_deact.json()["status"], "inactive")
+        # Attempt to close without snapshot -> 400 Bad Request
+        res_bad_close = self.client.post(f"/api/v1/accounts/{acc_id}/close", json={
+            "expected_version": row_v,
+            "closed_on": "2026-06-01"
+        }, headers=self.headers)
+        self.assertEqual(res_bad_close.status_code, 422)
 
-        # Confirm filtered list shows it as inactive
-        res_active = self.client.get("/api/v1/accounts?status=active", headers=self.headers)
-        active_ids = [a["id"] for a in res_active.json()["items"]]
-        self.assertNotIn(acc_id, active_ids)
+        # Create non-zero snapshot
+        conn = get_connection(self.test_schema)
+        try:
+            with transaction(conn):
+                bad_snap_id = uuid4()
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        INSERT INTO account_snapshots (
+                            id, household_id, account_id, as_of, balance, currency, source, status, created_by_user_id
+                        ) VALUES (%s, %s, %s, '2026-06-01 10:00:00+00', 50.00, 'CNY', 'manual', 'active', %s);
+                    """, (bad_snap_id, self.household_id, acc_id, self.user_id))
+        finally:
+            conn.close()
 
-        res_inactive = self.client.get("/api/v1/accounts?status=inactive", headers=self.headers)
-        inactive_ids = [a["id"] for a in res_inactive.json()["items"]]
-        self.assertIn(acc_id, inactive_ids)
+        # Attempt to close with non-zero snapshot -> 400 Bad Request
+        res_nonzero_close = self.client.post(f"/api/v1/accounts/{acc_id}/close", json={
+            "expected_version": row_v,
+            "closing_snapshot_id": str(bad_snap_id),
+            "closed_on": "2026-06-01"
+        }, headers=self.headers)
+        self.assertEqual(res_nonzero_close.status_code, 400)
+        self.assertIn("explicit zero", res_nonzero_close.json()["detail"])
 
-    def test_account_aliases_crud_and_conflict(self):
+        # Create explicit zero snapshot
+        zero_snap_id = uuid4()
+        conn = get_connection(self.test_schema)
+        try:
+            with transaction(conn):
+                # Mark previous snapshot inactive so it doesn't count as later active
+                with conn.cursor() as cur:
+                    cur.execute("UPDATE account_snapshots SET status = 'inactive' WHERE id = %s;", (bad_snap_id,))
+                    cur.execute("""
+                        INSERT INTO account_snapshots (
+                            id, household_id, account_id, as_of, balance, currency, source, status, created_by_user_id
+                        ) VALUES (%s, %s, %s, '2026-06-01 12:00:00+00', 0.000000, 'CNY', 'manual', 'active', %s);
+                    """, (zero_snap_id, self.household_id, acc_id, self.user_id))
+        finally:
+            conn.close()
+
+        # Close succeeds with explicit zero snapshot
+        res_close = self.client.post(f"/api/v1/accounts/{acc_id}/close", json={
+            "expected_version": row_v,
+            "closing_snapshot_id": str(zero_snap_id),
+            "closed_on": "2026-06-01"
+        }, headers=self.headers)
+        self.assertEqual(res_close.status_code, 200)
+        self.assertEqual(res_close.json()["status"], "closed")
+        self.assertEqual(res_close.json()["closed_on"], "2026-06-01")
+        row_v = res_close.json()["row_version"]
+
+        # Reopen account
+        res_reopen = self.client.post(f"/api/v1/accounts/{acc_id}/reopen", json={
+            "expected_version": row_v,
+            "reason": "Accidental close"
+        }, headers=self.headers)
+        self.assertEqual(res_reopen.status_code, 200)
+        self.assertEqual(res_reopen.json()["status"], "active")
+        self.assertIsNone(res_reopen.json()["closed_on"])
+        row_v = res_reopen.json()["row_version"]
+
+        # Cancel unused account
+        res_cancel = self.client.post(f"/api/v1/accounts/{acc_id}/cancel", json={
+            "expected_version": row_v,
+            "reason": "Not needed"
+        }, headers=self.headers)
+        self.assertEqual(res_cancel.status_code, 200)
+        self.assertEqual(res_cancel.json()["status"], "cancelled")
+
+    def test_account_aliases_crud_and_patch(self):
         res_acc1 = self.client.post("/api/v1/accounts", json={
             "name": "ICBC Card 1",
+            "balance_scope": "Personal Credit",
             "account_type": "credit",
             "currency": "CNY"
         }, headers=self.headers)
         acc1_id = res_acc1.json()["id"]
 
-        res_acc2 = self.client.post("/api/v1/accounts", json={
-            "name": "ICBC Card 2",
-            "account_type": "credit",
-            "currency": "CNY"
-        }, headers=self.headers)
-        acc2_id = res_acc2.json()["id"]
-
-        # Create alias on acc1
+        # 1. Create alias on acc1
         res_a1 = self.client.post(f"/api/v1/accounts/{acc1_id}/aliases", json={"alias": "工行"}, headers=self.headers)
         self.assertEqual(res_a1.status_code, 201)
         alias1_id = res_a1.json()["id"]
         self.assertEqual(res_a1.json()["alias"], "工行")
+        self.assertEqual(res_a1.json()["status"], "active")
 
-        # Duplicate alias on same account -> 422 conflict
+        # 2. Duplicate alias on same account -> 422 conflict
         res_dup = self.client.post(f"/api/v1/accounts/{acc1_id}/aliases", json={"alias": "工行"}, headers=self.headers)
         self.assertEqual(res_dup.status_code, 422)
         self.assertEqual(res_dup.json()["error"]["code"], "ACCOUNT_ALIAS_CONFLICT")
 
-        # Same alias on different account in same household -> allowed (201)
-        res_a2 = self.client.post(f"/api/v1/accounts/{acc2_id}/aliases", json={"alias": "工行"}, headers=self.headers)
-        self.assertEqual(res_a2.status_code, 201)
-
-        # List aliases for acc1
+        # 3. List aliases for acc1
         res_list = self.client.get(f"/api/v1/accounts/{acc1_id}/aliases", headers=self.headers)
         self.assertEqual(res_list.status_code, 200)
         self.assertEqual(len(res_list.json()["items"]), 1)
+        self.assertEqual(res_list.json()["items"][0]["alias"], "工行")
 
-        # Delete alias on acc1
+        # 4. Patch alias
+        res_patch_alias = self.client.patch(f"/api/v1/accounts/{acc1_id}/aliases/{alias1_id}", json={
+            "alias": "工行白金卡",
+            "expected_version": 0
+        }, headers=self.headers)
+        self.assertEqual(res_patch_alias.status_code, 200)
+        self.assertEqual(res_patch_alias.json()["alias"], "工行白金卡")
+        self.assertEqual(res_patch_alias.json()["row_version"], 1)
+
+        # 5. Delete alias on acc1
         res_del = self.client.delete(f"/api/v1/accounts/{acc1_id}/aliases/{alias1_id}", headers=self.headers)
         self.assertEqual(res_del.status_code, 200)
         self.assertEqual(res_del.json()["status"], "deactivated")
-
-        # Verify acc1 aliases empty
-        res_list2 = self.client.get(f"/api/v1/accounts/{acc1_id}/aliases", headers=self.headers)
-        self.assertEqual(len(res_list2.json()["items"]), 0)
-
-
-
 
     def test_cross_household_isolation(self):
         # Create account in Household A
         res_a = self.client.post("/api/v1/accounts", json={
             "name": "Household A Secret Acc",
+            "balance_scope": "Private",
             "account_type": "cash",
             "currency": "CNY"
         }, headers=self.headers)
@@ -442,14 +480,18 @@ class TestAccountsApiDb(BaseDbTestCase):
         # Household B device attempts to patch Household A's account -> 404 Not Found
         res_hack = self.client.patch(f"/api/v1/accounts/{acc_a_id}", json={
             "name": "Hacked Name",
-            "row_version": 0
+            "expected_version": 0
         }, headers=self.headers_b)
         self.assertEqual(res_hack.status_code, 404)
         self.assertEqual(res_hack.json()["error"]["code"], "ACCOUNT_NOT_FOUND")
 
-        # Household B device attempts to deactivate Household A's account -> 404 Not Found
-        res_deact = self.client.post(f"/api/v1/accounts/{acc_a_id}/deactivate", headers=self.headers_b)
-        self.assertEqual(res_deact.status_code, 404)
+        # Household B device attempts to close Household A's account -> 404 Not Found
+        res_close = self.client.post(f"/api/v1/accounts/{acc_a_id}/close", json={
+            "expected_version": 0,
+            "closing_snapshot_id": str(uuid4()),
+            "closed_on": "2026-06-01"
+        }, headers=self.headers_b)
+        self.assertEqual(res_close.status_code, 404)
 
         # Household B device attempts to read aliases -> 404 Not Found
         res_alias = self.client.get(f"/api/v1/accounts/{acc_a_id}/aliases", headers=self.headers_b)

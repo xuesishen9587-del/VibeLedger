@@ -44,7 +44,6 @@ class TestAuditApiDb(BaseDbTestCase):
             household_id=self.household_id,
             name="Audit Test Household",
             reporting_currency="CNY",
-            ledger_start_date=date(2026, 1, 1),
             status="active"
         )
         self.user_id = uuid4()
@@ -55,7 +54,6 @@ class TestAuditApiDb(BaseDbTestCase):
             auth_subject=self.auth_subject,
             display_name="Audit User",
             email="audit@example.com",
-            default_currency="CNY",
             status="active"
         )
         members_repo.add_household_member(
@@ -71,7 +69,7 @@ class TestAuditApiDb(BaseDbTestCase):
         )
         self.conn.commit()
 
-    def test_list_audit_events_filtering_and_pagination(self):
+    def test_list_audit_events_filtering_and_history_endpoint(self):
         entity_id_1 = uuid4()
         entity_id_2 = uuid4()
 
@@ -96,11 +94,14 @@ class TestAuditApiDb(BaseDbTestCase):
             action="update",
             actor_user_id=self.user_id,
             before_data={"name": "Old"},
-            after_data={"name": "New"}
+            after_data={"name": "New"},
+            reason="Testing update"
         )
         self.conn.commit()
 
         headers = {"Authorization": f"Bearer {self.browser_token}"}
+
+        # 1. Test /api/v1/audit-events
         resp = self.client.get("/api/v1/audit-events", headers=headers)
         self.assertEqual(resp.status_code, 200)
         data = resp.json()
@@ -112,3 +113,25 @@ class TestAuditApiDb(BaseDbTestCase):
         self.assertEqual(resp_tx.status_code, 200)
         self.assertEqual(len(resp_tx.json()["items"]), 1)
         self.assertEqual(resp_tx.json()["items"][0]["entity_type"], "transaction")
+
+        # 2. Test canonical /api/v1/history
+        resp_hist = self.client.get(
+            f"/api/v1/history?entity_type=account&entity_id={entity_id_2}",
+            headers=headers
+        )
+        self.assertEqual(resp_hist.status_code, 200)
+        hist_data = resp_hist.json()
+        self.assertIn("items", hist_data)
+        self.assertEqual(len(hist_data["items"]), 1)
+        item = hist_data["items"][0]
+        self.assertEqual(item["entity_type"], "account")
+        self.assertEqual(item["entity_id"], str(entity_id_2))
+        self.assertEqual(item["action"], "update")
+        self.assertEqual(item["actor_type"], "user")
+        self.assertEqual(item["actor_user_id"], str(self.user_id))
+        self.assertEqual(item["before_data"]["name"], "Old")
+        self.assertEqual(item["after_data"]["name"], "New")
+        self.assertEqual(item["reason"], "Testing update")
+
+if __name__ == "__main__":
+    unittest.main()

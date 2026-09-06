@@ -104,66 +104,20 @@ def create_app() -> FastAPI:
             )
 
         try:
+            from migrations.runner import verify_schema_lineage, LINEAGE_SIMPLIFIED
             with conn.cursor() as cur:
                 cur.execute("SELECT 1;")
-                cur.execute(
-                    """
-                    SELECT EXISTS (
-                        SELECT 1 FROM information_schema.tables 
-                        WHERE table_schema = current_schema() AND table_name = 'schema_migrations'
-                    );
-                    """
+
+            is_ok, reason = verify_schema_lineage(conn, lineage=LINEAGE_SIMPLIFIED)
+            if not is_ok:
+                return JSONResponse(
+                    status_code=503,
+                    content={
+                        "status": "unavailable",
+                        "database": reason,
+                        "gemini": gemini_status
+                    }
                 )
-                has_migrations = cur.fetchone()[0]
-                if not has_migrations:
-                    return JSONResponse(
-                        status_code=503,
-                        content={
-                            "status": "unavailable",
-                            "database": "schema_not_ready",
-                            "gemini": gemini_status
-                        }
-                    )
-
-                from migrations.runner import MIGRATIONS_DIR, get_migration_files
-                import hashlib
-
-                expected_files = get_migration_files()
-                cur.execute("SELECT migration_name, checksum_sha256 FROM schema_migrations;")
-                applied_migrations = {row[0]: row[1] for row in cur.fetchall()}
-
-                for filename in expected_files:
-                    if filename not in applied_migrations:
-                        return JSONResponse(
-                            status_code=503,
-                            content={
-                                "status": "unavailable",
-                                "database": "schema_not_ready",
-                                "gemini": gemini_status
-                            }
-                        )
-                    filepath = os.path.join(MIGRATIONS_DIR, filename)
-                    try:
-                        with open(filepath, "rb") as f:
-                            file_checksum = hashlib.sha256(f.read()).hexdigest()
-                    except Exception:
-                        return JSONResponse(
-                            status_code=503,
-                            content={
-                                "status": "unavailable",
-                                "database": "schema_not_ready",
-                                "gemini": gemini_status
-                            }
-                        )
-                    if applied_migrations[filename] != file_checksum:
-                        return JSONResponse(
-                            status_code=503,
-                            content={
-                                "status": "unavailable",
-                                "database": "schema_not_ready",
-                                "gemini": gemini_status
-                            }
-                        )
         except Exception as e:
             logging.getLogger("app.readiness").error(f"Readiness check execution failed: {e}")
             return JSONResponse(

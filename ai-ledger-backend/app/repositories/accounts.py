@@ -467,8 +467,8 @@ def validate_closing_snapshot_for_close(
     household_id: UUID,
     account_id: UUID,
     closing_snapshot_id: UUID,
-    account: Dict[str, Any],
-    closed_on: date
+    account: Optional[Any] = None,
+    closed_on: Optional[date] = None
 ) -> Dict[str, Any]:
     """
     Validates all canonical conditions for closing an account:
@@ -480,6 +480,18 @@ def validate_closing_snapshot_for_close(
     - satisfies lifetime: closed_on >= opened_on, and snapshot as_of <= closed_on
     - NO later active observation exists
     """
+    if isinstance(account, date) and closed_on is None:
+        closed_on = account
+        account = None
+
+    if account is None:
+        account = get_account(conn, account_id, household_id)
+        if not account:
+            raise ValueError(f"Account {account_id} not found")
+
+    if closed_on is None:
+        raise ValueError("closed_on is required to close account")
+
     if closed_on < account["opened_on"]:
         raise ValueError("closed_on cannot be earlier than opened_on")
 

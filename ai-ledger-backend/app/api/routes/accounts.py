@@ -426,6 +426,7 @@ def close_account(
                 household_id=household_id,
                 account_id=account_id,
                 closing_snapshot_id=payload.closing_snapshot_id,
+                account=existing,
                 closed_on=closed_on
             )
         except (ValueError, AccountResourceNotFoundError) as e:

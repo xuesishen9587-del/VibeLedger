@@ -367,8 +367,8 @@ class TestAccountsApiDb(BaseDbTestCase):
                     cur.execute("""
                         INSERT INTO ingestion_requests (
                             id, household_id, user_id, device_id, actor_scope,
-                            idempotency_key, request_kind, operation, request_hash, status
-                        ) VALUES (%s, %s, %s, %s, 'device:test', %s, 'command', 'snapshot', %s, 'committed');
+                            idempotency_key, request_kind, operation, request_hash, status, committed_at
+                        ) VALUES (%s, %s, %s, %s, 'device:test', %s, 'command', 'snapshot', %s, 'committed', now());
                     """, (req_id, self.household_id, self.user_id, self.device_id, f"key_{uuid4().hex[:16]}", '0'*64))
 
                     bad_snap_id = uuid4()
@@ -399,8 +399,8 @@ class TestAccountsApiDb(BaseDbTestCase):
                     cur.execute("""
                         INSERT INTO ingestion_requests (
                             id, household_id, user_id, device_id, actor_scope,
-                            idempotency_key, request_kind, operation, request_hash, status
-                        ) VALUES (%s, %s, %s, %s, 'device:test', %s, 'command', 'snapshot', %s, 'committed');
+                            idempotency_key, request_kind, operation, request_hash, status, committed_at
+                        ) VALUES (%s, %s, %s, %s, 'device:test', %s, 'command', 'snapshot', %s, 'committed', now());
                     """, (req_zero_id, self.household_id, self.user_id, self.device_id, f"key_{uuid4().hex[:16]}", '0'*64))
 
                     # Mark previous snapshot voided so it doesn't count as later active

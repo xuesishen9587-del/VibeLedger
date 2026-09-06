@@ -1,159 +1,7 @@
 from datetime import date
 from typing import Optional, Dict, Any, List
 from uuid import UUID, uuid4
-from fastapi import APIRouter, Depends, Query, status, HTTPException
-from pydantic import BaseModel, Field, ConfigDict
-
-from app.api.deps import get_db_connection, get_authenticated_actor
-from app.db import transaction
-from app.domain.money import validate_currency_code
-from app.domain.transactions import (
-    AccountResourceNotFoundError,
-    AliasResourceNotFoundError,
-    RowVersionConflictError,
-    AccountNameConflictError,
-    AccountAliasConflictError,
-    CurrencyImmutableError,
-    AccountTypeImmutableError,
-    UserNotInHouseholdError,
-    LinkedAccountInvalidError
-)
-import app.repositories.accounts as accounts_repo
-import app.repositories.audit as audit_repo
-from app.repositories.simplified_schema import acquire_household_finance_lock
-
-router = APIRouter(prefix="/api/v1/accounts", tags=["Accounts"])
-
-class CreateAccountRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    name: str = Field(..., min_length=1, max_length=120, description="Account name")
-    balance_scope: str = Field(..., min_length=1, max_length=120, description="Balance scope (descriptive free text)")
-    account_type: str = Field(..., pattern="^(cash|savings|credit|investment)$", description="Account type")
-    currency: str = Field(..., min_length=3, max_length=3, description="3-letter uppercase currency code")
-    owner_user_id: Optional[UUID] = Field(None, description="Owning user ID (must belong to household)")
-    risk_level: Optional[str] = Field(None, pattern="^(very_low|low|medium|high)$", description="Risk level (not allowed on credit)")
-    opened_on: Optional[date] = Field(None, description="Opening business date")
-    statement_import_enabled: bool = Field(False, description="Whether statement import is enabled")
-
-class PatchAccountRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    name: Optional[str] = Field(None, min_length=1, max_length=120)
-    balance_scope: Optional[str] = Field(None, min_length=1, max_length=120)
-    risk_level: Optional[str] = Field(None, pattern="^(very_low|low|medium|high)$")
-    owner_user_id: Optional[UUID] = None
-    opened_on: Optional[date] = None
-    statement_import_enabled: Optional[bool] = None
-    account_type: Optional[str] = Field(None, pattern="^(cash|savings|credit|investment)$")
-    currency: Optional[str] = Field(None, min_length=3, max_length=3)
-    row_version: Optional[int] = Field(None, ge=0, description="Optimistic concurrency control version")
-    expected_version: Optional[int] = Field(None, ge=0, description="Optimistic concurrency control version")
-    reason: Optional[str] = None
-
-class CloseAccountRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    expected_version: Optional[int] = Field(None, ge=0)
-    row_version: Optional[int] = Field(None, ge=0)
-    closed_on: date = Field(..., description="Effective closing date")
-    closing_snapshot_id: UUID = Field(..., description="Snapshot proving zero balance")
-    reason: Optional[str] = None
-
-class ReopenAccountRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    expected_version: Optional[int] = Field(None, ge=0)
-    row_version: Optional[int] = Field(None, ge=0)
-    reason: Optional[str] = None
-
-class CancelAccountRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    expected_version: Optional[int] = Field(None, ge=0)
-    row_version: Optional[int] = Field(None, ge=0)
-    reason: Optional[str] = None
-
-class CreateAliasRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    alias: str = Field(..., min_length=1, max_length=120, description="Alias text")
-
-class PatchAliasRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    expected_version: Optional[int] = Field(None, ge=0)
-    row_version: Optional[int] = Field(None, ge=0)
-    alias: Optional[str] = Field(None, min_length=1, max_length=120)
-    status: Optional[str] = Field(None, pattern="^(active|inactive)$")
-
-def _get_audit_actor_info(actor: Dict[str, Any]) -> tuple[str, Optional[UUID], Optional[UUID]]:
-    auth_mode = actor.get("auth_mode")
-    user_id = actor.get("user_id")
-    device_id = actor.get("device_id")
-    if auth_mode == "browser":
-        return "user", user_id, None
-    elif auth_mode == "device":
-        return "device", user_id, device_id
-    else:
-        if device_id is not None:
-            return "device", user_id, device_id
-        return "user", user_id, None
-
-def _format_account(acc: Dict[str, Any]) -> Dict[str, Any]:
-    curr = acc["currency"]
-    return {
-        "id": str(acc["id"]),
-        "household_id": str(acc["household_id"]) if acc.get("household_id") else None,
-        "name": acc["name"],
-        "balance_scope": acc.get("balance_scope", "liability" if acc["account_type"] == "credit" else "asset"),
-        "account_type": acc["account_type"],
-        "currency": curr,
-        "owner_user_id": str(acc["owner_user_id"]) if acc.get("owner_user_id") else None,
-        "risk_level": acc.get("risk_level"),
-        "opened_on": acc["opened_on"].isoformat() if hasattr(acc.get("opened_on"), "isoformat") else (str(acc["opened_on"]) if acc.get("opened_on") else None),
-        "closed_on": acc["closed_on"].isoformat() if hasattr(acc.get("closed_on"), "isoformat") else (str(acc["closed_on"]) if acc.get("closed_on") else None),
-        "status": acc["status"],
-        "statement_import_enabled": acc.get("statement_import_enabled", False),
-        "row_version": acc.get("row_version", 0),
-        "latest_snapshot": acc.get("latest_snapshot"),
-    }
-
-@router.get("", summary="List Household Accounts")
-def list_accounts(
-    status: Optional[str] = Query(None, pattern="^(active|closed|cancelled|inactive)$"),
-    account_type: Optional[str] = Query(None, pattern="^(cash|savings|credit|investment)$"),
-    owner_user_id: Optional[UUID] = Query(None),
-    device: Dict[str, Any] = Depends(get_authenticated_actor),
-    conn: Any = Depends(get_db_connection)
-) -> Dict[str, Any]:
-    """
-    Lists accounts belonging to the authenticated household.
-    """
-    # Map legacy 'inactive' status query to 'closed'
-    query_status = "closed" if status == "inactive" else status
-
-    accounts = accounts_repo.list_accounts(
-        conn=conn,
-        household_id=device["household_id"],
-        status=query_status,
-        account_type=account_type,
-        owner_user_id=owner_user_id
-    )
-    return {"items": [_format_account(a) for a in accounts]}
-
-@router.get("/{account_id}", summary="Get Account Details")
-def get_account(
-    account_id: UUID,
-    device: Dict[str, Any] = Depends(get_authenticated_actor),
-    conn: Any = Depends(get_db_connection)
-) -> Dict[str, Any]:
-    """
-    Retrieves detail of an account in the authenticated household.
-    """
-from datetime import date
-from typing import Optional, Dict, Any, List
-from uuid import UUID, uuid4
+import psycopg2
 from fastapi import APIRouter, Depends, Query, status, HTTPException
 from pydantic import BaseModel, Field, ConfigDict
 
@@ -338,45 +186,50 @@ def create_account(
 
     account_id = uuid4()
 
-    with transaction(conn):
-        created = accounts_repo.create_account(
-            conn=conn,
-            account_id=account_id,
-            household_id=household_id,
-            name=payload.name.strip(),
-            balance_scope=balance_scope,
-            account_type=payload.account_type,
-            currency=currency,
-            owner_user_id=payload.owner_user_id,
-            risk_level=payload.risk_level,
-            opened_on=opened_on,
-            closed_on=None,
-            status='active',
-            statement_import_enabled=payload.statement_import_enabled
-        )
-        actor_type, actor_user_id, actor_device_id = _get_audit_actor_info(device)
-        audit_repo.insert_audit_event(
-            conn=conn,
-            household_id=household_id,
-            actor_type=actor_type,
-            entity_type="account",
-            entity_id=account_id,
-            action="create",
-            actor_user_id=actor_user_id,
-            actor_device_id=actor_device_id,
-            after_data={
-                "name": payload.name.strip(),
-                "balance_scope": balance_scope,
-                "account_type": payload.account_type,
-                "currency": currency,
-                "owner_user_id": str(payload.owner_user_id) if payload.owner_user_id else None,
-                "risk_level": payload.risk_level,
-                "opened_on": opened_on.isoformat(),
-                "closed_on": None,
-                "status": "active",
-                "statement_import_enabled": payload.statement_import_enabled,
-            }
-        )
+    try:
+        with transaction(conn):
+            created = accounts_repo.create_account(
+                conn=conn,
+                account_id=account_id,
+                household_id=household_id,
+                name=payload.name.strip(),
+                balance_scope=balance_scope,
+                account_type=payload.account_type,
+                currency=currency,
+                owner_user_id=payload.owner_user_id,
+                risk_level=payload.risk_level,
+                opened_on=opened_on,
+                closed_on=None,
+                status='active',
+                statement_import_enabled=payload.statement_import_enabled
+            )
+            actor_type, actor_user_id, actor_device_id = _get_audit_actor_info(device)
+            audit_repo.insert_audit_event(
+                conn=conn,
+                household_id=household_id,
+                actor_type=actor_type,
+                entity_type="account",
+                entity_id=account_id,
+                action="create",
+                actor_user_id=actor_user_id,
+                actor_device_id=actor_device_id,
+                after_data={
+                    "name": payload.name.strip(),
+                    "balance_scope": balance_scope,
+                    "account_type": payload.account_type,
+                    "currency": currency,
+                    "owner_user_id": str(payload.owner_user_id) if payload.owner_user_id else None,
+                    "risk_level": payload.risk_level,
+                    "opened_on": opened_on.isoformat(),
+                    "closed_on": None,
+                    "status": "active",
+                    "statement_import_enabled": payload.statement_import_enabled,
+                }
+            )
+    except psycopg2.IntegrityError as e:
+        if "uq_accounts_active_name" in str(e) or "accounts" in str(e):
+            raise AccountNameConflictError(payload.name)
+        raise
 
     return _format_account(created)
 
@@ -753,28 +606,33 @@ def create_account_alias(
         raise AccountAliasConflictError(raw_alias)
 
     alias_id = uuid4()
-    with transaction(conn):
-        accounts_repo.create_account_alias(
-            conn=conn,
-            alias_id=alias_id,
-            account_id=account_id,
-            alias_text=raw_alias,
-            normalized_alias=normalized,
-            status='active',
-            household_id=household_id
-        )
-        actor_type, actor_user_id, actor_device_id = _get_audit_actor_info(device)
-        audit_repo.insert_audit_event(
-            conn=conn,
-            household_id=household_id,
-            actor_type=actor_type,
-            entity_type="account_alias",
-            entity_id=alias_id,
-            action="create",
-            actor_user_id=actor_user_id,
-            actor_device_id=actor_device_id,
-            after_data={"account_id": str(account_id), "alias": raw_alias}
-        )
+    try:
+        with transaction(conn):
+            accounts_repo.create_account_alias(
+                conn=conn,
+                alias_id=alias_id,
+                account_id=account_id,
+                alias_text=raw_alias,
+                normalized_alias=normalized,
+                status='active',
+                household_id=household_id
+            )
+            actor_type, actor_user_id, actor_device_id = _get_audit_actor_info(device)
+            audit_repo.insert_audit_event(
+                conn=conn,
+                household_id=household_id,
+                actor_type=actor_type,
+                entity_type="account_alias",
+                entity_id=alias_id,
+                action="create",
+                actor_user_id=actor_user_id,
+                actor_device_id=actor_device_id,
+                after_data={"account_id": str(account_id), "alias": raw_alias}
+            )
+    except psycopg2.IntegrityError as e:
+        if "uq_account_aliases_active" in str(e) or "account_aliases" in str(e):
+            raise AccountAliasConflictError(raw_alias)
+        raise
 
     alias_obj = accounts_repo.get_account_alias(conn, alias_id, account_id, household_id=household_id)
     return {
@@ -814,32 +672,37 @@ def patch_account_alias(
         if accounts_repo.check_account_alias_exists(conn, account_id, clean_alias.lower(), exclude_alias_id=alias_id, household_id=household_id):
             raise AccountAliasConflictError(clean_alias)
 
-    with transaction(conn):
-        updated = accounts_repo.update_account_alias(
-            conn=conn,
-            household_id=household_id,
-            account_id=account_id,
-            alias_id=alias_id,
-            expected_version=expected_ver,
-            alias_text=clean_alias,
-            status=payload.status
-        )
-        if not updated:
-            raise RowVersionConflictError()
+    try:
+        with transaction(conn):
+            updated = accounts_repo.update_account_alias(
+                conn=conn,
+                household_id=household_id,
+                account_id=account_id,
+                alias_id=alias_id,
+                expected_version=expected_ver,
+                alias_text=clean_alias,
+                status=payload.status
+            )
+            if not updated:
+                raise RowVersionConflictError()
 
-        actor_type, actor_user_id, actor_device_id = _get_audit_actor_info(device)
-        audit_repo.insert_audit_event(
-            conn=conn,
-            household_id=household_id,
-            actor_type=actor_type,
-            entity_type="account_alias",
-            entity_id=alias_id,
-            action="update",
-            actor_user_id=actor_user_id,
-            actor_device_id=actor_device_id,
-            before_data={"alias": alias_obj["alias_text"], "status": alias_obj["status"]},
-            after_data={"alias": updated["alias_text"], "status": updated["status"]}
-        )
+            actor_type, actor_user_id, actor_device_id = _get_audit_actor_info(device)
+            audit_repo.insert_audit_event(
+                conn=conn,
+                household_id=household_id,
+                actor_type=actor_type,
+                entity_type="account_alias",
+                entity_id=alias_id,
+                action="update",
+                actor_user_id=actor_user_id,
+                actor_device_id=actor_device_id,
+                before_data={"alias": alias_obj["alias_text"], "status": alias_obj["status"]},
+                after_data={"alias": updated["alias_text"], "status": updated["status"]}
+            )
+    except psycopg2.IntegrityError as e:
+        if "uq_account_aliases_active" in str(e) or "account_aliases" in str(e):
+            raise AccountAliasConflictError(clean_alias or "")
+        raise
 
     return {
         "id": str(updated["id"]),

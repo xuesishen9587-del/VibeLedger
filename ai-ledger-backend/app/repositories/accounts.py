@@ -869,7 +869,6 @@ def deactivate_account_alias(
         }
 
 # --- Category delegations ---
-create_category = repo_categories.create_category
 get_category = repo_categories.get_category
 list_categories = repo_categories.list_categories
 list_accounts_for_household = list_accounts

@@ -469,10 +469,10 @@ class TestS1SimplifiedPostgresIntegration(unittest.TestCase):
                             idempotency_key, request_kind, operation, request_hash, status
                         ) VALUES (
                             gen_random_uuid(), %s, %s, %s, 'device:test',
-                            'idemp-key-leak-device', 'expense', 'POST /expenses', 'a' * 64, 'processing'
+                            'idemp-key-leak-device', 'expense', 'POST /expenses', %s, 'processing'
                         );
                         """,
-                        (str(hh_a_id), str(user_a_id), str(dev_b_id)),
+                        (str(hh_a_id), str(user_a_id), str(dev_b_id), 'a' * 64),
                     )
             conn.rollback()
 

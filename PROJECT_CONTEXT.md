@@ -51,21 +51,22 @@ audit/work-queue user interfaces.
 compatibility boundary specification, migration checksums, and offline boundary
 characterization tests are committed and verified.
 
-**S1** (fresh database, identities and settings) is **completed**: the 16-table
-simplified baseline under `migrations/simplified/0001_simplified.sql`, strict lineage
-selection (`LegacyMigrationLineageDetectedError`), readiness check verification,
-remote Supabase safety guards, simplified repositories, and idempotent seed script
-(`scripts/bootstrap_simplified.py`) are implemented and verified.
+**S1** (fresh database, identities and settings) implementation is completed:
+the 16-table simplified baseline under `migrations/simplified/0001_simplified.sql`,
+strict lineage selection (`LegacyMigrationLineageDetectedError`), readiness check verification,
+remote Supabase safety guards, simplified repositories with strict household scoping on
+all mutations and row locks (`lock_ingestion_request`, `touch_device`), short household-scoped
+finance-write lock primitive (`acquire_household_finance_lock`, `lock_ingestion_requests_in_order`),
+least-privilege operator/runtime role configuration (`scripts/setup_roles_simplified.sql` and
+`docs/architecture/DATABASE_ROLES.md`), idempotent seed script (`scripts/bootstrap_simplified.py`),
+and real PostgreSQL integration test suite (`tests/integration/test_s1_simplified_db.py`).
 
-The next implementation slice is **S2** (spending capture, metadata review and monthly
-schedules): retain the expense endpoint body/normal result, simplify its financial write,
-add durable reserve/extract/finalize/cancel behavior, non-expense intent guards,
-manual transactions, linked/unlinked refunds, frozen original-currency reporting conversion,
-missing-account acknowledgement, category uncertainty provenance, and monthly spending
-schedules. Then S3 balances/wealth and statement import, S4 investment estimates/confirmation/
-Dashboard/login, S5 removal and staging acceptance. S6 production cutover is later and
-separately authorized. Do not implement the old proposed `0010_asset_model_freeze.sql` first
-or rewrite applied migration bytes.
+**S1 acceptance gate status**: Acceptance is **pending real PostgreSQL execution**.
+On the current host environment, Docker / local PostgreSQL 17 is not available, so tests
+requiring a live database fixture skipped gracefully. In accordance with CONTRACTS safety
+rules, remote databases (e.g. Supabase) cannot be substituted for disposable test runs.
+Full S1 acceptance will complete once Docker or a local PostgreSQL 17 instance is available
+to run `ai-ledger-backend/scripts/run_local_integration.ps1`. Do not start S2 until accepted.
 
 Consumer choices are specified, not blockers: last reported wealth, due-period
 installment spending, editable seeded categories, statement preview before Save,

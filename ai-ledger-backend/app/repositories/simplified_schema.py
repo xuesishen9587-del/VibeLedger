@@ -261,6 +261,21 @@ def get_device_by_token_hash(conn, token_hash: bytes) -> Optional[Dict[str, Any]
         return dict(row) if row else None
 
 
+def get_device(conn, household_id: uuid.UUID, device_id: uuid.UUID) -> Optional[Dict[str, Any]]:
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            """
+            SELECT id, household_id, user_id, name, platform, status,
+                   client_version, created_at, last_seen_at, revoked_at
+            FROM devices
+            WHERE household_id = %s AND id = %s;
+            """,
+            (str(household_id), str(device_id)),
+        )
+        row = cur.fetchone()
+        return dict(row) if row else None
+
+
 def revoke_device(conn, household_id: uuid.UUID, device_id: uuid.UUID) -> bool:
     with conn.cursor() as cur:
         cur.execute(
@@ -274,12 +289,14 @@ def revoke_device(conn, household_id: uuid.UUID, device_id: uuid.UUID) -> bool:
         return cur.rowcount > 0
 
 
-def touch_device(conn, device_id: uuid.UUID) -> None:
+def touch_device(conn, household_id: uuid.UUID, device_id: uuid.UUID) -> bool:
+    """Updates device last_seen_at under household scope."""
     with conn.cursor() as cur:
         cur.execute(
-            "UPDATE devices SET last_seen_at = now() WHERE id = %s;",
-            (str(device_id),),
+            "UPDATE devices SET last_seen_at = now() WHERE household_id = %s AND id = %s;",
+            (str(household_id), str(device_id)),
         )
+        return cur.rowcount > 0
 
 
 # ----------------------------------------------------------------------
@@ -673,15 +690,60 @@ def get_ingestion_request_by_key(
         return dict(row) if row else None
 
 
-def lock_ingestion_request(conn, request_id: uuid.UUID) -> Optional[Dict[str, Any]]:
-    """Acquires a row lock on an ingestion request."""
+def get_ingestion_request(
+    conn, household_id: uuid.UUID, request_id: uuid.UUID
+) -> Optional[Dict[str, Any]]:
+    """Fetches an ingestion request under household scope."""
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute(
-            "SELECT * FROM ingestion_requests WHERE id = %s FOR UPDATE;",
-            (str(request_id),),
+            """
+            SELECT * FROM ingestion_requests
+            WHERE household_id = %s AND id = %s;
+            """,
+            (str(household_id), str(request_id)),
         )
         row = cur.fetchone()
         return dict(row) if row else None
+
+
+def lock_ingestion_request(
+    conn, household_id: uuid.UUID, request_id: uuid.UUID
+) -> Optional[Dict[str, Any]]:
+    """Acquires a household-scoped row lock on an ingestion request."""
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            """
+            SELECT * FROM ingestion_requests
+            WHERE household_id = %s AND id = %s
+            FOR UPDATE;
+            """,
+            (str(household_id), str(request_id)),
+        )
+        row = cur.fetchone()
+        return dict(row) if row else None
+
+
+def lock_ingestion_requests_in_order(
+    conn, household_id: uuid.UUID, request_ids: List[uuid.UUID]
+) -> List[Dict[str, Any]]:
+    """
+    Acquires row locks on ingestion requests in stable UUID order under household scope
+    before acquiring the household finance lock.
+    """
+    if not request_ids:
+        return []
+    sorted_ids = sorted({str(r) for r in request_ids})
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            """
+            SELECT * FROM ingestion_requests
+            WHERE household_id = %s AND id = ANY(%s::uuid[])
+            ORDER BY id ASC
+            FOR UPDATE;
+            """,
+            (str(household_id), sorted_ids),
+        )
+        return [dict(r) for r in cur.fetchall()]
 
 
 def update_request_draft(
@@ -844,3 +906,37 @@ def list_audit_events(
         params.append(limit)
         cur.execute(query, tuple(params))
         return [dict(r) for r in cur.fetchall()]
+
+
+# ----------------------------------------------------------------------
+# Household Finance-Write Lock Primitive
+# ----------------------------------------------------------------------
+
+def acquire_household_finance_lock(conn, household_id: uuid.UUID) -> Dict[str, Any]:
+    """
+    Acquires the short household-scoped finance-write lock:
+    SELECT id, name, reporting_currency, status, row_version
+    FROM households WHERE id = %s FOR UPDATE;
+
+    Serializes all financial writes for this household in PostgreSQL.
+    In accordance with CONTRACTS.md Section 2:
+    Acquire all receipt locks first (in ID order when consuming a source draft),
+    then household lock, then any record locks in stable ID order.
+    Never call Gemini, FX, email or external network services while holding this lock.
+    """
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            """
+            SELECT id, name, reporting_currency, status, row_version
+            FROM households
+            WHERE id = %s
+            FOR UPDATE;
+            """,
+            (str(household_id),),
+        )
+        row = cur.fetchone()
+        if not row:
+            raise ValueError(f"Household {household_id} not found for finance-write lock")
+        if row["status"] != "active":
+            raise ValueError(f"Household {household_id} is not active (status: {row['status']})")
+        return dict(row)

@@ -310,6 +310,108 @@ class TestS1SecurityAndScoping(unittest.TestCase):
                 validate_safety()
             self.assertIn("Remote Supabase database cannot be used", str(ctx.exception))
 
+    def test_lock_ingestion_request_requires_household_scope(self):
+        """Verify lock_ingestion_request includes household_id in query and parameters."""
+        mock_conn = MagicMock()
+        mock_cur = MagicMock()
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cur
+        mock_cur.fetchone.return_value = {"id": str(uuid.uuid4())}
+
+        hh_id = uuid.uuid4()
+        req_id = uuid.uuid4()
+
+        repo.lock_ingestion_request(mock_conn, household_id=hh_id, request_id=req_id)
+        mock_cur.execute.assert_called_once()
+        query, params = mock_cur.execute.call_args[0]
+        self.assertIn("household_id = %s", query)
+        self.assertIn("FOR UPDATE", query)
+        self.assertEqual(params, (str(hh_id), str(req_id)))
+
+    def test_lock_ingestion_requests_in_order(self):
+        """Verify lock_ingestion_requests_in_order sorts IDs and includes household scope."""
+        mock_conn = MagicMock()
+        mock_cur = MagicMock()
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cur
+        mock_cur.fetchall.return_value = []
+
+        hh_id = uuid.uuid4()
+        id_1 = uuid.UUID("ffffffff-ffff-ffff-ffff-ffffffffffff")
+        id_2 = uuid.UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+
+        repo.lock_ingestion_requests_in_order(mock_conn, household_id=hh_id, request_ids=[id_1, id_2])
+        query, params = mock_cur.execute.call_args[0]
+        self.assertIn("household_id = %s", query)
+        self.assertIn("ORDER BY id ASC", query)
+        self.assertIn("FOR UPDATE", query)
+        # Verify IDs were sorted
+        self.assertEqual(params[1], [str(id_2), str(id_1)])
+
+    def test_touch_device_requires_household_scope(self):
+        """Verify touch_device includes household_id in query and parameters."""
+        mock_conn = MagicMock()
+        mock_cur = MagicMock()
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cur
+        mock_cur.rowcount = 1
+
+        hh_id = uuid.uuid4()
+        dev_id = uuid.uuid4()
+
+        res = repo.touch_device(mock_conn, household_id=hh_id, device_id=dev_id)
+        self.assertTrue(res)
+        query, params = mock_cur.execute.call_args[0]
+        self.assertIn("household_id = %s", query)
+        self.assertEqual(params, (str(hh_id), str(dev_id)))
+
+    def test_acquire_household_finance_lock_primitive(self):
+        """Verify acquire_household_finance_lock executes FOR UPDATE on households table."""
+        mock_conn = MagicMock()
+        mock_cur = MagicMock()
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cur
+        hh_id = uuid.uuid4()
+        mock_cur.fetchone.return_value = {
+            "id": str(hh_id),
+            "name": "Lock HH",
+            "status": "active",
+            "row_version": 1,
+        }
+
+        locked = repo.acquire_household_finance_lock(mock_conn, household_id=hh_id)
+        self.assertEqual(str(locked["id"]), str(hh_id))
+        query, params = mock_cur.execute.call_args[0]
+        self.assertIn("FROM households", query)
+        self.assertIn("WHERE id = %s", query)
+        self.assertIn("FOR UPDATE", query)
+        self.assertEqual(params, (str(hh_id),))
+
+    def test_least_privilege_role_script_invariants(self):
+        """Verify setup_roles_simplified.sql enforces least privilege separation."""
+        role_script_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+            "scripts",
+            "setup_roles_simplified.sql",
+        )
+        self.assertTrue(os.path.exists(role_script_path))
+        with open(role_script_path, "r", encoding="utf-8") as f:
+            sql_text = f.read()
+
+        # Check operator role gets CREATE on schema
+        self.assertIn("GRANT USAGE, CREATE ON SCHEMA", sql_text)
+        self.assertIn("vibeledger_operator", sql_text)
+
+        # Check runtime role has NO CREATE on schema (no DDL)
+        self.assertIn("REVOKE CREATE ON SCHEMA", sql_text)
+        self.assertIn("FROM vibeledger_runtime", sql_text)
+
+        # Check runtime role cannot UPDATE or DELETE audit_events
+        self.assertIn("REVOKE UPDATE, DELETE, TRUNCATE ON", sql_text)
+        self.assertIn("audit_events FROM vibeledger_runtime", sql_text)
+
+        # Check Supabase anon and authenticated roles have zero access
+        self.assertIn("REVOKE ALL ON SCHEMA", sql_text)
+        self.assertIn("FROM anon", sql_text)
+        self.assertIn("FROM authenticated", sql_text)
+
+
 
 class TestS1HistoryAndAudit(unittest.TestCase):
     """

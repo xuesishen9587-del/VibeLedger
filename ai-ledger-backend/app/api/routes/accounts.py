@@ -48,15 +48,13 @@ class PatchAccountRequest(BaseModel):
     statement_import_enabled: Optional[bool] = None
     account_type: Optional[str] = Field(None, pattern="^(cash|savings|credit|investment)$")
     currency: Optional[str] = Field(None, min_length=3, max_length=3)
-    row_version: Optional[int] = Field(None, ge=0, description="Optimistic concurrency control version")
-    expected_version: Optional[int] = Field(None, ge=0, description="Optimistic concurrency control version")
+    expected_version: int = Field(..., ge=0, description="Optimistic concurrency control version")
     reason: Optional[str] = None
 
 class CloseAccountRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    expected_version: Optional[int] = Field(None, ge=0)
-    row_version: Optional[int] = Field(None, ge=0)
+    expected_version: int = Field(..., ge=0)
     closed_on: date = Field(..., description="Effective closing date")
     closing_snapshot_id: UUID = Field(..., description="Snapshot proving zero balance")
     reason: Optional[str] = None
@@ -64,15 +62,13 @@ class CloseAccountRequest(BaseModel):
 class ReopenAccountRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    expected_version: Optional[int] = Field(None, ge=0)
-    row_version: Optional[int] = Field(None, ge=0)
+    expected_version: int = Field(..., ge=0)
     reason: Optional[str] = None
 
 class CancelAccountRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    expected_version: Optional[int] = Field(None, ge=0)
-    row_version: Optional[int] = Field(None, ge=0)
+    expected_version: int = Field(..., ge=0)
     reason: Optional[str] = None
 
 class CreateAliasRequest(BaseModel):
@@ -83,8 +79,7 @@ class CreateAliasRequest(BaseModel):
 class PatchAliasRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    expected_version: Optional[int] = Field(None, ge=0)
-    row_version: Optional[int] = Field(None, ge=0)
+    expected_version: int = Field(..., ge=0)
     alias: Optional[str] = Field(None, min_length=1, max_length=120)
     status: Optional[str] = Field(None, pattern="^(active|inactive)$")
 
@@ -131,17 +126,14 @@ def list_accounts(
     """
     Lists accounts belonging to the authenticated household.
     """
-    # Map legacy 'inactive' status query to 'closed'
-    query_status = "closed" if status == "inactive" else status
-
     accounts = accounts_repo.list_accounts(
         conn=conn,
         household_id=device["household_id"],
-        status=query_status,
+        status=status,
         account_type=account_type,
         owner_user_id=owner_user_id
     )
-    return {"items": [_format_account(a) for a in accounts]}
+    return {"items": [_format_account(a) for a in accounts], "next_cursor": None}
 
 @router.get("/{account_id}", summary="Get Account Details")
 def get_account(
@@ -245,9 +237,7 @@ def patch_account(
     """
     household_id = device["household_id"]
 
-    expected_ver = payload.expected_version if payload.expected_version is not None else payload.row_version
-    if expected_ver is None:
-        raise HTTPException(status_code=400, detail="expected_version is required.")
+    expected_ver = payload.expected_version
 
     fields_set = payload.model_fields_set
 
@@ -309,12 +299,26 @@ def patch_account(
         if new_type == "credit" and new_risk is not None:
             raise LinkedAccountInvalidError("Credit accounts cannot have a risk level.")
 
+        if new_opened_on != existing["opened_on"]:
+            if existing.get("closed_on") and new_opened_on > existing["closed_on"]:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Account opened_on cannot be after closed_on."
+                )
+            if not accounts_repo.check_account_observations_within_lifetime(
+                conn, household_id, account_id, new_opened_on
+            ):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Account has financial observations before new opened_on date."
+                )
+
         if new_currency != existing["currency"]:
-            if accounts_repo.has_financial_history(conn, account_id):
+            if accounts_repo.has_financial_history(conn, household_id, account_id):
                 raise CurrencyImmutableError()
 
         if new_type != existing["account_type"]:
-            if accounts_repo.has_financial_history(conn, account_id):
+            if accounts_repo.has_financial_history(conn, household_id, account_id):
                 raise AccountTypeImmutableError()
 
         if new_name.lower() != existing["name"].lower():
@@ -395,9 +399,7 @@ def close_account(
     """
     household_id = device["household_id"]
 
-    expected_ver = payload.expected_version if payload.expected_version is not None else payload.row_version
-    if expected_ver is None:
-        raise HTTPException(status_code=400, detail="expected_version is required.")
+    expected_ver = payload.expected_version
 
     if not payload.closing_snapshot_id:
         raise HTTPException(status_code=400, detail="closing_snapshot_id is required to close an account.")
@@ -469,9 +471,7 @@ def reopen_account(
     """
     household_id = device["household_id"]
 
-    expected_ver = payload.expected_version if payload.expected_version is not None else payload.row_version
-    if expected_ver is None:
-        raise HTTPException(status_code=400, detail="expected_version is required.")
+    expected_ver = payload.expected_version
 
     with transaction(conn):
         acquire_household_finance_lock(conn, household_id)
@@ -518,9 +518,7 @@ def cancel_account(
     """
     household_id = device["household_id"]
 
-    expected_ver = payload.expected_version if payload.expected_version is not None else payload.row_version
-    if expected_ver is None:
-        raise HTTPException(status_code=400, detail="expected_version is required.")
+    expected_ver = payload.expected_version
 
     with transaction(conn):
         acquire_household_finance_lock(conn, household_id)
@@ -534,7 +532,7 @@ def cancel_account(
         if existing["status"] != "active":
             raise HTTPException(status_code=400, detail="Only active accounts can be cancelled.")
 
-        if accounts_repo.has_financial_history(conn, account_id):
+        if accounts_repo.has_financial_history(conn, household_id, account_id):
             raise HTTPException(status_code=400, detail="Cannot cancel account with existing financial history.")
 
         updated = accounts_repo.cancel_account(conn, household_id, account_id, expected_ver)
@@ -585,7 +583,8 @@ def list_account_aliases(
                 "updated_at": a["updated_at"].isoformat() if hasattr(a.get("updated_at"), "isoformat") else str(a.get("updated_at"))
             }
             for a in aliases
-        ]
+        ],
+        "next_cursor": None
     }
 
 @router.post("/{account_id}/aliases", status_code=status.HTTP_201_CREATED, summary="Create Account Alias")
@@ -664,8 +663,8 @@ def patch_account_alias(
     if not alias_obj:
         raise AliasResourceNotFoundError(alias_id)
 
-    expected_ver = payload.expected_version if payload.expected_version is not None else payload.row_version
-    if expected_ver is not None and alias_obj.get("row_version") != expected_ver:
+    expected_ver = payload.expected_version
+    if alias_obj.get("row_version") != expected_ver:
         raise RowVersionConflictError()
 
     clean_alias = payload.alias.strip() if payload.alias is not None else None
@@ -714,45 +713,4 @@ def patch_account_alias(
         "row_version": updated["row_version"],
         "created_at": updated["created_at"].isoformat() if hasattr(updated["created_at"], "isoformat") else str(updated["created_at"]),
         "updated_at": updated["updated_at"].isoformat() if hasattr(updated["updated_at"], "updated_at") else str(updated["updated_at"])
-    }
-
-@router.delete("/{account_id}/aliases/{alias_id}", summary="Deactivate Account Alias")
-def delete_account_alias(
-    account_id: UUID,
-    alias_id: UUID,
-    device: Dict[str, Any] = Depends(get_authenticated_actor),
-    conn: Any = Depends(get_db_connection)
-) -> Dict[str, Any]:
-    household_id = device["household_id"]
-    existing = accounts_repo.get_account(conn, account_id, household_id)
-    if not existing:
-        raise AccountResourceNotFoundError(account_id)
-
-    alias = accounts_repo.get_account_alias(conn, alias_id, account_id, household_id=household_id)
-    if not alias or alias.get("status") != "active":
-        raise AliasResourceNotFoundError(alias_id)
-
-    with transaction(conn):
-        deactivated = accounts_repo.deactivate_account_alias(conn, alias_id, account_id, household_id=household_id)
-        if not deactivated:
-            raise AliasResourceNotFoundError(alias_id)
-
-        actor_type, actor_user_id, actor_device_id = _get_audit_actor_info(device)
-        audit_repo.insert_audit_event(
-            conn=conn,
-            household_id=household_id,
-            actor_type=actor_type,
-            entity_type="account_alias",
-            entity_id=alias_id,
-            action="update",
-            actor_user_id=actor_user_id,
-            actor_device_id=actor_device_id,
-            before_data={"status": "active"},
-            after_data={"status": "inactive"}
-        )
-
-    return {
-        "status": "deactivated",
-        "id": str(alias_id),
-        "account_id": str(account_id)
     }

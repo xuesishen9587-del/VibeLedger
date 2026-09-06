@@ -22,25 +22,7 @@ def get_entity_history(
     """
     household_id = device["household_id"]
 
-    # Verify household ownership of the entity if applicable
-    with conn.cursor() as cur:
-        if entity_type == "account":
-            cur.execute("SELECT household_id FROM accounts WHERE id = %s;", (str(entity_id),))
-            row = cur.fetchone()
-            if row and row[0] != household_id:
-                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Account not found.")
-        elif entity_type == "category":
-            cur.execute("SELECT household_id FROM categories WHERE id = %s;", (str(entity_id),))
-            row = cur.fetchone()
-            if row and row[0] != household_id:
-                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Category not found.")
-        elif entity_type == "account_alias":
-            cur.execute("SELECT household_id FROM account_aliases WHERE id = %s;", (str(entity_id),))
-            row = cur.fetchone()
-            if row and row[0] != household_id:
-                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Account alias not found.")
-
-    items, next_cursor = audit_repo.list_audit_events_with_filters(
+    res = audit_repo.get_entity_history(
         conn=conn,
         household_id=household_id,
         entity_type=entity_type,
@@ -48,6 +30,18 @@ def get_entity_history(
         limit=limit,
         cursor=cursor
     )
+    if res is None:
+        detail_map = {
+            "account": "Account not found.",
+            "category": "Category not found.",
+            "account_alias": "Account alias not found.",
+        }
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=detail_map.get(entity_type, "Entity not found.")
+        )
+
+    items, next_cursor = res
 
     formatted_items = []
     for event in items:

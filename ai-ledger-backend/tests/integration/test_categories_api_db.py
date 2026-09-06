@@ -95,6 +95,7 @@ class TestCategoriesApiDb(BaseDbTestCase):
         # 4. List categories with filters
         res_list = self.client.get("/api/v1/categories?type=expense", headers=self.headers)
         self.assertEqual(res_list.status_code, 200)
+        self.assertIsNone(res_list.json().get("next_cursor"))
         items = res_list.json()["items"]
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0]["name"], "Food & Dining")
@@ -110,19 +111,37 @@ class TestCategoriesApiDb(BaseDbTestCase):
         self.assertIsNone(res_patch.json()["description"])
         self.assertEqual(res_patch.json()["row_version"], 1)
 
-        # 6. Deactivate category
-        res_deact = self.client.post(f"/api/v1/categories/{cat_id}/deactivate", headers=self.headers)
+        # 6. Deactivate category via canonical PATCH
+        res_deact = self.client.patch(f"/api/v1/categories/{cat_id}", json={
+            "status": "inactive",
+            "expected_version": 1
+        }, headers=self.headers)
         self.assertEqual(res_deact.status_code, 200)
         self.assertEqual(res_deact.json()["status"], "inactive")
 
         # Confirm filtered list shows it as inactive
         res_act_list = self.client.get("/api/v1/categories?status=active", headers=self.headers)
+        self.assertIsNone(res_act_list.json().get("next_cursor"))
         act_ids = [c["id"] for c in res_act_list.json()["items"]]
         self.assertNotIn(cat_id, act_ids)
 
         res_inact_list = self.client.get("/api/v1/categories?status=inactive", headers=self.headers)
+        self.assertIsNone(res_inact_list.json().get("next_cursor"))
         inact_ids = [c["id"] for c in res_inact_list.json()["items"]]
         self.assertIn(cat_id, inact_ids)
+
+    def test_patch_category_missing_expected_version_rejected(self):
+        res = self.client.post("/api/v1/categories", json={
+            "name": "Groceries",
+            "type": "expense"
+        }, headers=self.headers)
+        cat_id = res.json()["id"]
+
+        # Missing expected_version -> 422 Unprocessable Entity
+        res_patch = self.client.patch(f"/api/v1/categories/{cat_id}", json={
+            "name": "Groceries Updated"
+        }, headers=self.headers)
+        self.assertEqual(res_patch.status_code, 422)
 
     def test_fallback_category_protection(self):
         # Create a fallback category
@@ -140,11 +159,6 @@ class TestCategoriesApiDb(BaseDbTestCase):
                 )
         finally:
             conn.close()
-
-        # Attempt to deactivate fallback category via POST /deactivate -> 400 Bad Request
-        res_deact = self.client.post(f"/api/v1/categories/{fb_id}/deactivate", headers=self.headers)
-        self.assertEqual(res_deact.status_code, 400)
-        self.assertIn("Fallback category cannot be archived", res_deact.json()["detail"])
 
         # Attempt to archive fallback category via PATCH /status="inactive" -> 400 Bad Request
         res_patch = self.client.patch(f"/api/v1/categories/{fb_id}", json={
@@ -193,9 +207,13 @@ class TestCategoriesApiDb(BaseDbTestCase):
         self.assertEqual(res_patch.status_code, 404)
         self.assertEqual(res_patch.json()["error"]["code"], "CATEGORY_NOT_FOUND")
 
-        # Household B device attempts to deactivate Household A's category -> 404
-        res_deact = self.client.post(f"/api/v1/categories/{cat_a_id}/deactivate", headers=self.headers_b)
+        # Household B device attempts to deactivate Household A's category via PATCH -> 404
+        res_deact = self.client.patch(f"/api/v1/categories/{cat_a_id}", json={
+            "status": "inactive",
+            "expected_version": 0
+        }, headers=self.headers_b)
         self.assertEqual(res_deact.status_code, 404)
+        self.assertEqual(res_deact.json()["error"]["code"], "CATEGORY_NOT_FOUND")
 
 if __name__ == "__main__":
     unittest.main()

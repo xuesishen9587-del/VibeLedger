@@ -12,6 +12,7 @@ from app.repositories import accounts as accounts_repo
 from app.repositories import devices as devices_repo
 from app.repositories import transactions as tx_repo
 from app.repositories import audit as audit_repo
+from app.repositories import categories as categories_repo
 
 try:
     from tests.support.db_helper import BaseDbTestCase
@@ -187,12 +188,14 @@ class TestAccountsApiDb(BaseDbTestCase):
         # Query all
         res_all = self.client.get("/api/v1/accounts", headers=self.headers)
         self.assertEqual(res_all.status_code, 200)
+        self.assertIsNone(res_all.json().get("next_cursor"))
         items = res_all.json()["items"]
         self.assertGreaterEqual(len(items), 2)
 
         # Filter by account_type=credit
         res_credit = self.client.get("/api/v1/accounts?account_type=credit", headers=self.headers)
         self.assertEqual(res_credit.status_code, 200)
+        self.assertIsNone(res_credit.json().get("next_cursor"))
         c_items = res_credit.json()["items"]
         for it in c_items:
             self.assertEqual(it["account_type"], "credit")
@@ -264,7 +267,7 @@ class TestAccountsApiDb(BaseDbTestCase):
             with transaction(conn):
                 # Create category and ingestion request
                 cat_id = uuid4()
-                accounts_repo.create_category(conn, cat_id, self.household_id, "Salary Cat", "income")
+                categories_repo.create_category(conn, household_id=self.household_id, name="Salary Cat", category_type="income", category_id=cat_id)
                 req_id = uuid4()
                 with conn.cursor() as cur:
                     cur.execute("""
@@ -337,6 +340,69 @@ class TestAccountsApiDb(BaseDbTestCase):
             self.assertIsNone(acc_db["risk_level"])
         finally:
             conn.close()
+
+    def test_patch_account_missing_expected_version_rejected(self):
+        res = self.client.post("/api/v1/accounts", json={
+            "name": "Account Missing Version",
+            "balance_scope": "Testing",
+            "account_type": "cash",
+            "currency": "CNY"
+        }, headers=self.headers)
+        acc_id = res.json()["id"]
+
+        # Missing expected_version -> 422 Unprocessable Entity
+        res_patch = self.client.patch(f"/api/v1/accounts/{acc_id}", json={
+            "name": "Account Renamed"
+        }, headers=self.headers)
+        self.assertEqual(res_patch.status_code, 422)
+
+    def test_patch_account_opened_on_after_financial_observations_rejected(self):
+        # 1. Create account with opened_on 2026-01-01
+        res = self.client.post("/api/v1/accounts", json={
+            "name": "Account For Lifetime Check",
+            "balance_scope": "Testing",
+            "account_type": "cash",
+            "currency": "CNY",
+            "opened_on": "2026-01-01"
+        }, headers=self.headers)
+        self.assertEqual(res.status_code, 201)
+        acc_id = UUID(res.json()["id"])
+        row_v = res.json()["row_version"]
+
+        # 2. Insert snapshot on 2026-02-01
+        conn = get_connection(self.test_schema)
+        try:
+            with transaction(conn):
+                req_id = uuid4()
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        INSERT INTO ingestion_requests (
+                            id, household_id, user_id, device_id, actor_scope, idempotency_key, request_kind, operation, request_hash, status
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
+                    """, (req_id, self.household_id, self.user_id, self.device_id, "device:1", "req_snap_lifetime", "command", "snap", "0" * 64, "processing"))
+                    cur.execute("""
+                        INSERT INTO account_snapshots (
+                            id, household_id, account_id, as_of, time_basis, balance, currency, source, status, created_by_user_id, source_request_id
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
+                    """, (uuid4(), self.household_id, acc_id, datetime(2026, 2, 1, 12, 0, tzinfo=timezone.utc), "explicit", Decimal("100.00"), "CNY", "manual", "active", self.user_id, req_id))
+        finally:
+            conn.close()
+
+        # 3. Attempt to move opened_on to 2026-03-01 (after snapshot date 2026-02-01) -> 400 Bad Request
+        res_bad = self.client.patch(f"/api/v1/accounts/{acc_id}", json={
+            "opened_on": "2026-03-01",
+            "expected_version": row_v
+        }, headers=self.headers)
+        self.assertEqual(res_bad.status_code, 400)
+        self.assertIn("observations before new opened_on", res_bad.json()["detail"])
+
+        # 4. Moving opened_on to 2026-01-15 (still before 2026-02-01 snapshot) -> 200 OK
+        res_ok = self.client.patch(f"/api/v1/accounts/{acc_id}", json={
+            "opened_on": "2026-01-15",
+            "expected_version": row_v
+        }, headers=self.headers)
+        self.assertEqual(res_ok.status_code, 200)
+        self.assertEqual(res_ok.json()["opened_on"], "2026-01-15")
 
     def test_account_lifecycle_close_reopen_cancel(self):
         # 1. Create active account
@@ -485,6 +551,7 @@ class TestAccountsApiDb(BaseDbTestCase):
         # 3. List aliases for acc1
         res_list = self.client.get(f"/api/v1/accounts/{acc1_id}/aliases", headers=self.headers)
         self.assertEqual(res_list.status_code, 200)
+        self.assertIsNone(res_list.json().get("next_cursor"))
         self.assertEqual(len(res_list.json()["items"]), 1)
         self.assertEqual(res_list.json()["items"][0]["alias"], "工行")
 
@@ -497,10 +564,19 @@ class TestAccountsApiDb(BaseDbTestCase):
         self.assertEqual(res_patch_alias.json()["alias"], "工行白金卡")
         self.assertEqual(res_patch_alias.json()["row_version"], 1)
 
-        # 5. Delete alias on acc1
-        res_del = self.client.delete(f"/api/v1/accounts/{acc1_id}/aliases/{alias1_id}", headers=self.headers)
+        # Missing expected_version on alias patch -> 422 Unprocessable Entity
+        res_alias_no_ver = self.client.patch(f"/api/v1/accounts/{acc1_id}/aliases/{alias1_id}", json={
+            "alias": "工行钻石卡"
+        }, headers=self.headers)
+        self.assertEqual(res_alias_no_ver.status_code, 422)
+
+        # 5. Deactivate alias on acc1 via canonical PATCH
+        res_del = self.client.patch(f"/api/v1/accounts/{acc1_id}/aliases/{alias1_id}", json={
+            "status": "inactive",
+            "expected_version": 1
+        }, headers=self.headers)
         self.assertEqual(res_del.status_code, 200)
-        self.assertEqual(res_del.json()["status"], "deactivated")
+        self.assertEqual(res_del.json()["status"], "inactive")
 
     def test_cross_household_isolation(self):
         # Create account in Household A

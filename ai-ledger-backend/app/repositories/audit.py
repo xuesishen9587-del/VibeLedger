@@ -171,3 +171,37 @@ def list_audit_events_with_filters(
 
     next_cursor = str(actual_rows[-1][0]) if has_more and actual_rows else None
     return events, next_cursor
+
+def get_entity_history(
+    conn,
+    household_id: UUID,
+    entity_type: str,
+    entity_id: UUID,
+    limit: int = 50,
+    cursor: Optional[str] = None
+) -> Optional[Tuple[List[Dict[str, Any]], Optional[str]]]:
+    """
+    Retrieves append-only change history for a specific entity within the household.
+    Returns None if the entity exists and belongs to another household (caller should raise 404).
+    """
+    table_map = {
+        "account": "accounts",
+        "category": "categories",
+        "account_alias": "account_aliases",
+    }
+    table = table_map.get(entity_type)
+    if table:
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT household_id FROM {table} WHERE id = %s;", (str(entity_id),))
+            row = cur.fetchone()
+            if row and row[0] != household_id:
+                return None
+
+    return list_audit_events_with_filters(
+        conn=conn,
+        household_id=household_id,
+        entity_type=entity_type,
+        entity_id=entity_id,
+        limit=limit,
+        cursor=cursor
+    )

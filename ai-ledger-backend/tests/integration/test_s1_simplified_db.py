@@ -597,6 +597,61 @@ class TestS1SimplifiedPostgresIntegration(unittest.TestCase):
                 )
             conn.rollback()
 
+            # 11. Cross-household: investment_period_inputs in HH A referencing user_b as created_by_user_id fails fk_investment_inputs_creator
+            snap1_id = uuid.uuid4()
+            snap2_id = uuid.uuid4()
+            req_snap1 = repo.create_ingestion_request(
+                conn,
+                household_id=hh_a_id,
+                user_id=user_a_id,
+                actor_scope=f"user:{user_a_id}",
+                idempotency_key="idemp-snap1",
+                request_kind="balance_capture",
+                operation="POST /snapshots",
+            )
+            req_snap2 = repo.create_ingestion_request(
+                conn,
+                household_id=hh_a_id,
+                user_id=user_a_id,
+                actor_scope=f"user:{user_a_id}",
+                idempotency_key="idemp-snap2",
+                request_kind="balance_capture",
+                operation="POST /snapshots",
+            )
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO account_snapshots (
+                        id, household_id, account_id, as_of, time_basis, balance, currency,
+                        source, created_by_user_id, source_request_id
+                    ) VALUES
+                    (%s, %s, %s, '2026-01-01 00:00:00Z', 'explicit', 100, 'CNY', 'manual', %s, %s),
+                    (%s, %s, %s, '2026-02-01 00:00:00Z', 'explicit', 200, 'CNY', 'manual', %s, %s);
+                    """,
+                    (str(snap1_id), str(hh_a_id), str(acc_a_id), str(user_a_id), str(req_snap1["id"]),
+                     str(snap2_id), str(hh_a_id), str(acc_a_id), str(user_a_id), str(req_snap2["id"]))
+                )
+            conn.commit()
+
+            with self.assertRaises(errors.ForeignKeyViolation):
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        INSERT INTO investment_period_inputs (
+                            id, household_id, account_id, opening_snapshot_id, closing_snapshot_id,
+                            contributions_amount, withdrawals_amount,
+                            created_by_user_id, confirmed_by_user_id, source_request_id
+                        ) VALUES (
+                            gen_random_uuid(), %s, %s, %s, %s,
+                            100, 50,
+                            %s, %s, %s
+                        );
+                        """,
+                        (str(hh_a_id), str(acc_a_id), str(snap1_id), str(snap2_id),
+                         str(user_b_id), str(user_a_id), str(req_a_id)),
+                    )
+            conn.rollback()
+
             # Positive validation: inserting valid records in HH A using HH A's own member and device succeeds
             valid_evt = repo.insert_audit_event(
                 conn,

@@ -117,21 +117,7 @@ def get_device(conn, device_id: UUID) -> Optional[Dict[str, Any]]:
 def get_device_by_token_hash(conn, token_hash: bytes) -> Optional[Dict[str, Any]]:
     return repo_devices.get_device_by_token_hash(conn, token_hash)
 
-def create_category(conn, *args, **kwargs) -> Dict[str, Any]:
-    if len(args) >= 2 and (isinstance(args[0], UUID) or (isinstance(args[0], str) and len(args[0]) == 36 and '-' in args[0])) and (isinstance(args[1], UUID) or (isinstance(args[1], str) and len(args[1]) == 36 and '-' in args[1])):
-        category_id = UUID(str(args[0]))
-        household_id = UUID(str(args[1]))
-        name = str(args[2]) if len(args) > 2 else kwargs.get("name", "")
-        category_type = str(args[3]) if len(args) > 3 else kwargs.get("category_type", "expense")
-        description = args[4] if len(args) > 4 else kwargs.get("description")
-        is_fallback = args[5] if len(args) > 5 else kwargs.get("is_fallback", False)
-        status = args[6] if len(args) > 6 else kwargs.get("status", "active")
-        return repo_categories.create_category(
-            conn, household_id=household_id, name=name, category_type=category_type,
-            description=description, is_fallback=is_fallback, category_id=category_id,
-            status=status
-        )
-    return repo_categories.create_category(conn, *args, **kwargs)
+
 
 # --- Simplified Account Repository ---
 
@@ -325,27 +311,61 @@ def check_user_in_household(conn, user_id: UUID, household_id: UUID) -> bool:
         )
         return cur.fetchone() is not None
 
-def has_financial_history(conn, account_id: UUID) -> bool:
+def has_financial_history(conn, household_id: UUID, account_id: UUID) -> bool:
     """
     Checks if account has any committed financial transactions, snapshots, schedules, inputs, or statement lines.
+    Enforces household scope in all queries.
     """
     with conn.cursor() as cur:
-        cur.execute("SELECT 1 FROM transactions WHERE account_id = %s LIMIT 1;", (account_id,))
+        cur.execute("SELECT 1 FROM transactions WHERE household_id = %s AND account_id = %s LIMIT 1;", (household_id, account_id))
         if cur.fetchone():
             return True
-        cur.execute("SELECT 1 FROM account_snapshots WHERE account_id = %s LIMIT 1;", (account_id,))
+        cur.execute("SELECT 1 FROM account_snapshots WHERE household_id = %s AND account_id = %s LIMIT 1;", (household_id, account_id))
         if cur.fetchone():
             return True
-        cur.execute("SELECT 1 FROM spending_schedules WHERE account_id = %s LIMIT 1;", (account_id,))
+        cur.execute("SELECT 1 FROM spending_schedules WHERE household_id = %s AND account_id = %s LIMIT 1;", (household_id, account_id))
         if cur.fetchone():
             return True
-        cur.execute("SELECT 1 FROM investment_period_inputs WHERE account_id = %s LIMIT 1;", (account_id,))
+        cur.execute("SELECT 1 FROM investment_period_inputs WHERE household_id = %s AND account_id = %s LIMIT 1;", (household_id, account_id))
         if cur.fetchone():
             return True
-        cur.execute("SELECT 1 FROM statement_lines WHERE account_id = %s LIMIT 1;", (account_id,))
+        cur.execute("SELECT 1 FROM statement_lines WHERE household_id = %s AND account_id = %s LIMIT 1;", (household_id, account_id))
         if cur.fetchone():
             return True
     return False
+
+def check_account_observations_within_lifetime(
+    conn, household_id: UUID, account_id: UUID, new_opened_on: date
+) -> bool:
+    """
+    Validates that no active snapshots or committed transactions fall before new_opened_on.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT 1 FROM account_snapshots
+            WHERE household_id = %s AND account_id = %s AND status = 'active'
+              AND as_of::date < %s
+            LIMIT 1;
+            """,
+            (household_id, account_id, new_opened_on)
+        )
+        if cur.fetchone():
+            return False
+
+        cur.execute(
+            """
+            SELECT 1 FROM transactions
+            WHERE household_id = %s AND account_id = %s AND status = 'committed'
+              AND occurred_on < %s
+            LIMIT 1;
+            """,
+            (household_id, account_id, new_opened_on)
+        )
+        if cur.fetchone():
+            return False
+
+    return True
 
 def update_account(
     conn,
@@ -645,7 +665,7 @@ def cancel_account(
     """
     Cancels an unused account with no financial references.
     """
-    if has_financial_history(conn, account_id):
+    if has_financial_history(conn, household_id, account_id):
         raise ValueError("Cannot cancel account with existing financial references.")
 
     with conn.cursor() as cur:
@@ -719,14 +739,25 @@ def create_account_alias(
         )
 
 def list_account_aliases(conn, account_id: UUID, household_id: Optional[UUID] = None) -> List[Dict[str, Any]]:
-    query = "SELECT id, household_id, account_id, alias_text, normalized_alias, status, row_version, created_at, updated_at FROM account_aliases WHERE account_id = %s"
-    params: List[Any] = [account_id]
     if household_id is not None:
-        query += " AND household_id = %s"
-        params.append(household_id)
-    query += " ORDER BY status ASC, alias_text ASC;"
+        query = """
+            SELECT id, household_id, account_id, alias_text, normalized_alias, status, row_version, created_at, updated_at
+            FROM account_aliases
+            WHERE household_id = %s AND account_id = %s
+            ORDER BY status ASC, alias_text ASC;
+        """
+        params = (household_id, account_id)
+    else:
+        query = """
+            SELECT id, household_id, account_id, alias_text, normalized_alias, status, row_version, created_at, updated_at
+            FROM account_aliases
+            WHERE account_id = %s
+            ORDER BY status ASC, alias_text ASC;
+        """
+        params = (account_id,)
+
     with conn.cursor() as cur:
-        cur.execute(query, tuple(params))
+        cur.execute(query, params)
         rows = cur.fetchall()
         return [
             {
@@ -744,15 +775,20 @@ def list_account_aliases(conn, account_id: UUID, household_id: Optional[UUID] = 
         ]
 
 def get_account_alias(conn, alias_id: UUID, account_id: Optional[UUID] = None, household_id: Optional[UUID] = None) -> Optional[Dict[str, Any]]:
-    query = "SELECT id, household_id, account_id, alias_text, normalized_alias, status, row_version, created_at, updated_at FROM account_aliases WHERE id = %s"
+    where_clauses = ["id = %s"]
     params: List[Any] = [alias_id]
-    if account_id is not None:
-        query += " AND account_id = %s"
-        params.append(account_id)
     if household_id is not None:
-        query += " AND household_id = %s"
+        where_clauses.append("household_id = %s")
         params.append(household_id)
+    if account_id is not None:
+        where_clauses.append("account_id = %s")
+        params.append(account_id)
 
+    query = f"""
+        SELECT id, household_id, account_id, alias_text, normalized_alias, status, row_version, created_at, updated_at
+        FROM account_aliases
+        WHERE {' AND '.join(where_clauses)};
+    """
     with conn.cursor() as cur:
         cur.execute(query, tuple(params))
         row = cur.fetchone()
@@ -771,21 +807,16 @@ def get_account_alias(conn, alias_id: UUID, account_id: Optional[UUID] = None, h
         }
 
 def check_account_alias_exists(conn, account_id: UUID, normalized_alias: str, exclude_alias_id: Optional[UUID] = None, household_id: Optional[UUID] = None) -> bool:
-    query = """
-        SELECT 1 FROM account_aliases
-        WHERE account_id = %s
-          AND normalized_alias = %s
-          AND status = 'active'
-    """
+    where_clauses = ["account_id = %s", "normalized_alias = %s", "status = 'active'"]
     params: List[Any] = [account_id, normalized_alias.strip().lower()]
     if household_id is not None:
-        query += " AND household_id = %s"
+        where_clauses.append("household_id = %s")
         params.append(household_id)
     if exclude_alias_id is not None:
-        query += " AND id <> %s"
+        where_clauses.append("id <> %s")
         params.append(exclude_alias_id)
-    query += " LIMIT 1;"
 
+    query = f"SELECT 1 FROM account_aliases WHERE {' AND '.join(where_clauses)} LIMIT 1;"
     with conn.cursor() as cur:
         cur.execute(query, tuple(params))
         return cur.fetchone() is not None

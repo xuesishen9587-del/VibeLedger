@@ -7,38 +7,14 @@ class FallbackCategoryArchivedError(Exception):
 
 def create_category(
     conn,
-    household_id: Any,
-    name: Any = None,
-    category_type: str = "expense",
+    household_id: UUID,
+    name: str,
+    category_type: str,
     description: Optional[str] = None,
     is_fallback: bool = False,
     category_id: Optional[UUID] = None,
-    status: str = 'active',
-    *args,
-    **kwargs
+    status: str = 'active'
 ) -> Dict[str, Any]:
-    # Check if called as legacy: create_category(conn, category_id, household_id, name, category_type, ...)
-    if (isinstance(household_id, (UUID, str)) and isinstance(name, (UUID, str))) and (
-        (isinstance(household_id, UUID) and isinstance(name, UUID))
-        or (len(str(name)) == 36 and str(name).count('-') == 4)
-        or (category_type not in ("expense", "income") and description in ("expense", "income"))
-    ):
-        passed_cat_id = UUID(str(household_id))
-        passed_hh_id = UUID(str(name))
-        passed_name = str(category_type)
-        passed_type = str(description) if description in ("expense", "income") else "expense"
-        passed_desc = args[0] if len(args) > 0 else kwargs.get("description")
-        return create_category(
-            conn,
-            household_id=passed_hh_id,
-            name=passed_name,
-            category_type=passed_type,
-            description=passed_desc,
-            is_fallback=is_fallback,
-            category_id=passed_cat_id,
-            status=status
-        )
-
     if category_id is None:
         category_id = uuid4()
     elif isinstance(category_id, str):

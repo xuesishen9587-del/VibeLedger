@@ -163,7 +163,7 @@ class TestHouseholdAuthorizationDb(BaseDbTestCase):
             headers={"Authorization": f"Bearer {self.jwt_user_a}"},
             json={
                 "name": "Hacked Account Name",
-                "row_version": 0
+                "expected_version": 0
             }
         )
         self.assertEqual(res.status_code, 404)
@@ -173,7 +173,10 @@ class TestHouseholdAuthorizationDb(BaseDbTestCase):
         res = self.client.patch(
             f"/api/v1/categories/{self.category_b_id}",
             headers={"Authorization": f"Bearer {self.jwt_user_a}"},
-            json={"name": "Hacked Category"}
+            json={
+                "name": "Hacked Category",
+                "expected_version": 0
+            }
         )
         self.assertEqual(res.status_code, 404)
 

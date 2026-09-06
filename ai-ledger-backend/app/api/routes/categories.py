@@ -28,8 +28,7 @@ class PatchCategoryRequest(BaseModel):
     name: Optional[str] = Field(None, min_length=1, max_length=100, description="New category name")
     description: Optional[str] = Field(None, max_length=500, description="Category description")
     status: Optional[str] = Field(None, pattern="^(active|inactive)$", description="Category status")
-    expected_version: Optional[int] = Field(None, ge=0, description="Optimistic concurrency control version")
-    row_version: Optional[int] = Field(None, ge=0, description="Optimistic concurrency control version")
+    expected_version: int = Field(..., ge=0, description="Optimistic concurrency control version")
 
 def _get_audit_actor_info(actor: Dict[str, Any]) -> tuple[str, Optional[UUID], Optional[UUID]]:
     auth_mode = actor.get("auth_mode")
@@ -73,7 +72,7 @@ def list_categories(
         category_type=type,
         status=status
     )
-    return {"items": [_format_category(c) for c in categories]}
+    return {"items": [_format_category(c) for c in categories], "next_cursor": None}
 
 @router.get("/{category_id}", summary="Get Category")
 def get_category(
@@ -151,8 +150,8 @@ def patch_category(
     if not existing:
         raise CategoryResourceNotFoundError(category_id)
 
-    expected_ver = payload.expected_version if payload.expected_version is not None else payload.row_version
-    if expected_ver is not None and existing["row_version"] != expected_ver:
+    expected_ver = payload.expected_version
+    if existing["row_version"] != expected_ver:
         raise RowVersionConflictError()
 
     clean_name = payload.name.strip() if payload.name is not None else None
@@ -208,51 +207,5 @@ def patch_category(
         )
 
     return _format_category(updated)
-
-@router.post("/{category_id}/deactivate", summary="Deactivate Category")
-def deactivate_category(
-    category_id: UUID,
-    device: Dict[str, Any] = Depends(get_authenticated_actor),
-    conn: Any = Depends(get_db_connection)
-) -> Dict[str, Any]:
-    """
-    Deactivates a category. Enforces that fallback categories cannot be archived.
-    """
-    household_id = device["household_id"]
-    existing = categories_repo.get_category(conn, category_id, household_id)
-    if not existing:
-        raise CategoryResourceNotFoundError(category_id)
-
-    if existing.get("is_fallback"):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Fallback category cannot be archived."
-        )
-
-    try:
-        with transaction(conn):
-            deactivated = categories_repo.deactivate_category(
-                conn, household_id=household_id, category_id=category_id
-            )
-            if not deactivated:
-                raise CategoryResourceNotFoundError(category_id)
-
-            actor_type, actor_user_id, actor_device_id = _get_audit_actor_info(device)
-            audit_repo.insert_audit_event(
-                conn=conn,
-                household_id=household_id,
-                actor_type=actor_type,
-                entity_type="category",
-                entity_id=category_id,
-                action="update",
-                actor_user_id=actor_user_id,
-                actor_device_id=actor_device_id,
-                before_data={"status": existing["status"]},
-                after_data={"status": "inactive"}
-            )
-    except categories_repo.FallbackCategoryArchivedError as e:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
-
-    return _format_category(deactivated)
 
 

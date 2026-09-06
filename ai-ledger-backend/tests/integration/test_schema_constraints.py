@@ -4,7 +4,7 @@ from datetime import date
 from decimal import Decimal
 import psycopg2
 from app.db import transaction
-from app.repositories import accounts, audit
+from app.repositories import accounts, audit, categories
 try:
     from tests.support.db_helper import BaseDbTestCase
 except ModuleNotFoundError:
@@ -56,7 +56,7 @@ class TestSchemaConstraints(BaseDbTestCase):
         accounts.add_household_member(self.conn, h_id, u_id, "owner")
         accounts.create_device(self.conn, d_id, u_id, "Dev_FK", "ios_shortcuts", b"hash_fk", household_id=h_id)
         accounts.create_account(self.conn, acc_id, h_id, "Card_FK", "credit", "CNY", balance_scope="Credit Cards")
-        accounts.create_category(self.conn, cat_id, h_id, "Cat_FK", "expense")
+        categories.create_category(self.conn, household_id=h_id, name="Cat_FK", category_type="expense", category_id=cat_id)
 
         with self.conn.cursor() as cur:
             cur.execute("""
@@ -152,7 +152,7 @@ class TestSchemaConstraints(BaseDbTestCase):
 
         cat1_id = uuid.uuid4()
         cat2_id = uuid.uuid4()
-        accounts.create_category(self.conn, cat1_id, h_id, "Dining", "expense")
+        categories.create_category(self.conn, household_id=h_id, name="Dining", category_type="expense", category_id=cat1_id)
         self.conn.commit()
 
         with self.conn.cursor() as cur:

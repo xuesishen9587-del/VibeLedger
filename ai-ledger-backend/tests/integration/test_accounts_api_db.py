@@ -434,9 +434,28 @@ class TestAccountsApiDb(BaseDbTestCase):
         self.assertIsNone(res_reopen.json()["closed_on"])
         row_v = res_reopen.json()["row_version"]
 
-        # Cancel unused account
-        res_cancel = self.client.post(f"/api/v1/accounts/{acc_id}/cancel", json={
+        # Attempt to cancel account with history -> 400 Bad Request
+        res_bad_cancel = self.client.post(f"/api/v1/accounts/{acc_id}/cancel", json={
             "expected_version": row_v,
+            "reason": "Not needed"
+        }, headers=self.headers)
+        self.assertEqual(res_bad_cancel.status_code, 400)
+        self.assertIn("financial history", res_bad_cancel.json()["detail"])
+
+        # Cancel truly unused account -> 200 OK
+        res_unused = self.client.post("/api/v1/accounts", json={
+            "name": "Truly Unused Account",
+            "balance_scope": "Testing",
+            "account_type": "cash",
+            "currency": "CNY",
+            "opened_on": "2026-01-01"
+        }, headers=self.headers)
+        self.assertEqual(res_unused.status_code, 201)
+        unused_id = UUID(res_unused.json()["id"])
+        unused_v = res_unused.json()["row_version"]
+
+        res_cancel = self.client.post(f"/api/v1/accounts/{unused_id}/cancel", json={
+            "expected_version": unused_v,
             "reason": "Not needed"
         }, headers=self.headers)
         self.assertEqual(res_cancel.status_code, 200)

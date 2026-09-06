@@ -30,8 +30,8 @@ The following patterns from these legacy documents are explicitly obsolete in th
 |---|---|---|
 | `accounts.current_balance` as source of truth | Mutable scalar loses dated evidence | Latest active dated balance observation; no account_state projection |
 | Generic `adjustment` transaction type | Mixes unrelated meanings | Balance observations independent of spending; no balancing transactions |
-| Investment adjustment mapped into income | Distorts spending/income reporting | Gain derived from observation pairs with explicitly complete capital-flow inputs |
-| Future installment transactions created immediately | Confuses spending and debt | Full purchase-date spending once, total debt separately observed; no schedules |
+| Investment adjustment mapped into income | Distorts spending/income reporting | Gain derived from observation pairs; missing flows default to zero for labelled estimates, distinct from user-confirmed gains |
+| Future installment transactions created immediately | Confuses spending and debt | Monthly schedules record only due periods; total debt remains separately observed |
 | `TABLE_SUFFIX` for environment isolation | Pollutes table names and DDL | Independent database / schema configuration via `DATABASE_URL` / `DB_SCHEMA` |
 | Startup `database.init_db()` DDL migration | Uncontrolled migration on app boot | Versioned standalone migration scripts |
 | Dashboard direct PostgreSQL access | Bypasses business rules and duplicates logic | Dashboard consumes Backend REST APIs exclusively |

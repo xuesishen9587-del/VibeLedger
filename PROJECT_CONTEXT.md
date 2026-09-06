@@ -1,7 +1,9 @@
 # VibeLedger project handoff
 
-Updated: **2026-09-05**. Architecture baseline reviewed on
+Updated: **2026-09-06**. Architecture baseline reviewed on
 `refactor/astra-simplify-architecture` at `3ac0ed6`.
+The accepted simplification is committed at `83e479a`; this focused documentation
+revision adds the household's schedule, statement, metadata-review and gain requirements.
 
 ## Current state
 
@@ -33,29 +35,35 @@ The old “frozen” Phase 12.5 documents are superseded, available in Git at `3
 Keep reliable screenshot expense capture and independent dated account balances.
 Wealth comes from the latest observed assets and debts, with freshness and coverage
 visible. Spending does not move balances; balance updates do not invent spending.
-Investment gain is the change in value minus explicitly known net additions.
-Unknown flows mean unknown gains, without blocking wealth updates. Keep FastAPI,
-Streamlit, Supabase, device tokens/receipts, Decimal, household auth and small change
-history. Remove statements, reconciliation, balance projections, scheduled installments,
-generic links and the separate audit/work-queue user interfaces.
+Investment gain is the change in value minus net additions; absent flow inputs mean
+zero assumed flow and an estimated gain, distinct from user-confirmed gain. Review
+surfaces unusual estimates and saved expenses with unknown accounts or uncertain
+Other categories. Support monthly recurring/installment spending and selected-account
+statement import for batch spending plus a dated balance. Keep FastAPI, Streamlit,
+Supabase, device tokens/receipts, Decimal, household auth and small change history.
+Remove general reconciliation, balance projections, generic links and separate
+audit/work-queue user interfaces.
 
 ## Next implementation work
 
 Start **S0** in the implementation plan: preserve accepted expense wire fixtures and
 the actual Shortcut behavior, record a safe runnable baseline, and specify/test the
 interrupted pending-key cancellation race. Then S1 fresh schema/identity, S2 spending,
-S3 balances/wealth, S4 investment inputs/Dashboard/login, S5 removal and staging acceptance.
+metadata review and monthly schedules, S3 balances/wealth and statement import,
+S4 investment estimates/confirmation/Dashboard/login, S5 removal and staging acceptance.
 S6 production cutover is later and separately authorized. Do not implement the old
 proposed `0010_asset_model_freeze.sql` first or rewrite applied migration bytes.
 
-Consumer choices are specified, not blockers: last reported wealth, purchase-date
-installment spending, editable seeded categories, and no statement import. If future
-usage shows those do not fit, revise that product decision before adding its engine.
+Consumer choices are specified, not blockers: last reported wealth, due-period
+installment spending, editable seeded categories, statement preview before Save,
+and estimated gains with an initial adjustable 20% unusual-change threshold.
+Monthly days beyond a month's length use its last day. The four requested additions
+do not reintroduce a reconciliation engine or projected account balances.
 
 ## Workspace and operating notes
 
 Use PowerShell 7 (`pwsh.exe`) and UTF-8 on Windows. Never run legacy remote-dependent
 tests or destructive test cleanup against inherited credentials. Use a disposable
 local PostgreSQL test database/schema and the existing safety harness.
-The untracked `ai-ledger-backend/cloudbuild.phase12.yaml` predates this review and
-has been left untouched. Do not stage it accidentally with documentation work.
+`ai-ledger-backend/cloudbuild.phase12.yaml` predates this revision and remains
+untouched by this documentation work.

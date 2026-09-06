@@ -1,6 +1,6 @@
 # VibeLedger: household wealth and spending
 
-Status: **Simplified target, 2026-09-05; implementation pending.** This replaces the
+Status: **Simplified target, revised 2026-09-06; implementation pending.** This replaces the
 Phase 12.5 architecture. The existing staging implementation is the starting point.
 Read [the implementation contract](docs/architecture/CONTRACTS.md) and
 [transition and acceptance plan](docs/architecture/IMPLEMENTATION_PLAN.md) next.
@@ -13,7 +13,7 @@ recorded without a conversation. Periodic account-overview screenshots or manual
 balance updates keep the wealth picture useful.
 
 The system does not promise a complete bank ledger, live balances, audited cash
-flow, portfolio accounting, or recovery of expenses never captured. Show these
+flow, portfolio accounting, or recovery of expenses without capture/import evidence. Show these
 limits through dates and coverage, rather than filling gaps with invented
 transactions, zero balances, or investment profits.
 
@@ -25,7 +25,9 @@ transactions, zero balances, or investment profits.
 An expense never changes a balance observation. A new balance never creates an
 expense, income, transfer, opening-balance transaction, or balancing adjustment.
 There is no calculated account balance to reconcile. Investment gains are a
-separate calculation between observations with explicitly known capital flows.
+separate calculation between observations, using confirmed flows when supplied and
+an explicitly labelled zero-flow estimate otherwise. Statements can supply both
+spending and a dated balance, without making one determine the other.
 
 ```mermaid
 flowchart LR
@@ -36,7 +38,7 @@ flowchart LR
     API --> Spending[Spending records]
     API --> Balances[Dated account balances]
     Balances --> Wealth[Assets, debts, net worth and risk]
-    Balances --> Gains[Investment gains with known flows]
+    Balances --> Gains[Estimated or confirmed investment gains]
     Spending --> Habits[Spending composition and trends]
 ```
 
@@ -72,6 +74,15 @@ show “payment account unknown” in detail. Never pick a default account or gu
 among aliases. This also allows spending before balances are initialized.
 A low-confidence category goes to visible **Other**, editable later, without blocking
 an otherwise clear purchase.
+
+These saved expenses remain included in spending immediately. Show **Missing account**
+and **Category uncertain** badges, counts and filters in Spending and the same records
+in Review. A single record can carry both reasons. Choosing a category explicitly
+(including Other) resolves category uncertainty; choosing an account resolves the
+account flag. “Leave account unknown” acknowledges the omission without inventing an
+account: it leaves the Missing account filter available but removes that review task.
+Do not confuse an intentionally chosen Other with an AI uncertainty fallback. Corrections
+edit the existing transaction with version checks and history, never create another expense.
 
 Use the receipt's business date when readable. If no date is shown, a clearly current
 successful-payment screen may use the capture's local date with `date_source = capture_date`.
@@ -132,12 +143,42 @@ The UI accepts a positive “Amount owed”; storage is negative. Explicit card
 overpayments are positive; overdrafts are negative. Loans use outstanding principal,
 excluding future interest. No statement calendar, due calculation, or reminder engine.
 
-### C. Understand investment gains
+### C. Import a statement for a selected account
+
+Enable **Statement import** per account in Settings. From Spending or Wealth, select
+that account and upload its PDF. Show one preview containing spending rows and an
+optional dated closing balance. The user resolves ambiguous amounts/dates/types and
+possible duplicates, then saves the selected spending and balance together. They may
+explicitly exclude an unusable balance and still import spending, or import only the
+balance. The screen reports exactly what was saved, linked to an existing record, or skipped.
+
+The statement can backfill missed spending. It never calculates a balance from the
+rows, forces spending to match a total, or creates adjustments. Transfers, repayments,
+opening balances and investment trades are excluded. Refunds are separate refund
+records; uncertain categories use flagged Other. Fees are ordinary expenses. A known
+statement account supplies payment metadata; users need not select it on every row.
+
+Repeat files and overlapping statements must not silently duplicate expenses, including
+those already captured by Shortcut or recorded by a schedule. Exact bank transaction
+identifiers can establish identity; other plausible duplicates need one explicit
+link/skip/create choice in the preview. Linking preserves the existing record; a
+different amount/date is an explicit correction, never an automatic overwrite.
+
+A statement's balance is an observation **as of its own date**, not the upload date.
+An old statement never replaces a newer current observation. Credit statements showing
+only this month's bill cannot establish total debt; leave balance import unselected
+unless its full scope is clear. Completeness describes the imported document/selection,
+not all household spending. No statement matching engine, residual thresholds, monthly
+close, settlement-leg enrichment or investment-flow inference is reintroduced.
+
+### D. Understand investment gains
 
 An investment account is a total-value bucket, not a security position. At its
 balance update ask optionally: **“Since the previous update, how much money did
-you add or take out?”** Offer no movement, enter totals, or not sure. Never preselect
-zero. Save the balance even if this answer is unknown.
+you add or take out?”** Offer confirm no movement, enter totals, or leave estimated.
+If no complete flow information is supplied, use zero additions and withdrawals for
+an **estimated** gain. This is an assumption, never a claim that no transfers occurred.
+Save the balance regardless of whether the user confirms the interval.
 
 For consecutive valid observations of the same investment account and currency:
 
@@ -146,8 +187,9 @@ gain = closing balance - opening balance - money added + money taken out
 ```
 
 100,000 -> 160,000 with 50,000 added means a gain of 10,000. Without knowing the
-addition, show “value increased 60,000; investment gain unknown”. Absence of recorded
-transfers is never evidence of zero flows.
+addition, show “estimated gain 60,000; assumes no money added or withdrawn”. Once the
+user confirms 50,000 added and zero withdrawn, show “confirmed gain 10,000”. Explicit
+confirmation of zero flows also produces confirmed gain; merely omitting the fields does not.
 
 “Taken out” includes distributions paid outside the account. Reinvested income and
 internal trades are already inside its value. Internal investment fees reduce its
@@ -160,17 +202,29 @@ completeness. Daily/lifetime/provider earnings are not substitutes. The initial
 release does not aggregate incompatible provider metrics. No positions, lots,
 cost basis, realized/unrealized split, return percentage, time-weighted return, or IRR.
 
-Store flow inputs linked to opening and closing observation IDs; calculate gains
+For estimated intervals, surface an **Unusual investment change** in Review when
+`abs(closing - opening) >= 20% * abs(opening)`. If opening is zero, any nonzero closing
+value triggers review; zero-to-zero does not. This is an initial adjustable household
+threshold, applied to the actual interval without annualizing or inferring risk.
+Show dates, values, assumed flows and the estimated gain. The user confirms no movement
+or enters actual additions/withdrawals. A confirmed interval needs no further unusual-
+change prompt. Leaving it estimated keeps the review item; it never blocks wealth
+updates or spending. Small unflagged changes remain estimates too.
+
+Store confirmed flow inputs linked to opening and closing observation IDs; calculate gains
 on read. Correcting, voiding, or inserting an observation between the pair invalidates
-that pairing for reports. Keep old inputs in history; new intervals are unknown
-until explicitly supplied. Never copy or apportion flows automatically.
+that pairing for reports. Keep old inputs in history; new intervals return to zero-flow
+estimates and rerun the unusual-change rule. Never copy/apportion confirmed flows.
 
 Show actual interval dates per account. A filtered sum includes only whole eligible
 intervals contained in that range; list gaps, boundary-crossing intervals, and
-accounts without known gains. Never prorate calendar-month performance. Group by
+accounts without two observations. Never prorate calendar-month performance. Group by
 native currency. An optional reporting-currency estimate uses each interval's
 closing-date rate, labelled translated account gains, excluding currency revaluation
-of household assets. A partial sum is never “total household investment gain”.
+of household assets. Show confirmed gains, estimated gains and their combined amount
+separately; a combined amount containing estimates is labelled estimated, never confirmed.
+Missing observations/FX and uncovered ranges still make totals partial. The first
+observation alone has unavailable gain, rather than an invented opening value of zero.
 
 ## 3. Records and reporting rules
 
@@ -224,17 +278,35 @@ No fuzzy refund matching. Original category edits do not silently alter refunds;
 they remain individually editable. A purchase cannot be voided or reduced below
 active refunds until those refunds are explicitly corrected or unlinked.
 
-#### Installments: purchase-date spending
+#### Recurring and installment spending schedules
 
-Record the full purchase price once on the purchase date. Subsequent principal
-repayments and monthly bill lines are not new spending. A separately identified
-financing fee can be recorded when charged. A screen showing only “1,000 this month”
-cannot establish a 12,000 purchase: require the total or reject the repayment screen.
-Pre-start purchases do not generate spending when their principal is repaid later.
+In Spending, **Add schedule** accepts recurring/installment, amount per period,
+currency, number of periods, first month, day of month, merchant/description, category,
+and optional payment account. Installments require a finite positive count; recurring
+expenses may have a count or continue until paused/cancelled. Preview the dates and
+amounts before Save. Days 29–31 clamp to the month's last day, returning to the requested
+day in longer months. Dates follow the household timezone.
 
-This deliberately replaces recognition of each billed installment. It answers
-“what did we buy?” and removes schedule/statement dependencies. Debt observations
-must include remaining installment principal. Monthly repayment forecasting is absent.
+A user-authorized schedule records one expense on each due date. A 12-period plan
+of 1,000 records 1,000 each month, **not 12,000 upfront plus 12 more expenses**. Future
+periods are a preview, excluded from actual spending; no future financial transactions.
+Scheduled expenses are labelled so the user can skip a period, correct an amount,
+pause or stop the schedule. Paused periods are skipped, not charged on resume.
+Fixed fees included in the per-period amount are already spending and cannot be added
+again. This monthly spending convention supersedes the previous purchase-date-only rule.
+
+Schedule creation does not change wealth or calculate debt. Card/loan observations
+still include all remaining principal as reported. The schedule is not a payment
+instruction or a credit-billing/loan amortization engine. Ordinary card repayments
+are excluded from spending; the scheduled purchase allocation is recorded once.
+
+An installment purchase screenshot without an established period association goes to
+review with a Dashboard schedule action; do not silently book its full total and a
+schedule. A user may explicitly keep a one-off full purchase instead. If switching
+that purchase to a schedule, atomically void the identified full-price expense and
+create the schedule after preview; linked refunds must be resolved first. Statements,
+Shortcut captures and scheduled periods representing the same expense must link to
+one transaction, never accumulate copies. CONTRACTS specifies cross-source identity.
 
 ### Categories
 
@@ -316,9 +388,9 @@ Keep Streamlit and its REST client. Four pages suffice:
 | Page | Contents and actions |
 |---|---|
 | Wealth | Last reported assets/debts/net worth, dated accounts, risk, history; Update balances; Investments subsection with interval gains and flow inputs |
-| Spending | Month/category/merchant trends, gross/refunds/net, transaction list; add, edit, refund, void; optional income |
-| Review | Only uncertain captures; one editable form/table; confirm or dismiss |
-| Settings | Accounts, non-overlap scope, aliases, risk, categories, devices, sign out |
+| Spending | Trends and transactions; missing-account/uncertain-category filters; add/edit/refund/void; schedules with dates and period counts; statement import; optional income |
+| Review | Drafts/import previews awaiting Save; separately labelled already-saved metadata corrections and unusual estimated investment gains |
+| Settings | Accounts, scope, aliases, risk, statement-import toggle, categories, investment review threshold, devices, sign out |
 
 History is a panel on each record, not an Audit center. No batches, candidates,
 adjustments, correction-preview tokens, raw JWTs, or engine versions in daily UI.
@@ -334,27 +406,31 @@ Supabase PostgreSQL. Dashboard has no database credentials; private financial ta
 are not exposed through the browser Data API. No worker, queue broker, Redis, event
 bus, scheduled reconciliation, or portfolio service. AI runs inside HTTP handling,
 outside database locks, with durable receipts protecting interruption recovery.
+One authenticated Cloud Scheduler daily invocation materializes due spending periods
+in the existing backend; catch-up on Dashboard use covers delayed/missed runs. No
+additional worker service. This records expenses only, never initiates actual payments.
 
 Store structured facts and minimal history; discard screenshots when processing
 finishes. Never persist images, base64, raw model responses, passwords, tokens, or
-full prompts in receipts, audit, logs, or errors. Removing statements removes PDF
-and password handling from the active runtime.
+full prompts in receipts, audit, logs, or errors. Statement PDFs use temporary storage
+only during parsing and are deleted in success/failure cleanup; passwords stay in memory.
+Keep sanitized extracted rows and document hashes for review and duplicate protection.
 
 ## 5. Deliberate tradeoffs
 
 | Previous approach | Target decision and effect |
 |---|---|
 | Projected balances | Last observations only; wealth ages visibly, while missing transfers cannot fabricate a supposedly calibrated balance |
-| Statements and reconciliation | Remove; no automatic backfill of missed spending, monthly closing, or residual adjustments |
+| Statements and reconciliation | Retain focused spending/balance import with preview and duplicate checks; remove ledger reconciliation, monthly closing and residual adjustments |
 | Ordinary, credit, investment snapshot pipelines | One observation path; type-specific interpretation is validation |
-| Persisted derived P&L and matched transfer legs | Explicit interval flow totals; unknown gains do not block balance updates |
-| Installment schedules and billing recognition | Full purchase-date spending once; debt separately observed; no repayment forecast |
+| Persisted derived P&L and matched transfer legs | Derived zero-flow estimates or user-confirmed flow totals; unusual estimates appear in Review |
+| Installment schedules and billing recognition | Simple monthly spending schedules; no statement-dependent billing engine or debt projection |
 | Generic links and correction preview/commit | One refund link and one version-checked edit/void with history |
-| Two review lifecycles | One capture draft lifecycle |
+| Two reconciliation review lifecycles | Draft/import review plus derived follow-ups on saved expenses and estimated gains; no general work-order engine |
 | Immutable canonical categories | Editable seeded vocabulary and fallback Other |
 | Audit center and universal financial workflow | Minimal change history and durable receipts remain to solve real mistakes/retries |
 
-These are implementation choices, not claims of delivered behavior. No product
-question blocks this specification. If automatic missing-expense import, monthly
-installment budgeting, or live projected balances later become necessary, reopen
-that workflow with evidence of need. Do not retain the old engines as hidden prerequisites.
+These are implementation choices, not claims of delivered behavior. The 2026-09-06
+requirements add monthly spending schedules, focused statement import, saved-expense
+review and zero-flow gain estimates. No product question blocks implementation.
+Live projected balances and general reconciliation remain outside scope.

@@ -8,10 +8,13 @@ The FastAPI backend, PostgreSQL data layer and Streamlit REST Dashboard already
 exist. Staging runtime and the real iPhone Expense Shortcut have passed acceptance,
 as reported in the household handoff. Production fresh cutover has not happened.
 
-The **simplified architecture specified on 2026-09-05 is not yet implemented**.
+The **simplified architecture revised on 2026-09-06 is not yet implemented**.
 It keeps the working one-request expense experience and replaces projected account
 balances and general reconciliation with dated balance observations. Spending and
-wealth are independent; investment gains require known deposits and withdrawals.
+wealth are independent. Monthly spending schedules and selected-account statement
+imports feed these records. Review exposes missing accounts, uncertain categories
+and unusual investment changes. Missing capital flows default to zero for estimated
+gains; user-confirmed gains are labelled separately.
 
 Start with [the architecture index](docs/architecture/README.md). Its three documents
 cover [product rules](TARGET_DOMAIN_MODEL.md), [schema and APIs](docs/architecture/CONTRACTS.md),

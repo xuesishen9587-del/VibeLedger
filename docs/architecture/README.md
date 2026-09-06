@@ -1,6 +1,6 @@
 # VibeLedger architecture
 
-The **2026-09-05 simplified target** replaces the previous Phase 12.5 design.
+The **simplified target, revised 2026-09-06**, replaces the previous Phase 12.5 design.
 Implementation has not yet been changed to match it. The accepted staging backend,
 REST Dashboard and real iPhone expense experience provide the implementation base.
 
@@ -21,8 +21,12 @@ domain contract. [The staging runbook](../deployment/STAGING_DEPLOYMENT.md) reco
 the previous accepted deployment and is not yet the simplified deployment procedure.
 
 The core model is independent spending records and dated account balance observations.
-Investment gains require explicitly known capital flows. There is no projected
-account balance, statement/reconciliation engine, installment schedule, or monthly close.
+Monthly recurring/installment schedules record due spending. Selected-account
+statement imports batch-record spending and optionally save the reported balance.
+Missing accounts and uncertain Other categories remain saved and easy to review.
+Missing investment flows default to zero for estimated gains; unusual estimates
+appear in Review, and user-confirmed gains remain distinct. There is no projected
+account balance, general reconciliation engine, or monthly close.
 Keep FastAPI, Streamlit, PostgreSQL, device idempotency, Decimal math and household auth.
 
 ## Documentation consolidation

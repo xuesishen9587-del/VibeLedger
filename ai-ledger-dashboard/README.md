@@ -18,8 +18,11 @@ VibeLedger Dashboard is a presentation-layer Streamlit frontend that communicate
 
 The current code implements the previous architecture's eight-page interface. The
 [simplified target](../docs/architecture/README.md) is pending implementation: four
-pages (Wealth, Spending, Review, Settings), dated balances, simple record edits,
-and consumer login. Existing token configuration below describes current code only.
+pages (Wealth, Spending, Review, Settings), dated balances, monthly spending schedules,
+selected-account statement import, simple record edits and consumer login. Review
+includes saved expenses with missing accounts or uncertain categories and unusual
+estimated gains; confirmed gains are labelled separately. Existing token configuration
+below describes current code only.
 
 ---
 

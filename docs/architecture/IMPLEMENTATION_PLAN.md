@@ -1,12 +1,17 @@
 # Transition and acceptance
 
-Status: **Implementation-ready plan, 2026-09-05. No deployment is authorized by this
+Status: **Implementation-ready plan, revised 2026-09-06. No deployment is authorized by this
 document alone.** The architecture review changes documentation only. Production
 fresh cutover remains future work after the household accepts the simplified system.
 
 Read [product rules](../../TARGET_DOMAIN_MODEL.md) and [CONTRACTS](CONTRACTS.md) first.
 This plan replaces the previous Phase 0–14 and Phase 12.5 implementation/test plans.
 Historical acceptance establishes a useful baseline; it does not certify the new design.
+
+This revision preserves the accepted simplified direction and adds four requirements:
+monthly recurring/installment spending, selected-account statement import, review of
+saved expenses with incomplete metadata, and zero-flow estimated investment gains
+with unusual-change review. It supersedes the 2026-09-05 exclusions for these workflows.
 
 ## 1. What was reviewed and what exists
 
@@ -21,8 +26,8 @@ This review did not independently rerun those deployed acceptances.
 | `migrations/0001_*.sql` through `0009_*.sql` | 20 application tables plus migration metadata; observed balances coexist with mutable account_state, seven transaction types, links, two snapshot tables, stored P&L, installment schedules and reconciliation evidence/candidates. |
 | `app/services/expense_service.py`, `gemini_service.py`, routes `expenses.py`/`ingestion.py` | Useful image validation, device/key receipts, saved responses, 0.85 field gates, confirm/revise/reject, and typed Gemini transport. Expense writes also invoke the ledger, FX settlement and installment plans; the route holds a transaction around extraction. Keep the interface, simplify internals and shorten locks. |
 | `app/services/ledger_service.py`, `snapshot_service.py` | Expenses and adjustments mutate projections; snapshots anchor historical reconstruction and drive reconciliation. Those dependencies disappear when observed wealth and captured spending are independent. |
-| `app/services/statement_service.py`, `reconciliation_service.py`, `app/domain/reconciliation/` | Matching, candidate resolution, residual thresholds, transfer/refund/settlement and installment handling serve a much broader completeness promise than the household needs. Remove the whole active path rather than hiding it behind the Dashboard. |
-| `app/services/investment_service.py`, `repositories/investments.py` | Investment snapshots, inferred committed transfer totals and persisted period gains share reconciliation/projection responsibilities. Retain Decimal formula knowledge; require explicit complete flow inputs and calculate gains from valid pairs. |
+| `app/services/statement_service.py`, `reconciliation_service.py`, `app/domain/reconciliation/` | Retain useful PDF validation, extraction and cleanup code for focused import. Replace orchestration; discard scoring, residuals, settlement correction and generic candidate resolution. |
+| `app/services/investment_service.py`, `repositories/investments.py` | Retain Decimal formula knowledge; derive zero-flow estimates or gains using explicitly confirmed complete flows. Do not retain balance projections or inferred-transfer confirmation. |
 | `app/services/dashboard_service.py` | Wealth reads ledger_balance and spending can use settlement legs. Rewrite report sources; preserve the useful separation of gains from household income. |
 | `ai-ledger-dashboard/app.py`, `api_client.py`, `dashboard_controller.py` | Dashboard already uses REST, not direct SQL. Eight navigation destinations and extensive candidate/correction UI expose engine structure. Retain framework/client/error handling and replace with four user pages. |
 | `app/auth/`, `api/deps.py`, `tests/integration/test_household_authorization_db.py` | Existing device and browser auth boundaries are valuable. Ingestion actions currently require device auth, even though Dashboard has browser-auth review UI; the new contract makes browser household review explicit. |
@@ -47,11 +52,12 @@ Paths below are relative to `ai-ledger-backend/` unless prefixed otherwise.
 | `snapshot_service.py`, `investment_service.py`, snapshots repository | Replace with small balance and flow-input use cases. Reuse validation, not projection/reconciliation orchestration. |
 | `dashboard_service.py`, reference FX adapter | Refactor to observation and original-expense queries, freshness/completeness and dated reference quotes. |
 | `audit.py` repository | Retain insert-only history pattern; reduce actions/metadata and scope reads to record detail. |
-| `statement_service.py`, `statement_parser.py`, `reconciliation_service.py`, `app/domain/reconciliation/` | Remove from target imports/routes/package/tests when replacement slice is complete. No statement background path or PDF dependencies. |
+| `statement_service.py`, `statement_parser.py` | Refactor into bounded account-scoped PDF import: typed extraction, one preview, duplicate-safe spending and optional snapshot. Retain temporary-file/password safety; keep only necessary PDF dependencies. |
+| `reconciliation_service.py`, `app/domain/reconciliation/` | Remove from active package/imports/tests when focused import is covered; no matching scores, balance residuals or candidate engine. |
 | `ledger_service.py`, legacy transaction effect functions | Remove once transaction CRUD no longer calls them. Do not retain a no-op projection engine. |
-| Credit-card/installment services, repositories, routes and domain schedules | Remove; credit becomes a signed balance and installments a purchase-date expense. |
-| `work_queue_service.py`, work queue repository/route | Replace with a simple scoped ingestion-request list; no new work table/service. |
-| `investment_pnl_periods`, `account_state`, `credit_card_snapshots`, `transaction_links`, installment/reconciliation/statement tables | Omit from fresh target schema. Do not keep dual financial truths. |
+| Credit-card/installment services, repositories and routes | Remove billing/debt/schedule reconciliation; replace with spending_schedules and due occurrences. Reuse small tested date/money helpers where applicable. Credit remains a signed observation. |
+| `work_queue_service.py`, work queue repository/route | Replace with GET /review projections over drafts, saved metadata flags, pending schedule decisions and unusual estimated gains; no work-order table. |
+| `investment_pnl_periods`, `account_state`, `credit_card_snapshots`, `transaction_links`, old installment/reconciliation tables | Omit from fresh schema. Rebuild statement_lines as minimal import evidence and use the new spending schedule/occurrence contract, not the old table definitions. |
 | `ai-ledger-dashboard/app.py`, `api_client.py`, `time_utils.py` | Retain Streamlit/REST foundation; split pages into small modules while replacing their behavior. |
 | `ai-ledger-dashboard/dashboard_controller.py` | Remove candidate-formatting/reconciliation helpers; no reason to port them to the new Review page. |
 | Backend root `main.py`, `database.py`, `db_migration.py`, legacy `Dockerfile`; Dashboard `src/streamlit_app.py` | Legacy runtime entry points; exclude from simplified image, remove from active tree after replacement acceptance. Git preserves history. |
@@ -110,18 +116,18 @@ Exit: accepted one-off wire fixtures and baseline are reviewable; no runtime cha
 
 ### S1 — Fresh database, identities and settings
 
-* Add the 13-table baseline and strict lineage selection, migrations/readiness tests,
+* Add the 16-table baseline and strict lineage selection, migrations/readiness tests,
   least-privilege runtime role setup and explicit idempotent seed script.
 * Retain users/membership/devices; implement account/category scope, risk, fallback,
   lifetime and audit constraints. Seed 15 expense categories and 3 income categories
   with the descriptions in TARGET_DOMAIN_MODEL.
-* Add request receipt infrastructure for device/browser scopes, version checks and
+* Add request receipt infrastructure for device/browser/internal-system scopes, version checks and
   short household-scoped write lock. Avoid exposing it as a generic product workflow.
 
 Exit: DB-01, SEC-01, HIST-01 and account/category portions of UI-01 pass locally.
 Do not modify accepted staging/production identities or reuse device tokens across schemas.
 
-### S2 — Spending capture, recovery and edits
+### S2 — Spending capture, metadata review and monthly schedules
 
 * Retain the expense endpoint body/normal result, simplify its financial write, keep
   natural-language revisions and deterministic validation.
@@ -129,13 +135,18 @@ Do not modify accepted staging/production identities or reuse device tokens acro
   nonblocking metadata where the purchase is clear. Add non-expense intent guards.
 * Implement manual transactions, linked/unlinked refunds, one-step edit/void, frozen
   original-currency reporting conversion and its missing-rate path.
-* Replace installment plans with full purchase spending; remove ledger calls and
-  from/to settlement legs from this use case.
+* Add missing-account acknowledgement and category uncertainty provenance, Review
+  counts/filters and version-checked corrections without re-ingestion.
+* Implement schedule creation/preview, period count/amount/monthly day, due-only
+  materialization, pause/resume/cancel/skip and cross-source occurrence identity.
+  Remove ledger calls and settlement legs. Replace upfront-plus-schedule duplication
+  with explicit one-off versus scheduled recognition and atomic conversion when requested.
 
-Exit: CAP-01 through CAP-05, SPEND-01, FX-01, SEC-01 and HIST-01 pass. A real-device
+Exit: CAP-01 through CAP-05, SPEND-01, META-01, SCHED-01, SCHED-02, FX-01,
+SEC-01 and HIST-01 pass. A real-device
 smoke test on a new isolated service may begin, but does not replace final acceptance.
 
-### S3 — Balance updates, wealth and risk
+### S3 — Balance updates, wealth, risk and statement import
 
 * Implement the single snapshot path, manual multi-account Save, correction/void and
   version/head checks; no reconciliation batch is created.
@@ -143,21 +154,28 @@ smoke test on a new isolated service may begin, but does not replace final accep
   validation and explicit unknown rows. Add all-or-nothing capture confirmation.
 * Replace overview/freshness reads with last observations, account lifetimes and
   honest completeness; implement risk and step history queries.
+* Add per-account import enablement, bounded PDF parsing/cleanup, one import preview,
+  editable line decisions and optional closing observation. Deduplicate repeat files,
+  overlapping periods, Shortcut expenses and schedule occurrences at preview and commit.
+  Reuse the receipt lifecycle; do not port the old reconciliation engine.
 
-Exit: BAL-01 through BAL-05 and WEALTH-01 pass, independent of spending completeness.
+Exit: BAL-01 through BAL-05, WEALTH-01, STMT-01, STMT-02 and STMT-03 pass,
+independent of whether all household spending has been captured.
 
 ### S4 — Investment inputs and complete Dashboard
 
-* Implement explicit interval flow inputs, derived gains, invalidation on changed
-  snapshot pairs, date-range coverage and native-currency reports.
+* Implement confirmed interval flow inputs and zero-flow estimates by default;
+  distinguish gain status and subtotals, invalidate old pair confirmations, and
+  derive unusual-change Review items with the adjustable 20% initial threshold.
 * Replace eight Dashboard destinations with Wealth/Spending/Review/Settings. Put
-  investments in Wealth, history in record detail, and draft review in one form/table.
+  investments in Wealth, schedules/import entry in Spending, history in record detail,
+  and clearly separate drafts from already-saved metadata and estimated-gain follow-ups.
 * Implement two-user Supabase Auth login/refresh/logout and pinned JWKS verification;
   keep device provisioning/revocation usable. Remove token-pasting from daily UI.
 * Add automatic bounded session refresh of missing FX and explicit retry display.
   Never show unknown data as zero or label net captured income as household savings.
 
-Exit: INV-01, UI-01, SEC-02, full report fixtures and Dashboard tests pass.
+Exit: INV-01, INV-02, UI-01, SEC-02, full report fixtures and Dashboard tests pass.
 
 ### S5 — Remove superseded runtime, accept staging
 
@@ -165,7 +183,10 @@ Exit: INV-01, UI-01, SEC-02, full report fixtures and Dashboard tests pass.
   replacement invariant coverage. Exclude legacy source from images. Trim config,
   error enums, serializers and API client methods that existed only for removed paths.
 * Make one target entry point/image per service; update runbooks and CI. No active
-  code references account_state or reconciliation/statement/installment persistence.
+  code references account_state or the old reconciliation/billing persistence.
+* Configure one authenticated daily schedule run in the existing backend and Dashboard
+  catch-up. Verify retries, missed days, household timezone, endpoint authorization,
+  and visible schedule freshness without adding a worker service.
 * Deploy only to the explicitly selected isolated staging environment as a separate
   authorized implementation action. Run the acceptance below on the exact image
   digests/schema/Shortcut version; collect signed-off evidence from both household users.
@@ -206,7 +227,8 @@ One small real-provider/device suite runs in staging, not on every PR.
 Keep tests for image validation, money, auth/household isolation, idempotency/recovery,
 rollback, migration safety, and audit immutability. Rewrite tests that assume balance
 mutation. Retire tests whose only purpose was scoring, residual thresholds, statement
-settlement, schedules or generic candidate transitions. Never preserve old behavior
+settlement, old billing recognition or generic candidate transitions. Keep/rewrite
+date/period/idempotency tests for the new spending schedules. Never preserve old behavior
 just to keep an obsolete test green; do not delete a reliability invariant with it.
 
 Use the existing Docker PostgreSQL harness and `scripts/run_local_integration.ps1`.
@@ -249,7 +271,13 @@ upgrade should change the real-device result.
 | CAP-03 | Concurrent same key, lost post-commit response, concurrent confirm, changed-body key reuse, two devices sharing textual key: at most one result per actor/key; different actors are independent. Image/exact-fact duplicate under new keys warns instead of silently merging. Two real same-price purchases can be confirmed separately. | DB concurrency |
 | CAP-04 | Reserve then process crash -> processing remains recoverable/cancellable. Delayed original POST after 404 races with cancel: either exactly one committed result returned by cancel or a rejected tombstone blocking late commit. Never clear unknown pending key first. No raw image stored. | API concurrency + phone |
 | CAP-05 | Gemini outage, malformed JSON, image corruption/oversize/decompression size, prompt injection and invalid account UUID -> no invented financial record; retry/review outcome is clear. DB failure during finalize rolls back records/history/response together. Revise-vs-confirm and browser-vs-bodyless-device conflicts cannot confirm unseen edits. | Unit + API+DB |
-| SPEND-01 | Expenses 100 and 5 fee-as-expense, refund 30 -> gross 105, refunds 30, net 75. Original purchase persists. Linked refund exceeding remaining amount fails, including two simultaneous refunds; edit/void constraints hold. Transfer/card repayment creates no expense. A 12,000 installment purchase is 12,000 once, monthly principal creates none; no future records/plans. | Unit + API+DB |
+| SPEND-01 | Expenses 100 and 5 fee-as-expense, refund 30 -> gross 105, refunds 30, net 75. Original purchase persists. Linked refund limits hold under concurrent refunds/edit/void. Ordinary transfer/card repayment creates no expense. Installment spending uses either explicitly chosen upfront expense or period allocations, never both. | Unit + API+DB |
+| META-01 | Clear expense with unknown account/uncertain category commits and counts in spending immediately. Review shows one saved transaction with both reasons; correcting one leaves the other. Explicit Other clears uncertainty; acknowledging unknown account removes its task but retains Missing account filter. Edits/retries/concurrent edits and void preserve ID/history and never duplicate spending. | API+DB + UI |
+| SCHED-01 | Twelve periods at 1,000 starting January on day 31 -> Jan 31, Feb 28 (29 leap year), Mar 31; no future transactions, exactly 1,000 per due month. Same-day/month-end timezone boundaries and repeated/overlapping job/catch-up runs create once. Finite schedule completes; recurring count null stays active. Preview backdated catch-up before Save; a date rollover requires refreshed acknowledgement before writing. | Unit + API+DB concurrency |
+| SCHED-02 | Pause catches up old terms; paused periods skipped even after job outage; resume never charges them. Future amount edits preserve posted periods, cancel preserves history, voided occurrence never regenerates. Statement/Shortcut before/after due job binds one occurrence or surfaces duplicate review. Atomic full-price-to-schedule conversion handles refund/conflicting draft guards without double counting. | API+DB + UI |
+| STMT-01 | Enabled account's PDF creates one preview, no financial writes before Save. Import selected expense/refund/fee rows and optional full-scope dated balance atomically; exclude transfers/repayments/trades. Category uncertainty saves flagged Other. Spending-only/balance-only selections work; older balance cannot replace newer, card bill is not full debt. | Parser + API+DB + UI |
+| STMT-02 | Same PDF/new key/other household member opens canonical import without duplicates. Overlapping statements and Shortcut/schedule expenses link or need explicit create/link/skip decision; identical real purchases preserve multiplicity. Concurrent imports/schedule/capture, changed targets and final-row SQL failure cause no partial import or silent duplicates. Voided evidence is not auto-resurrected. | API+DB concurrency |
+| STMT-03 | Wrong account, absent business dates, malformed/encrypted/oversized/over-page/over-row PDF, truncated extraction and timeout -> safe failure or explicit partial preview, never false completeness. Password/PDF cleanup succeeds on error and success; no raw file/password in stored receipt/audit/log/error. Changed statement amount never silently rewrites captured spending/FX. | Unit + API + staging |
 | BAL-01 | First manual zero initializes a known zero without a transaction. Clear cash/savings/investment/debt screenshot produces observations under one request. Repeating key produces no extra observations; later dated update replaces current selection without changing spending. | API+DB |
 | BAL-02 | Cash 10,000 + term 20,000 + funds 30,000 with displayed total 60,000 -> assets 60,000, not 120,000. Unknown/cropped scope cannot invent totals; real mismatch, duplicate account row, non-unique alias, currency mismatch and approximate balance need correction/review. Explicitly deselected rows have zero effects. | Extraction fixtures + API |
 | BAL-03 | Debt 3,000 -> stored -3,000. A card's 1,000 monthly bill or 20,000 credit limit cannot replace total debt. Explicit 200 overpayment -> positive asset in unclassified risk. Remaining installment principal is included once, never added to an already-inclusive total. | Unit + screenshots |
@@ -257,12 +285,13 @@ upgrade should change the real-device result.
 | BAL-05 | Correct/void latest and older snapshots; old facts remain in history, current selection recomputes, future times fail, equal-time collision fails, date-only ambiguity is visible. Close nonzero/uninitialized-with-records account fails; closing zero excludes future wealth while history remains correct. | API+DB |
 | WEALTH-01 | Observed positive CNY accounts total 80,000, debt 3,000 -> assets 80,000, debt 3,000, net 77,000; positive risk buckets sum to 80,000. A new unknown account makes complete totals null with known subtotals retained. Stale values keep dates/cues. No accounts -> setup. Zero positive assets -> null risk percentages. Expense capture cannot move wealth. | Unit + API + UI |
 | FX-01 | USD 10 expense at 7.2 -> frozen CNY 72; later 7.3 wealth quote doesn't rewrite spending. FX outage still records USD 10 with null conversion; refresh fills once with eligible dated rate. Missing/stale quotes are visible; no fabricated 1:1, zero, future historical rate or whole-page failure. JPY display has 0 decimals; unsupported precision/NaN/infinity rejected. | Unit + API+DB |
-| INV-01 | 100,000 -> 160,000, contributions 50,000, withdrawals 0 -> gain 10,000; 100,000 -> 80,000 with withdrawal 25,000 -> gain 5,000. Explicit zero flows permits negative gain. Missing inputs/first snapshot -> unknown, wealth still saved. Reinvested income not counted as contribution. Insert middle snapshot or replace endpoint -> old input pair excluded, new periods unknown. Range-straddling periods never prorated; partial/multicurrency sums labelled. | Unit + API+DB + UI |
+| INV-01 | 100,000 -> 160,000 without inputs -> estimated 60,000 with zero-flow assumption and Review item; confirm contributions 50,000/withdrawals 0 -> user_confirmed 10,000 and item clears. 100,000 -> 80,000 with confirmed withdrawal 25,000 -> gain 5,000. 100,000 -> 105,000 without inputs -> estimated 5,000 without unusual flag. No estimate becomes income or writes fake confirmation. | Unit + API+DB + UI |
+| INV-02 | At exactly +/-20% flag an estimated interval; below threshold do not. Zero->nonzero flags, zero->zero does not; first observation unavailable. Explicit zero-flow confirmation clears review; voiding inputs returns estimate. Changed/split pairs discard old confirmation, recompute estimates/review. Confirmed/estimated/mixed totals labelled, gaps/FX remain partial, intervals never prorated. | Unit + API+DB + UI |
 | HIST-01 | Every financial create/edit/void/replacement has actor/time/before/after in same transaction; replay creates no duplicate audit. Audit update/delete denied. History and original values remain accessible only to household members. | DB + API |
 | SEC-01 | Missing/invalid/revoked device, disabled user, foreign household IDs, guessed draft/alias/refund IDs -> rejected. Device requests scoped to their owner; browser members can review either household member's drafts. No secret/image/model raw response in output/log/audit/receipt. | Unit + API+DB |
 | SEC-02 | Each provisioned user logs in, refreshes, signs out; no cross-session token/client reuse. Wrong issuer/audience/algorithm/expired token rejected; rotated JWKS tested. Public signup/nonmembers have no financial access; Dashboard and publishable key cannot query finance tables directly. | Auth tests + staging |
-| UI-01 | Four pages support balance capture/review, manual correction, risk, gains/unknown flow input, expense review/refund/void, category edits and device revoke. One Save per ordinary edit. Error/retry does not reset a pending key; incomplete values never render as 0 or 100% fresh. No SQL/DB secret, candidate UI, token-pasting or repayment forecasts. | Dashboard tests + household |
-| OPS-01 | Exact target images boot with correct probes, private schema and bounded connection usage. DB/schema failure -> readiness 503; AI outage -> manual operations remain usable. Backup/restore into isolated schema preserves money/history/receipt replay. Old routes absent (404); no hidden engine import. | Container + staging |
+| UI-01 | Four pages support balances/risk, schedules with period/count/day preview, statement import, and distinct draft versus saved-record Review sections. Correct both metadata reasons and confirm an estimated gain without re-recording expenses. One Save per edit; no false zero/completeness, SQL secrets, candidate engine UI or token-pasting. | Dashboard tests + household |
+| OPS-01 | Exact target images/probes/private schema work. DB mismatch -> readiness 503; AI outage leaves manual entry/schedules usable. Authenticated daily job retries/catches up without duplication; non-service tokens rejected on internal route, missed-run freshness visible. Backup/restore preserves receipts, statement identities and occurrences. Removed reconciliation routes absent; no hidden engine import. | Container + staging |
 
 ### Household acceptance session
 
@@ -278,6 +307,8 @@ are the latency reference; investigate regressions before changing the Shortcut 
 
 Then update distinct bank/Alipay/brokerage balances, capture a card debt, review an
 ambiguous row, edit a mistake, and provide or skip investment flows. Ask each user
+to create a monthly schedule, import an overlapping statement, correct an already-saved
+unknown-account/Other expense and confirm or leave an unusual gain estimated. Ask them
 to identify total assets, debts, net worth, unclassified risk, this month's spending,
 and which amounts are old or unknown. They should not need to understand a batch,
 candidate, reconciliation engine, JWT, or migration to use the product.

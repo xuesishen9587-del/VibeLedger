@@ -12,8 +12,10 @@ license: mit
 
 VibeLedger Backend implements `/api/v1/*`, `/health`, `/ready`, Gemini expense capture,
 and the previous architecture's ledger, synchronous statement/reconciliation and
-reporting workflows. The simplified architecture specified on 2026-09-05 is pending
-implementation; it retains the expense interface and replaces those ledger workflows.
+reporting workflows. The simplified architecture revised on 2026-09-06 is pending
+implementation; it retains the expense interface, adds monthly spending schedules,
+and refactors statement import into batch spending plus an optional dated balance.
+It replaces ledger reconciliation and distinguishes estimated from confirmed gains.
 
 ---
 

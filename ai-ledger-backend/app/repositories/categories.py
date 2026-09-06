@@ -50,19 +50,14 @@ def create_category(
             "updated_at": row[9],
         }
 
-def get_category(conn, category_id: UUID, household_id: Optional[UUID] = None) -> Optional[Dict[str, Any]]:
+def get_category(conn, category_id: UUID, household_id: UUID) -> Optional[Dict[str, Any]]:
     query = """
         SELECT id, household_id, name, category_type, description, is_fallback, status, row_version, created_at, updated_at
         FROM categories
-        WHERE id = %s
+        WHERE household_id = %s AND id = %s;
     """
-    params: List[Any] = [category_id]
-    if household_id is not None:
-        query += " AND household_id = %s"
-        params.append(household_id)
-
     with conn.cursor() as cur:
-        cur.execute(query, tuple(params))
+        cur.execute(query, (household_id, category_id))
         row = cur.fetchone()
         if not row:
             return None

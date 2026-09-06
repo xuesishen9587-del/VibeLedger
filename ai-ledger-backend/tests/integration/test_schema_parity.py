@@ -4,7 +4,7 @@ try:
 except ModuleNotFoundError:
     from support.db_helper import BaseDbTestCase
 
-# Canonical 16-table schema contracts derived from 0001_simplified.sql
+# Canonical 16-table schema contracts derived from docs/architecture/CONTRACTS.md
 EXPECTED_TABLE_CONTRACTS = {
     "households": {
         "columns": {
@@ -323,8 +323,9 @@ EXPECTED_TABLE_CONTRACTS = {
 class TestSchemaParity(BaseDbTestCase):
     def test_database_schema_strict_parity(self):
         """
-        Validates that the active test schema matches the 16 simplified tables,
-        their column types, nullability, primary keys, and foreign keys.
+        Validates that the active test schema matches the 16 simplified tables
+        derived from docs/architecture/CONTRACTS.md, their column types, nullability,
+        primary keys, and foreign keys.
         """
         with self.conn.cursor() as cur:
             # 1. Discover all base tables in the test schema (excluding schema_migrations)

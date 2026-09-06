@@ -10,6 +10,7 @@ from app.api.deps import get_db_connection
 from app.repositories import accounts as accounts_repo
 from app.repositories import categories as categories_repo
 from app.repositories import devices as devices_repo
+from app.repositories import audit as audit_repo
 
 try:
     from tests.support.db_helper import BaseDbTestCase
@@ -214,6 +215,24 @@ class TestCategoriesApiDb(BaseDbTestCase):
         }, headers=self.headers_b)
         self.assertEqual(res_deact.status_code, 404)
         self.assertEqual(res_deact.json()["error"]["code"], "CATEGORY_NOT_FOUND")
+
+        # Repository-level isolation checks
+        conn = get_connection(self.test_schema)
+        try:
+            # Category lookup with Household B must return None
+            self.assertIsNone(categories_repo.get_category(conn, UUID(cat_a_id), self.household_b_id))
+            # Category update with Household B must return None
+            self.assertIsNone(categories_repo.update_category(conn, self.household_b_id, UUID(cat_a_id), name="CrossHH"))
+            # Category deactivation with Household B must return None
+            self.assertIsNone(categories_repo.deactivate_category(conn, self.household_b_id, UUID(cat_a_id)))
+            # History queries across households must return None
+            self.assertIsNone(audit_repo.get_entity_history(conn, self.household_b_id, "category", UUID(cat_a_id)))
+        finally:
+            conn.close()
+
+        # History API across households returns 404
+        res_hist = self.client.get(f"/api/v1/history?entity_type=category&entity_id={cat_a_id}", headers=self.headers_b)
+        self.assertEqual(res_hist.status_code, 404)
 
 if __name__ == "__main__":
     unittest.main()

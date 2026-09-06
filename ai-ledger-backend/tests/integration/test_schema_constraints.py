@@ -111,7 +111,7 @@ class TestSchemaConstraints(BaseDbTestCase):
         )
         self.conn.commit()
 
-        events = audit.list_audit_events_for_entity(self.conn, "account", ae_id)
+        events = audit.list_audit_events_for_entity(self.conn, "account", ae_id, household_id=h_id)
         self.assertEqual(len(events), 1)
         event_db_id = events[0]["id"]
 

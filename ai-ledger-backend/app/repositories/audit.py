@@ -51,21 +51,16 @@ def insert_audit_event(
             )
         )
 
-def list_audit_events_for_entity(conn, entity_type: str, entity_id: UUID, household_id: Optional[UUID] = None) -> List[Dict[str, Any]]:
+def list_audit_events_for_entity(conn, entity_type: str, entity_id: UUID, household_id: UUID) -> List[Dict[str, Any]]:
     query = """
         SELECT id, household_id, actor_type, actor_user_id, actor_device_id, source_request_id,
                entity_type, entity_id, action, before_data, after_data, reason, created_at
         FROM audit_events
-        WHERE entity_type = %s AND entity_id = %s
+        WHERE household_id = %s AND entity_type = %s AND entity_id = %s
+        ORDER BY id DESC;
     """
-    params: List[Any] = [entity_type, entity_id]
-    if household_id is not None:
-        query += " AND household_id = %s"
-        params.append(household_id)
-    query += " ORDER BY id DESC;"
-
     with conn.cursor() as cur:
-        cur.execute(query, tuple(params))
+        cur.execute(query, (household_id, entity_type, entity_id))
         rows = cur.fetchall()
         events = []
         for r in rows:
@@ -192,9 +187,8 @@ def get_entity_history(
     table = table_map.get(entity_type)
     if table:
         with conn.cursor() as cur:
-            cur.execute(f"SELECT household_id FROM {table} WHERE id = %s;", (str(entity_id),))
-            row = cur.fetchone()
-            if row and row[0] != household_id:
+            cur.execute(f"SELECT 1 FROM {table} WHERE household_id != %s AND id = %s LIMIT 1;", (household_id, str(entity_id)))
+            if cur.fetchone():
                 return None
 
     return list_audit_events_with_filters(

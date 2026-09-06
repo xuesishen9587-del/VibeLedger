@@ -256,7 +256,7 @@ class TestAccountsApiDb(BaseDbTestCase):
         # Confirm DB has EUR
         conn = get_connection(self.test_schema)
         try:
-            acc_db = accounts_repo.get_account(conn, acc_id)
+            acc_db = accounts_repo.get_account(conn, acc_id, self.household_id)
             self.assertEqual(acc_db["currency"], "EUR")
         finally:
             conn.close()
@@ -607,6 +607,43 @@ class TestAccountsApiDb(BaseDbTestCase):
         # Household B device attempts to read aliases -> 404 Not Found
         res_alias = self.client.get(f"/api/v1/accounts/{acc_a_id}/aliases", headers=self.headers_b)
         self.assertEqual(res_alias.status_code, 404)
+
+        # Repository-level isolation checks
+        conn = get_connection(self.test_schema)
+        try:
+            # Account lookup with Household B must return None
+            self.assertIsNone(accounts_repo.get_account(conn, UUID(acc_a_id), self.household_b_id))
+            # Account update with Household B must return None
+            self.assertIsNone(accounts_repo.update_account(conn, UUID(acc_a_id), self.household_b_id, name="CrossHH"))
+            # List aliases with Household B must return empty
+            self.assertEqual(accounts_repo.list_account_aliases(conn, UUID(acc_a_id), self.household_b_id), [])
+
+            # Create alias in Household A
+            al_id = uuid4()
+            accounts_repo.create_account_alias(
+                conn, al_id, UUID(acc_a_id), "Secret Alias", "secret alias", status="active", household_id=self.household_id
+            )
+            conn.commit()
+            # Alias lookup with Household B must return None
+            self.assertIsNone(accounts_repo.get_account_alias(conn, alias_id=al_id, household_id=self.household_b_id, account_id=UUID(acc_a_id)))
+            # Alias check exists with Household B must return False
+            self.assertFalse(accounts_repo.check_account_alias_exists(conn, UUID(acc_a_id), "secret alias", household_id=self.household_b_id))
+            # Alias deactivation with Household B must return None
+            self.assertIsNone(accounts_repo.deactivate_account_alias(conn, al_id, UUID(acc_a_id), self.household_b_id))
+
+            # History queries across households must return None
+            self.assertIsNone(audit_repo.get_entity_history(conn, self.household_b_id, "account", UUID(acc_a_id)))
+            self.assertIsNone(audit_repo.get_entity_history(conn, self.household_b_id, "account_alias", al_id))
+        finally:
+            conn.close()
+
+        # History API across households returns 404
+        res_hist = self.client.get(f"/api/v1/history?entity_type=account&entity_id={acc_a_id}", headers=self.headers_b)
+        self.assertEqual(res_hist.status_code, 404)
+
+    def test_list_accounts_legacy_inactive_status_rejected(self):
+        resp = self.client.get("/api/v1/accounts?status=inactive", headers=self.headers)
+        self.assertEqual(resp.status_code, 422)
 
 if __name__ == "__main__":
     unittest.main()

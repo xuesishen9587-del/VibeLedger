@@ -192,21 +192,16 @@ def create_account(
             "updated_at": row[14],
         }
 
-def get_account(conn, account_id: UUID, household_id: Optional[UUID] = None) -> Optional[Dict[str, Any]]:
+def get_account(conn, account_id: UUID, household_id: UUID) -> Optional[Dict[str, Any]]:
     query = """
         SELECT id, household_id, name, balance_scope, account_type, currency,
                owner_user_id, risk_level, opened_on, closed_on, status,
                statement_import_enabled, row_version, created_at, updated_at
         FROM accounts
-        WHERE id = %s
+        WHERE household_id = %s AND id = %s;
     """
-    params: List[Any] = [account_id]
-    if household_id is not None:
-        query += " AND household_id = %s"
-        params.append(household_id)
-
     with conn.cursor() as cur:
-        cur.execute(query, tuple(params))
+        cur.execute(query, (household_id, account_id))
         row = cur.fetchone()
         if not row:
             return None
@@ -228,7 +223,7 @@ def get_account(conn, account_id: UUID, household_id: Optional[UUID] = None) -> 
             "updated_at": row[14],
         }
 
-def get_account_with_state(conn, account_id: UUID, household_id: Optional[UUID] = None) -> Optional[Dict[str, Any]]:
+def get_account_with_state(conn, account_id: UUID, household_id: UUID) -> Optional[Dict[str, Any]]:
     return get_account(conn, account_id, household_id)
 
 def list_accounts(
@@ -370,6 +365,7 @@ def check_account_observations_within_lifetime(
 def update_account(
     conn,
     account_id: UUID,
+    household_id: UUID,
     name: Optional[str] = None,
     balance_scope: Optional[str] = None,
     owner_user_id: Optional[UUID] = None,
@@ -379,7 +375,6 @@ def update_account(
     account_type: Optional[str] = None,
     currency: Optional[str] = None,
     expected_row_version: Optional[int] = None,
-    household_id: Optional[UUID] = None,
     fields_set: Optional[set] = None,
     **kwargs
 ) -> Optional[Dict[str, Any]]:
@@ -439,12 +434,8 @@ def update_account(
 
     set_clauses.append("row_version = row_version + 1")
 
-    where_clauses = ["id = %s"]
-    params.append(account_id)
-
-    if household_id is not None:
-        where_clauses.append("household_id = %s")
-        params.append(household_id)
+    where_clauses = ["household_id = %s", "id = %s"]
+    params.extend([household_id, account_id])
 
     if expected_row_version is not None:
         where_clauses.append("row_version = %s")
@@ -703,13 +694,13 @@ def cancel_account(
             "updated_at": row[14],
         }
 
-def deactivate_account(conn, account_id: UUID, expected_row_version: Optional[int] = None) -> Optional[Dict[str, Any]]:
+def deactivate_account(conn, account_id: UUID, household_id: UUID, expected_row_version: Optional[int] = None) -> Optional[Dict[str, Any]]:
     """Legacy deactivate alias: maps to close_account with today's date."""
-    acc = get_account(conn, account_id)
+    acc = get_account(conn, account_id, household_id)
     if not acc:
         return None
     ver = expected_row_version if expected_row_version is not None else acc["row_version"]
-    return close_account(conn, acc["household_id"], account_id, ver, date.today())
+    return close_account(conn, household_id, account_id, ver, date.today())
 
 # --- Aliases ---
 
@@ -720,15 +711,9 @@ def create_account_alias(
     alias_text: str,
     normalized_alias: str,
     status: str = 'active',
-    household_id: Optional[UUID] = None,
+    *,
+    household_id: UUID,
 ) -> None:
-    if household_id is None:
-        acc = get_account(conn, account_id)
-        if acc:
-            household_id = acc["household_id"]
-        else:
-            raise ValueError(f"Account {account_id} not found")
-
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -738,26 +723,15 @@ def create_account_alias(
             (alias_id, household_id, account_id, alias_text, normalized_alias, status)
         )
 
-def list_account_aliases(conn, account_id: UUID, household_id: Optional[UUID] = None) -> List[Dict[str, Any]]:
-    if household_id is not None:
-        query = """
-            SELECT id, household_id, account_id, alias_text, normalized_alias, status, row_version, created_at, updated_at
-            FROM account_aliases
-            WHERE household_id = %s AND account_id = %s
-            ORDER BY status ASC, alias_text ASC;
-        """
-        params = (household_id, account_id)
-    else:
-        query = """
-            SELECT id, household_id, account_id, alias_text, normalized_alias, status, row_version, created_at, updated_at
-            FROM account_aliases
-            WHERE account_id = %s
-            ORDER BY status ASC, alias_text ASC;
-        """
-        params = (account_id,)
-
+def list_account_aliases(conn, account_id: UUID, household_id: UUID) -> List[Dict[str, Any]]:
+    query = """
+        SELECT id, household_id, account_id, alias_text, normalized_alias, status, row_version, created_at, updated_at
+        FROM account_aliases
+        WHERE household_id = %s AND account_id = %s
+        ORDER BY status ASC, alias_text ASC;
+    """
     with conn.cursor() as cur:
-        cur.execute(query, params)
+        cur.execute(query, (household_id, account_id))
         rows = cur.fetchall()
         return [
             {
@@ -774,12 +748,14 @@ def list_account_aliases(conn, account_id: UUID, household_id: Optional[UUID] = 
             for r in rows
         ]
 
-def get_account_alias(conn, alias_id: UUID, account_id: Optional[UUID] = None, household_id: Optional[UUID] = None) -> Optional[Dict[str, Any]]:
-    where_clauses = ["id = %s"]
-    params: List[Any] = [alias_id]
-    if household_id is not None:
-        where_clauses.append("household_id = %s")
-        params.append(household_id)
+def get_account_alias(
+    conn,
+    alias_id: UUID,
+    household_id: UUID,
+    account_id: Optional[UUID] = None,
+) -> Optional[Dict[str, Any]]:
+    where_clauses = ["household_id = %s", "id = %s"]
+    params: List[Any] = [household_id, alias_id]
     if account_id is not None:
         where_clauses.append("account_id = %s")
         params.append(account_id)
@@ -806,12 +782,15 @@ def get_account_alias(conn, alias_id: UUID, account_id: Optional[UUID] = None, h
             "updated_at": row[8],
         }
 
-def check_account_alias_exists(conn, account_id: UUID, normalized_alias: str, exclude_alias_id: Optional[UUID] = None, household_id: Optional[UUID] = None) -> bool:
-    where_clauses = ["account_id = %s", "normalized_alias = %s", "status = 'active'"]
-    params: List[Any] = [account_id, normalized_alias.strip().lower()]
-    if household_id is not None:
-        where_clauses.append("household_id = %s")
-        params.append(household_id)
+def check_account_alias_exists(
+    conn,
+    account_id: UUID,
+    normalized_alias: str,
+    household_id: UUID,
+    exclude_alias_id: Optional[UUID] = None,
+) -> bool:
+    where_clauses = ["household_id = %s", "account_id = %s", "normalized_alias = %s", "status = 'active'"]
+    params: List[Any] = [household_id, account_id, normalized_alias.strip().lower()]
     if exclude_alias_id is not None:
         where_clauses.append("id <> %s")
         params.append(exclude_alias_id)
@@ -874,14 +853,11 @@ def deactivate_account_alias(
     conn,
     alias_id: UUID,
     account_id: UUID,
-    household_id: Optional[UUID] = None,
+    household_id: UUID,
     expected_version: Optional[int] = None,
 ) -> Optional[Dict[str, Any]]:
-    where_clauses = ["account_id = %s", "id = %s", "status = 'active'"]
-    params: List[Any] = [account_id, alias_id]
-    if household_id is not None:
-        where_clauses.append("household_id = %s")
-        params.append(household_id)
+    where_clauses = ["household_id = %s", "account_id = %s", "id = %s", "status = 'active'"]
+    params: List[Any] = [household_id, account_id, alias_id]
     if expected_version is not None:
         where_clauses.append("row_version = %s")
         params.append(expected_version)
@@ -910,6 +886,7 @@ def deactivate_account_alias(
             "created_at": row[7],
             "updated_at": row[8],
         }
+
 
 # --- Category delegations ---
 get_category = repo_categories.get_category

@@ -117,7 +117,7 @@ def _format_account(acc: Dict[str, Any]) -> Dict[str, Any]:
 
 @router.get("", summary="List Household Accounts")
 def list_accounts(
-    status: Optional[str] = Query(None, pattern="^(active|closed|cancelled|inactive)$"),
+    status: Optional[str] = Query(None, pattern="^(active|closed|cancelled)$"),
     account_type: Optional[str] = Query(None, pattern="^(cash|savings|credit|investment)$"),
     owner_user_id: Optional[UUID] = Query(None),
     device: Dict[str, Any] = Depends(get_authenticated_actor),
@@ -634,7 +634,7 @@ def create_account_alias(
             raise AccountAliasConflictError(raw_alias)
         raise
 
-    alias_obj = accounts_repo.get_account_alias(conn, alias_id, account_id, household_id=household_id)
+    alias_obj = accounts_repo.get_account_alias(conn, alias_id=alias_id, household_id=household_id, account_id=account_id)
     return {
         "id": str(alias_obj["id"]),
         "household_id": str(alias_obj["household_id"]),
@@ -659,7 +659,7 @@ def patch_account_alias(
     if not existing:
         raise AccountResourceNotFoundError(account_id)
 
-    alias_obj = accounts_repo.get_account_alias(conn, alias_id, account_id, household_id=household_id)
+    alias_obj = accounts_repo.get_account_alias(conn, alias_id=alias_id, household_id=household_id, account_id=account_id)
     if not alias_obj:
         raise AliasResourceNotFoundError(alias_id)
 

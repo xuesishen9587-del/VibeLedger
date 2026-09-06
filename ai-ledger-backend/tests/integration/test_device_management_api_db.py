@@ -136,7 +136,8 @@ class TestDeviceManagementApiDb(BaseDbTestCase):
         events = audit_repo.list_audit_events_for_entity(
             self.conn,
             entity_type="device",
-            entity_id=device_info["device_id"]
+            entity_id=device_info["device_id"],
+            household_id=self.household_id
         )
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0]["action"], "create")
@@ -225,7 +226,8 @@ class TestDeviceManagementApiDb(BaseDbTestCase):
         events = audit_repo.list_audit_events_for_entity(
             self.conn,
             entity_type="device",
-            entity_id=device_id
+            entity_id=device_id,
+            household_id=self.household_id
         )
         actions = [e["action"] for e in events]
         self.assertIn("update", actions)

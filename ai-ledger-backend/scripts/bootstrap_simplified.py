@@ -147,10 +147,33 @@ def bootstrap_simplified_environment(
         summary["household_id"] = str(hh_id)
 
         # 2. Owner User
-        cur.execute("SELECT id FROM users WHERE auth_subject = %s OR email = %s;", (owner_auth_subject, owner_email))
-        row = cur.fetchone()
-        if row:
-            user_id = uuid.UUID(str(row[0]))
+        cur.execute(
+            """
+            SELECT id, auth_subject, email, status
+            FROM users
+            WHERE auth_subject = %s OR email = %s;
+            """,
+            (owner_auth_subject, owner_email),
+        )
+        user_row = cur.fetchone()
+        if user_row:
+            if isinstance(user_row, dict):
+                user_id = uuid.UUID(str(user_row["id"]))
+                curr_subject = str(user_row.get("auth_subject") or owner_auth_subject)
+                curr_email = str(user_row.get("email") or owner_email)
+                curr_status = str(user_row.get("status") or "active")
+            else:
+                user_id = uuid.UUID(str(user_row[0]))
+                curr_subject = str(user_row[1]) if len(user_row) > 1 else owner_auth_subject
+                curr_email = str(user_row[2]) if len(user_row) > 2 else owner_email
+                curr_status = str(user_row[3]) if len(user_row) > 3 else "active"
+
+            if curr_status != "active":
+                raise BootstrapDriftError(f"Owner user '{owner_auth_subject}' exists but is not active (status='{curr_status}')")
+            if curr_subject != owner_auth_subject:
+                raise BootstrapDriftError(f"Owner user auth_subject drift: expected '{owner_auth_subject}', found '{curr_subject}'")
+            if curr_email != owner_email:
+                raise BootstrapDriftError(f"Owner user email drift: expected '{owner_email}', found '{curr_email}'")
         else:
             new_user = repo.create_user(
                 conn,
@@ -161,12 +184,36 @@ def bootstrap_simplified_environment(
             user_id = uuid.UUID(str(new_user["id"]))
         summary["owner_user_id"] = str(user_id)
 
-        # 3. Household Membership
+        # 3. Household Membership in target household
         cur.execute(
-            "SELECT role FROM household_members WHERE household_id = %s AND user_id = %s;",
+            """
+            SELECT hm.role,
+                   (SELECT count(*) FROM household_members hm2
+                    JOIN households h2 ON hm2.household_id = h2.id
+                    WHERE hm2.user_id = hm.user_id AND hm2.household_id <> hm.household_id AND h2.status = 'active') AS other_active_count
+            FROM household_members hm
+            WHERE hm.household_id = %s AND hm.user_id = %s;
+            """,
             (str(hh_id), str(user_id)),
         )
-        if not cur.fetchone():
+        mem_row = cur.fetchone()
+        if mem_row:
+            existing_role = mem_row["role"] if isinstance(mem_row, dict) else str(mem_row[0])
+            if existing_role != "owner":
+                raise BootstrapDriftError(
+                    f"User {user_id} is already a member of household {hh_id} but has role '{existing_role}', expected 'owner'"
+                )
+            if isinstance(mem_row, dict):
+                other_count = mem_row.get("other_active_count", 0)
+            elif len(mem_row) > 1:
+                other_count = mem_row[1]
+            else:
+                other_count = 0
+            if other_count and int(other_count) > 0:
+                raise BootstrapDriftError(
+                    f"Owner user {user_id} already has an active membership in another household"
+                )
+        else:
             repo.add_household_member(conn, hh_id, user_id, role="owner")
 
         # 4. Categories (15 Expense + 3 Income)

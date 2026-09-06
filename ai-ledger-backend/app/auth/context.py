@@ -31,3 +31,14 @@ class AuthContext:
     @property
     def can_write(self) -> bool:
         return self.household_role in ("owner", "member")
+
+    @property
+    def actor_scope(self) -> str:
+        """
+        Server-derived invariant actor scope:
+        - device:<uuid> for authenticated device
+        - user:<uuid> for authenticated browser user
+        """
+        if self.is_device and self.device_id:
+            return f"device:{self.device_id}"
+        return f"user:{self.user_id}"

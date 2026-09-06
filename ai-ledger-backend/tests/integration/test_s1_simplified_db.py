@@ -682,12 +682,12 @@ class TestS1SimplifiedPostgresIntegration(unittest.TestCase):
 
             # Step 1: Different household lock on conn_b succeeds immediately while conn_a holds hh_a
             conn_a.autocommit = False
-            with conn_a.cursor() as cur:
-                cur.execute("SELECT id FROM households WHERE id = %s FOR UPDATE;", (str(hh_a_id),))
+            locked_a = repo.acquire_household_finance_lock(conn_a, hh_a_id)
+            self.assertEqual(str(locked_a["id"]), str(hh_a_id))
 
             conn_b.autocommit = False
-            with conn_b.cursor() as cur:
-                cur.execute("SELECT id FROM households WHERE id = %s FOR UPDATE;", (str(hh_b_id),))
+            locked_b = repo.acquire_household_finance_lock(conn_b, hh_b_id)
+            self.assertEqual(str(locked_b["id"]), str(hh_b_id))
             conn_b.commit()
 
             # Step 2: Connection B attempts to acquire lock on HH A in a thread
@@ -698,8 +698,7 @@ class TestS1SimplifiedPostgresIntegration(unittest.TestCase):
             def worker_b():
                 try:
                     b_attempt_started.set()
-                    with conn_b.cursor() as cur:
-                        cur.execute("SELECT id FROM households WHERE id = %s FOR UPDATE;", (str(hh_a_id),))
+                    repo.acquire_household_finance_lock(conn_b, hh_a_id)
                     b_lock_acquired.set()
                 except Exception as e:
                     b_error.append(e)
@@ -756,14 +755,19 @@ class TestS1SimplifiedPostgresIntegration(unittest.TestCase):
                     """,
                     (str(hh_id),),
                 )
+            # Commit fixture before entering expected-failure transactions
+            conn.commit()
 
+            with conn.cursor() as cur:
                 # 2. Schema DDL: CREATE TABLE fails with InsufficientPrivilege
+                cur.execute("SET ROLE vibeledger_runtime;")
                 with self.assertRaises(errors.InsufficientPrivilege):
                     cur.execute("CREATE TABLE evil_table (id INT);")
-                conn.rollback()
-                cur.execute("SET ROLE vibeledger_runtime;")
+            conn.rollback()
 
+            with conn.cursor() as cur:
                 # 3. audit_events: INSERT succeeds
+                cur.execute("SET ROLE vibeledger_runtime;")
                 cur.execute(
                     """
                     INSERT INTO audit_events (household_id, actor_type, entity_type, entity_id, action, reason)
@@ -771,26 +775,33 @@ class TestS1SimplifiedPostgresIntegration(unittest.TestCase):
                     """,
                     (str(hh_id), str(hh_id)),
                 )
-                # audit_events: UPDATE fails with InsufficientPrivilege / RaiseException
-                with self.assertRaises((errors.InsufficientPrivilege, errors.RaiseException)):
-                    cur.execute("UPDATE audit_events SET reason = 'hacked' WHERE household_id = %s;", (str(hh_id),))
-                conn.rollback()
-                cur.execute("SET ROLE vibeledger_runtime;")
+            conn.commit()
 
+            with conn.cursor() as cur:
+                # audit_events: UPDATE fails with InsufficientPrivilege / RaiseException
+                cur.execute("SET ROLE vibeledger_runtime;")
+                with self.assertRaises((errors.InsufficientPrivilege, errors.RaiseException)):
+                    cur.execute("UPDATE audit_events SET reason = 'tampered' WHERE household_id = %s;", (str(hh_id),))
+            conn.rollback()
+
+            with conn.cursor() as cur:
                 # audit_events: DELETE fails with InsufficientPrivilege / RaiseException
+                cur.execute("SET ROLE vibeledger_runtime;")
                 with self.assertRaises((errors.InsufficientPrivilege, errors.RaiseException)):
                     cur.execute("DELETE FROM audit_events WHERE household_id = %s;", (str(hh_id),))
-                conn.rollback()
-                cur.execute("SET ROLE vibeledger_runtime;")
+            conn.rollback()
 
+            with conn.cursor() as cur:
                 # 4. schema_migrations: SELECT succeeds
+                cur.execute("SET ROLE vibeledger_runtime;")
                 cur.execute("SELECT COUNT(*) FROM schema_migrations;")
 
                 # schema_migrations: INSERT fails with InsufficientPrivilege
                 with self.assertRaises(errors.InsufficientPrivilege):
                     cur.execute("INSERT INTO schema_migrations VALUES ('bad.sql', 'hash', now());")
-                conn.rollback()
+            conn.rollback()
 
+            with conn.cursor() as cur:
                 cur.execute("RESET ROLE;")
             conn.commit()
         finally:

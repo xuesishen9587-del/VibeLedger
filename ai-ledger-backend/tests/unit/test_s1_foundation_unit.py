@@ -716,6 +716,61 @@ class TestS1AccountCategoryUIFoundations(unittest.TestCase):
             bootstrap_simplified_environment(mock_conn, household_name="Test Household")
         self.assertIn("balance_scope drift", str(ctx.exception))
 
+    def test_bootstrap_detects_identity_and_membership_drift(self):
+        """Verify bootstrap_simplified_environment raises BootstrapDriftError on identity or membership drift."""
+        mock_conn = MagicMock()
+        mock_cur = MagicMock()
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cur
+        hh_uuid = uuid.uuid4()
+        user_uuid = uuid.uuid4()
+
+        # 1. Inactive owner user
+        mock_cur.fetchone.side_effect = [
+            (str(hh_uuid), "CNY", date(2026, 1, 1), "Asia/Singapore", Decimal("0.2000"), "active"),
+            (str(user_uuid), "default_owner", "owner@vibeledger.local", "disabled"),
+        ]
+        with self.assertRaises(BootstrapDriftError) as ctx:
+            bootstrap_simplified_environment(mock_conn, household_name="Test Household")
+        self.assertIn("exists but is not active", str(ctx.exception))
+
+        # 2. Subject drift
+        mock_cur.fetchone.side_effect = [
+            (str(hh_uuid), "CNY", date(2026, 1, 1), "Asia/Singapore", Decimal("0.2000"), "active"),
+            (str(user_uuid), "different_owner_sub", "owner@vibeledger.local", "active"),
+        ]
+        with self.assertRaises(BootstrapDriftError) as ctx:
+            bootstrap_simplified_environment(mock_conn, household_name="Test Household", owner_auth_subject="default_owner")
+        self.assertIn("auth_subject drift", str(ctx.exception))
+
+        # 3. Email drift
+        mock_cur.fetchone.side_effect = [
+            (str(hh_uuid), "CNY", date(2026, 1, 1), "Asia/Singapore", Decimal("0.2000"), "active"),
+            (str(user_uuid), "default_owner", "other@vibeledger.local", "active"),
+        ]
+        with self.assertRaises(BootstrapDriftError) as ctx:
+            bootstrap_simplified_environment(mock_conn, household_name="Test Household", owner_email="owner@vibeledger.local")
+        self.assertIn("email drift", str(ctx.exception))
+
+        # 4. Membership role mismatch (role is 'member' instead of 'owner')
+        mock_cur.fetchone.side_effect = [
+            (str(hh_uuid), "CNY", date(2026, 1, 1), "Asia/Singapore", Decimal("0.2000"), "active"),
+            (str(user_uuid), "default_owner", "owner@vibeledger.local", "active"),
+            ("member", 0),
+        ]
+        with self.assertRaises(BootstrapDriftError) as ctx:
+            bootstrap_simplified_environment(mock_conn, household_name="Test Household")
+        self.assertIn("expected 'owner'", str(ctx.exception))
+
+        # 5. Active membership in another household
+        mock_cur.fetchone.side_effect = [
+            (str(hh_uuid), "CNY", date(2026, 1, 1), "Asia/Singapore", Decimal("0.2000"), "active"),
+            (str(user_uuid), "default_owner", "owner@vibeledger.local", "active"),
+            ("owner", 1), # other_active_count = 1
+        ]
+        with self.assertRaises(BootstrapDriftError) as ctx:
+            bootstrap_simplified_environment(mock_conn, household_name="Test Household")
+        self.assertIn("already has an active membership in another household", str(ctx.exception))
+
 
 if __name__ == "__main__":
     unittest.main()

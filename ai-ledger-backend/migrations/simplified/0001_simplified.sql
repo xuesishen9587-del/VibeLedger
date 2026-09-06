@@ -56,7 +56,7 @@ CREATE TABLE IF NOT EXISTS devices (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     last_seen_at TIMESTAMPTZ,
     revoked_at TIMESTAMPTZ,
-    CONSTRAINT chk_devices_platform CHECK (platform IN ('ios', 'macos', 'web', 'other')),
+    CONSTRAINT chk_devices_platform CHECK (platform IN ('ios', 'macos', 'web', 'ios_shortcuts', 'other')),
     CONSTRAINT chk_devices_status CHECK (status IN ('active', 'revoked')),
     CONSTRAINT fk_devices_household_user FOREIGN KEY (household_id, user_id) REFERENCES household_members(household_id, user_id) ON DELETE RESTRICT,
     CONSTRAINT uq_devices_household_id UNIQUE (household_id, id)
@@ -364,18 +364,28 @@ CREATE TABLE IF NOT EXISTS investment_period_inputs (
     notes TEXT,
     status TEXT NOT NULL DEFAULT 'active',
     voided_at TIMESTAMPTZ,
+    voided_by_user_id UUID,
     void_reason TEXT,
+    source_request_id UUID,
+    created_by_device_id UUID,
     row_version BIGINT NOT NULL DEFAULT 0,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT chk_investment_inputs_contrib CHECK (contributions_amount >= 0),
     CONSTRAINT chk_investment_inputs_withdraw CHECK (withdrawals_amount >= 0),
     CONSTRAINT chk_investment_inputs_status CHECK (status IN ('active', 'voided')),
+    CONSTRAINT chk_investment_inputs_void_consistency CHECK (
+        (status = 'voided' AND voided_at IS NOT NULL AND void_reason IS NOT NULL) OR
+        (status = 'active' AND voided_at IS NULL AND void_reason IS NULL)
+    ),
     CONSTRAINT chk_investment_inputs_snapshots_distinct CHECK (opening_snapshot_id != closing_snapshot_id),
     CONSTRAINT fk_investment_inputs_account FOREIGN KEY (household_id, account_id) REFERENCES accounts(household_id, id) ON DELETE RESTRICT,
     CONSTRAINT fk_investment_inputs_opening FOREIGN KEY (household_id, opening_snapshot_id) REFERENCES account_snapshots(household_id, id) ON DELETE RESTRICT,
     CONSTRAINT fk_investment_inputs_closing FOREIGN KEY (household_id, closing_snapshot_id) REFERENCES account_snapshots(household_id, id) ON DELETE RESTRICT,
     CONSTRAINT fk_investment_inputs_confirmer FOREIGN KEY (household_id, confirmed_by_user_id) REFERENCES household_members(household_id, user_id) ON DELETE RESTRICT,
+    CONSTRAINT fk_investment_inputs_voider FOREIGN KEY (household_id, voided_by_user_id) REFERENCES household_members(household_id, user_id) ON DELETE RESTRICT,
+    CONSTRAINT fk_investment_inputs_device FOREIGN KEY (household_id, created_by_device_id) REFERENCES devices(household_id, id) ON DELETE RESTRICT,
+    CONSTRAINT fk_investment_inputs_request FOREIGN KEY (household_id, source_request_id) REFERENCES ingestion_requests(household_id, id) ON DELETE RESTRICT,
     CONSTRAINT uq_investment_inputs_household_id UNIQUE (household_id, id),
     CONSTRAINT uq_investment_inputs_pair UNIQUE (household_id, opening_snapshot_id, closing_snapshot_id)
 );

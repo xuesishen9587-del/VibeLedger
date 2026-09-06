@@ -2,6 +2,13 @@ import json
 from typing import Optional, Dict, Any, List, Tuple
 from uuid import UUID
 
+CANONICAL_ACTIONS = {
+    'create', 'update', 'void', 'replace', 'close', 'reopen',
+    'confirm_flows', 'fill_reporting_fx', 'acknowledge_metadata',
+    'skip_period', 'link_statement', 'pause_schedule',
+    'resume_schedule', 'cancel_schedule'
+}
+
 def insert_audit_event(
     conn,
     household_id: UUID,
@@ -11,48 +18,54 @@ def insert_audit_event(
     action: str,
     actor_user_id: Optional[UUID] = None,
     actor_device_id: Optional[UUID] = None,
-    request_id: Optional[UUID] = None,
-    reconciliation_batch_id: Optional[UUID] = None,
+    source_request_id: Optional[UUID] = None,
+    request_id: Optional[UUID] = None,  # Backward compatibility alias
     before_data: Optional[Dict[str, Any]] = None,
     after_data: Optional[Dict[str, Any]] = None,
-    metadata: Optional[Dict[str, Any]] = None
+    reason: Optional[str] = None,
+    metadata: Optional[Dict[str, Any]] = None,  # Backward compatibility ignored
+    reconciliation_batch_id: Optional[UUID] = None,  # Backward compatibility ignored
 ) -> None:
     """
-    Inserts an immutable audit event. entity_type, entity_id, and action are strictly required.
+    Inserts an immutable audit event matching the simplified schema.
     """
+    req_id = source_request_id or request_id
+    if action not in CANONICAL_ACTIONS:
+        raise ValueError(f"Invalid audit action '{action}'. Must be one of {sorted(CANONICAL_ACTIONS)}")
+
     before_json = json.dumps(before_data, default=str) if before_data is not None else None
     after_json = json.dumps(after_data, default=str) if after_data is not None else None
-    meta_json = json.dumps(metadata, default=str) if metadata is not None else None
     
     with conn.cursor() as cur:
         cur.execute(
             """
             INSERT INTO audit_events (
-                household_id, actor_type, actor_user_id, actor_device_id, request_id, 
-                reconciliation_batch_id, entity_type, entity_id, action, 
-                before_data, after_data, metadata
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
+                household_id, actor_type, actor_user_id, actor_device_id, source_request_id,
+                entity_type, entity_id, action, before_data, after_data, reason
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
             """,
             (
-                household_id, actor_type, actor_user_id, actor_device_id, request_id,
-                reconciliation_batch_id, entity_type, entity_id, action,
-                before_json, after_json, meta_json
+                household_id, actor_type, actor_user_id, actor_device_id, req_id,
+                entity_type, entity_id, action,
+                before_json, after_json, reason
             )
         )
 
-def list_audit_events_for_entity(conn, entity_type: str, entity_id: UUID) -> List[Dict[str, Any]]:
+def list_audit_events_for_entity(conn, entity_type: str, entity_id: UUID, household_id: Optional[UUID] = None) -> List[Dict[str, Any]]:
+    query = """
+        SELECT id, household_id, actor_type, actor_user_id, actor_device_id, source_request_id,
+               entity_type, entity_id, action, before_data, after_data, reason, created_at
+        FROM audit_events
+        WHERE entity_type = %s AND entity_id = %s
+    """
+    params: List[Any] = [entity_type, entity_id]
+    if household_id is not None:
+        query += " AND household_id = %s"
+        params.append(household_id)
+    query += " ORDER BY id DESC;"
+
     with conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT id, household_id, actor_type, actor_user_id, actor_device_id, request_id,
-                   reconciliation_batch_id, entity_type, entity_id, action,
-                   before_data, after_data, metadata, created_at
-            FROM audit_events
-            WHERE entity_type = %s AND entity_id = %s
-            ORDER BY created_at DESC;
-            """,
-            (entity_type, entity_id)
-        )
+        cur.execute(query, tuple(params))
         rows = cur.fetchall()
         events = []
         for r in rows:
@@ -62,15 +75,15 @@ def list_audit_events_for_entity(conn, entity_type: str, entity_id: UUID) -> Lis
                 "actor_type": r[2],
                 "actor_user_id": r[3],
                 "actor_device_id": r[4],
+                "source_request_id": r[5],
                 "request_id": r[5],
-                "reconciliation_batch_id": r[6],
-                "entity_type": r[7],
-                "entity_id": r[8],
-                "action": r[9],
-                "before_data": r[10],
-                "after_data": r[11],
-                "metadata": r[12],
-                "created_at": r[13]
+                "entity_type": r[6],
+                "entity_id": r[7],
+                "action": r[8],
+                "before_data": r[9],
+                "after_data": r[10],
+                "reason": r[11],
+                "created_at": r[12]
             })
         return events
 
@@ -121,9 +134,8 @@ def list_audit_events_with_filters(
 
     where_sql = " AND ".join(where_clauses)
     query = f"""
-        SELECT id, household_id, actor_type, actor_user_id, actor_device_id, request_id,
-               reconciliation_batch_id, entity_type, entity_id, action,
-               before_data, after_data, metadata, created_at
+        SELECT id, household_id, actor_type, actor_user_id, actor_device_id, source_request_id,
+               entity_type, entity_id, action, before_data, after_data, reason, created_at
         FROM audit_events
         WHERE {where_sql}
         ORDER BY id DESC
@@ -146,15 +158,15 @@ def list_audit_events_with_filters(
             "actor_type": r[2],
             "actor_user_id": r[3],
             "actor_device_id": r[4],
+            "source_request_id": r[5],
             "request_id": r[5],
-            "reconciliation_batch_id": r[6],
-            "entity_type": r[7],
-            "entity_id": r[8],
-            "action": r[9],
-            "before_data": r[10],
-            "after_data": r[11],
-            "metadata": r[12],
-            "created_at": r[13]
+            "entity_type": r[6],
+            "entity_id": r[7],
+            "action": r[8],
+            "before_data": r[9],
+            "after_data": r[10],
+            "reason": r[11],
+            "created_at": r[12]
         })
 
     next_cursor = str(actual_rows[-1][0]) if has_more and actual_rows else None

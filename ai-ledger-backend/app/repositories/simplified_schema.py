@@ -217,7 +217,7 @@ def create_device(
 ) -> Dict[str, Any]:
     if device_id is None:
         device_id = uuid.uuid4()
-    if platform not in ("ios", "macos", "web", "other"):
+    if platform not in ("ios", "macos", "web", "ios_shortcuts", "other"):
         raise ValueError(f"Invalid device platform: {platform}")
 
     with conn.cursor(cursor_factory=RealDictCursor) as cur:

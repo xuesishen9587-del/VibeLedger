@@ -1,13 +1,14 @@
 from typing import Optional, Dict, Any
 from uuid import UUID, uuid4
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, Query, status, HTTPException
 from pydantic import BaseModel, Field
 
 from app.api.deps import get_db_connection, get_authenticated_actor
 from app.db import transaction
 from app.domain.transactions import (
     CategoryResourceNotFoundError,
-    CategoryNameConflictError
+    CategoryNameConflictError,
+    RowVersionConflictError
 )
 import app.repositories.categories as categories_repo
 import app.repositories.audit as audit_repo
@@ -17,9 +18,14 @@ router = APIRouter(prefix="/api/v1/categories", tags=["Categories"])
 class CreateCategoryRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=100, description="Category name")
     type: str = Field(..., pattern="^(expense|income)$", description="Category type (expense or income)")
+    description: Optional[str] = Field(None, max_length=500, description="Category description")
 
 class PatchCategoryRequest(BaseModel):
-    name: str = Field(..., min_length=1, max_length=100, description="New category name")
+    name: Optional[str] = Field(None, min_length=1, max_length=100, description="New category name")
+    description: Optional[str] = Field(None, max_length=500, description="Category description")
+    status: Optional[str] = Field(None, pattern="^(active|inactive)$", description="Category status")
+    expected_version: Optional[int] = Field(None, ge=0, description="Optimistic concurrency control version")
+    row_version: Optional[int] = Field(None, ge=0, description="Optimistic concurrency control version")
 
 def _get_audit_actor_info(actor: Dict[str, Any]) -> tuple[str, Optional[UUID], Optional[UUID]]:
     auth_mode = actor.get("auth_mode")
@@ -37,9 +43,14 @@ def _get_audit_actor_info(actor: Dict[str, Any]) -> tuple[str, Optional[UUID], O
 def _format_category(cat: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "id": str(cat["id"]),
+        "household_id": str(cat["household_id"]),
         "name": cat["name"],
         "type": cat["category_type"],
-        "status": cat["status"]
+        "category_type": cat["category_type"],
+        "description": cat.get("description"),
+        "is_fallback": cat.get("is_fallback", False),
+        "status": cat["status"],
+        "row_version": cat.get("row_version", 0)
     }
 
 @router.get("", summary="List Categories")
@@ -60,6 +71,18 @@ def list_categories(
     )
     return {"items": [_format_category(c) for c in categories]}
 
+@router.get("/{category_id}", summary="Get Category")
+def get_category(
+    category_id: UUID,
+    device: Dict[str, Any] = Depends(get_authenticated_actor),
+    conn: Any = Depends(get_db_connection)
+) -> Dict[str, Any]:
+    household_id = device["household_id"]
+    existing = categories_repo.get_category(conn, category_id, household_id)
+    if not existing:
+        raise CategoryResourceNotFoundError(category_id)
+    return _format_category(existing)
+
 @router.post("", status_code=status.HTTP_201_CREATED, summary="Create Category")
 def create_category(
     payload: CreateCategoryRequest,
@@ -71,6 +94,7 @@ def create_category(
     """
     household_id = device["household_id"]
     clean_name = payload.name.strip()
+    clean_desc = payload.description.strip() if payload.description else None
 
     if categories_repo.check_category_name_exists(conn, household_id, payload.type, clean_name):
         raise CategoryNameConflictError(clean_name, payload.type)
@@ -83,6 +107,8 @@ def create_category(
             household_id=household_id,
             name=clean_name,
             category_type=payload.type,
+            description=clean_desc,
+            is_fallback=False,
             status='active'
         )
         actor_type, actor_user_id, actor_device_id = _get_audit_actor_info(device)
@@ -95,12 +121,18 @@ def create_category(
             action="create",
             actor_user_id=actor_user_id,
             actor_device_id=actor_device_id,
-            after_data={"name": clean_name, "category_type": payload.type}
+            after_data={
+                "name": clean_name,
+                "category_type": payload.type,
+                "description": clean_desc,
+                "is_fallback": False,
+                "status": "active"
+            }
         )
 
     return _format_category(created)
 
-@router.patch("/{category_id}", summary="Rename Category")
+@router.patch("/{category_id}", summary="Update Category")
 def patch_category(
     category_id: UUID,
     payload: PatchCategoryRequest,
@@ -108,24 +140,51 @@ def patch_category(
     conn: Any = Depends(get_db_connection)
 ) -> Dict[str, Any]:
     """
-    Renames an existing category within the authenticated household.
+    Updates an existing category within the authenticated household.
     """
     household_id = device["household_id"]
     existing = categories_repo.get_category(conn, category_id, household_id)
     if not existing:
         raise CategoryResourceNotFoundError(category_id)
 
-    clean_name = payload.name.strip()
-    if clean_name.lower() != existing["name"].lower():
+    expected_ver = payload.expected_version if payload.expected_version is not None else payload.row_version
+    if expected_ver is not None and existing["row_version"] != expected_ver:
+        raise RowVersionConflictError()
+
+    clean_name = payload.name.strip() if payload.name is not None else None
+    if clean_name and clean_name.lower() != existing["name"].lower():
         if categories_repo.check_category_name_exists(
             conn, household_id, existing["category_type"], clean_name, exclude_category_id=category_id
         ):
             raise CategoryNameConflictError(clean_name, existing["category_type"])
 
+    clean_desc = payload.description.strip() if payload.description is not None else None
+
+    # If deactivating via status in patch
+    if payload.status == "inactive" and existing.get("is_fallback"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Fallback category cannot be archived."
+        )
+
     with transaction(conn):
-        updated = categories_repo.update_category(conn, category_id, clean_name)
+        updated = categories_repo.update_category(
+            conn=conn,
+            household_id=household_id,
+            category_id=category_id,
+            name=clean_name,
+            description=clean_desc,
+            expected_version=expected_ver
+        )
         if not updated:
-            raise CategoryResourceNotFoundError(category_id)
+            raise RowVersionConflictError()
+
+        if payload.status == "inactive" and existing["status"] == "active":
+            deactivated = categories_repo.deactivate_category(
+                conn, household_id, category_id, expected_version=updated["row_version"]
+            )
+            if deactivated:
+                updated = deactivated
 
         actor_type, actor_user_id, actor_device_id = _get_audit_actor_info(device)
         audit_repo.insert_audit_event(
@@ -137,8 +196,16 @@ def patch_category(
             action="update",
             actor_user_id=actor_user_id,
             actor_device_id=actor_device_id,
-            before_data={"name": existing["name"]},
-            after_data={"name": clean_name}
+            before_data={
+                "name": existing["name"],
+                "description": existing.get("description"),
+                "status": existing["status"]
+            },
+            after_data={
+                "name": updated["name"],
+                "description": updated.get("description"),
+                "status": updated["status"]
+            }
         )
 
     return _format_category(updated)
@@ -150,31 +217,42 @@ def deactivate_category(
     conn: Any = Depends(get_db_connection)
 ) -> Dict[str, Any]:
     """
-    Soft-deactivates a category. Inactive categories cannot be selected for new financial transactions.
+    Deactivates a category. Enforces that fallback categories cannot be archived.
     """
     household_id = device["household_id"]
     existing = categories_repo.get_category(conn, category_id, household_id)
     if not existing:
         raise CategoryResourceNotFoundError(category_id)
 
-    with transaction(conn):
-        deactivated = categories_repo.deactivate_category(conn, category_id)
-        if not deactivated:
-            raise CategoryResourceNotFoundError(category_id)
-
-        actor_type, actor_user_id, actor_device_id = _get_audit_actor_info(device)
-        audit_repo.insert_audit_event(
-            conn=conn,
-            household_id=household_id,
-            actor_type=actor_type,
-            entity_type="category",
-            entity_id=category_id,
-            action="soft_delete",
-            actor_user_id=actor_user_id,
-            actor_device_id=actor_device_id,
-            before_data={"status": existing["status"]},
-            after_data={"status": "inactive"}
+    if existing.get("is_fallback"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Fallback category cannot be archived."
         )
+
+    try:
+        with transaction(conn):
+            deactivated = categories_repo.deactivate_category(
+                conn, household_id=household_id, category_id=category_id
+            )
+            if not deactivated:
+                raise CategoryResourceNotFoundError(category_id)
+
+            actor_type, actor_user_id, actor_device_id = _get_audit_actor_info(device)
+            audit_repo.insert_audit_event(
+                conn=conn,
+                household_id=household_id,
+                actor_type=actor_type,
+                entity_type="category",
+                entity_id=category_id,
+                action="update",
+                actor_user_id=actor_user_id,
+                actor_device_id=actor_device_id,
+                before_data={"status": existing["status"]},
+                after_data={"status": "inactive"}
+            )
+    except categories_repo.FallbackCategoryArchivedError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
     return _format_category(deactivated)
 

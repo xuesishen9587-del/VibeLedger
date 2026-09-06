@@ -63,6 +63,9 @@ class AuthService:
         household_id = membership["household_id"]
         household_role = membership["role"]
 
+        if device.get("household_id") and str(device["household_id"]) != str(household_id):
+            raise HouseholdPermissionDeniedError("Device does not belong to user's active household.")
+
         # Autonomous telemetry update for last_seen_at
         schema = None
         try:
@@ -171,6 +174,7 @@ class AuthService:
             device_name=device_name,
             platform=platform,
             client_version=client_version,
+            household_id=auth_context.household_id,
         )
 
         actor_type = "user" if auth_context.is_browser else "device"
@@ -199,7 +203,12 @@ class AuthService:
         Revokes a device belonging to the caller's user.
         Raises DeviceNotFoundError if the device does not exist or belongs to another user.
         """
-        device_dict = repo_devices.revoke_device(conn, device_id=device_id, user_id=auth_context.user_id)
+        device_dict = repo_devices.revoke_device(
+            conn,
+            device_id=device_id,
+            user_id=auth_context.user_id,
+            household_id=auth_context.household_id,
+        )
         if not device_dict:
             raise DeviceNotFoundError(f"Device {device_id} not found.")
 
@@ -212,7 +221,7 @@ class AuthService:
             actor_device_id=auth_context.device_id,
             entity_type="device",
             entity_id=device_id,
-            action="soft_delete",
+            action="update",
             after_data={"status": "revoked"},
         )
 

@@ -55,7 +55,7 @@ class TestSchemaConstraints(BaseDbTestCase):
         accounts.create_user(self.conn, u_id, "auth_fk", "User_FK")
         accounts.add_household_member(self.conn, h_id, u_id, "owner")
         accounts.create_device(self.conn, d_id, u_id, "Dev_FK", "ios_shortcuts", b"hash_fk", household_id=h_id)
-        accounts.create_account(self.conn, acc_id, h_id, "Card_FK", "credit", "CNY", balance_scope="Credit Cards")
+        accounts.create_account(self.conn, household_id=h_id, account_id=acc_id, name="Card_FK", account_type="credit", currency="CNY", balance_scope="Credit Cards")
         categories.create_category(self.conn, household_id=h_id, name="Cat_FK", category_type="expense", category_id=cat_id)
 
         with self.conn.cursor() as cur:
@@ -134,7 +134,7 @@ class TestSchemaConstraints(BaseDbTestCase):
 
         acc1_id = uuid.uuid4()
         acc2_id = uuid.uuid4()
-        accounts.create_account(self.conn, acc1_id, h_id, "Checking Account", "cash", "CNY", balance_scope="Scope")
+        accounts.create_account(self.conn, household_id=h_id, account_id=acc1_id, name="Checking Account", account_type="cash", currency="CNY", balance_scope="Scope")
         self.conn.commit()
 
         with self.conn.cursor() as cur:
@@ -167,7 +167,7 @@ class TestSchemaConstraints(BaseDbTestCase):
         h_id = uuid.uuid4()
         accounts.create_household(self.conn, h_id, "HH_Alias", reporting_currency="CNY")
         acc_id = uuid.uuid4()
-        accounts.create_account(self.conn, acc_id, h_id, "Main Bank", "cash", "CNY", balance_scope="Scope")
+        accounts.create_account(self.conn, household_id=h_id, account_id=acc_id, name="Main Bank", account_type="cash", currency="CNY", balance_scope="Scope")
         self.conn.commit()
 
         al1_id = uuid.uuid4()

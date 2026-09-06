@@ -9,6 +9,7 @@ from app.api.deps import get_db_connection
 from app.auth.browser_verifier import set_browser_verifier, StaticBrowserAuthVerifier
 from app.repositories import users as users_repo
 from app.repositories import household_members as members_repo
+from app.repositories import accounts as accounts_repo
 from app.repositories import audit as audit_repo
 from tests.support.db_helper import BaseDbTestCase
 
@@ -85,6 +86,16 @@ class TestAuditApiDb(BaseDbTestCase):
             before_data=None,
             after_data={"merchant": "Test Store"}
         )
+        accounts_repo.create_account(
+            self.conn,
+            household_id=self.household_id,
+            account_id=entity_id_2,
+            name="Audit Test Account",
+            account_type="cash",
+            currency="CNY",
+            balance_scope="Main",
+            owner_user_id=self.user_id,
+        )
         audit_repo.insert_audit_event(
             self.conn,
             household_id=self.household_id,
@@ -132,6 +143,118 @@ class TestAuditApiDb(BaseDbTestCase):
         self.assertEqual(item["before_data"]["name"], "Old")
         self.assertEqual(item["after_data"]["name"], "New")
         self.assertEqual(item["reason"], "Testing update")
+
+    def test_history_boundary_isolation_and_indistinguishability(self):
+        # 1. Own household entity
+        own_acc_id = uuid4()
+        accounts_repo.create_account(
+            self.conn,
+            household_id=self.household_id,
+            account_id=own_acc_id,
+            name="Own Account",
+            account_type="cash",
+            currency="CNY",
+            balance_scope="Own Scope",
+            owner_user_id=self.user_id,
+        )
+        audit_repo.insert_audit_event(
+            self.conn,
+            household_id=self.household_id,
+            actor_type="user",
+            entity_type="account",
+            entity_id=own_acc_id,
+            action="create",
+            actor_user_id=self.user_id,
+            after_data={"name": "Own Account"}
+        )
+
+        # 2. Foreign household setup & entity
+        foreign_hh_id = uuid4()
+        members_repo.create_household(
+            self.conn,
+            household_id=foreign_hh_id,
+            name="Foreign Household",
+            reporting_currency="USD",
+            status="active"
+        )
+        foreign_user_id = uuid4()
+        users_repo.create_user(
+            self.conn,
+            user_id=foreign_user_id,
+            auth_subject="auth0|foreign_user",
+            display_name="Foreign User",
+            email="foreign@example.com",
+            status="active"
+        )
+        members_repo.add_household_member(
+            self.conn,
+            household_id=foreign_hh_id,
+            user_id=foreign_user_id,
+            role="owner"
+        )
+        foreign_acc_id = uuid4()
+        accounts_repo.create_account(
+            self.conn,
+            household_id=foreign_hh_id,
+            account_id=foreign_acc_id,
+            name="Foreign Account",
+            account_type="savings",
+            currency="USD",
+            balance_scope="Foreign Scope",
+            owner_user_id=foreign_user_id,
+        )
+        audit_repo.insert_audit_event(
+            self.conn,
+            household_id=foreign_hh_id,
+            actor_type="user",
+            entity_type="account",
+            entity_id=foreign_acc_id,
+            action="create",
+            actor_user_id=foreign_user_id,
+            after_data={"name": "Foreign Account"}
+        )
+        self.conn.commit()
+
+        # 3. Nonexistent ID
+        nonexistent_acc_id = uuid4()
+
+        headers = {"Authorization": f"Bearer {self.browser_token}"}
+
+        # Verification 1: Own-household entity history succeeds (200)
+        resp_own = self.client.get(
+            f"/api/v1/history?entity_type=account&entity_id={own_acc_id}",
+            headers=headers
+        )
+        self.assertEqual(resp_own.status_code, 200)
+        own_data = resp_own.json()
+        self.assertEqual(len(own_data["items"]), 1)
+        self.assertEqual(own_data["items"][0]["entity_id"], str(own_acc_id))
+        self.assertEqual(own_data["items"][0]["action"], "create")
+
+        # Verification 2: Foreign-household entity history returns 404
+        resp_foreign = self.client.get(
+            f"/api/v1/history?entity_type=account&entity_id={foreign_acc_id}",
+            headers=headers
+        )
+        self.assertEqual(resp_foreign.status_code, 404)
+        self.assertEqual(resp_foreign.json()["detail"], "Account not found.")
+
+        # Verification 3: Nonexistent entity history returns the same 404 behavior
+        resp_nonexistent = self.client.get(
+            f"/api/v1/history?entity_type=account&entity_id={nonexistent_acc_id}",
+            headers=headers
+        )
+        self.assertEqual(resp_nonexistent.status_code, 404)
+        self.assertEqual(resp_nonexistent.json()["detail"], "Account not found.")
+
+        # Verification 4: Foreign and nonexistent IDs are indistinguishable at the API boundary
+        self.assertEqual(resp_foreign.status_code, resp_nonexistent.status_code)
+        self.assertEqual(resp_foreign.json(), resp_nonexistent.json())
+        self.assertEqual(resp_foreign.headers.get("content-type"), resp_nonexistent.headers.get("content-type"))
+
+        # Verification 5: Repository layer guarantees None for both foreign and nonexistent IDs within caller household
+        self.assertIsNone(audit_repo.get_entity_history(self.conn, self.household_id, "account", foreign_acc_id))
+        self.assertIsNone(audit_repo.get_entity_history(self.conn, self.household_id, "account", nonexistent_acc_id))
 
 if __name__ == "__main__":
     unittest.main()

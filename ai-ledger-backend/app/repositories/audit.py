@@ -177,7 +177,7 @@ def get_entity_history(
 ) -> Optional[Tuple[List[Dict[str, Any]], Optional[str]]]:
     """
     Retrieves append-only change history for a specific entity within the household.
-    Returns None if the entity exists and belongs to another household (caller should raise 404).
+    Returns None if the entity does not exist in the authenticated household (caller should raise 404).
     """
     table_map = {
         "account": "accounts",
@@ -187,8 +187,8 @@ def get_entity_history(
     table = table_map.get(entity_type)
     if table:
         with conn.cursor() as cur:
-            cur.execute(f"SELECT 1 FROM {table} WHERE household_id != %s AND id = %s LIMIT 1;", (household_id, str(entity_id)))
-            if cur.fetchone():
+            cur.execute(f"SELECT 1 FROM {table} WHERE household_id = %s AND id = %s LIMIT 1;", (household_id, str(entity_id)))
+            if not cur.fetchone():
                 return None
 
     return list_audit_events_with_filters(

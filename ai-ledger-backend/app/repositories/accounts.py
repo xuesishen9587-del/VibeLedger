@@ -123,8 +123,8 @@ def get_device_by_token_hash(conn, token_hash: bytes) -> Optional[Dict[str, Any]
 
 def create_account(
     conn,
+    household_id: UUID,
     account_id: Optional[UUID] = None,
-    household_id: Optional[UUID] = None,
     name: str = "",
     account_type: str = "cash",
     currency: str = "CNY",

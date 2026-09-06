@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "flow_id": "06_expense_revise_structured",
+  "description": "Structured field revision for needs_confirmation request directly specifying category_id or amount.",
+  "request": {
+    "method": "POST",
+    "path": "/api/v1/ingestion-requests/5bc07186-7939-4784-d51e-4eb85188c1c8/revise",
+    "headers": {
+      "Authorization": "Bearer vbl_dev_sample_token_sanitized",
+      "Content-Type": "application/json"
+    },
+    "body": {
+      "original_amount": "52.00",
+      "from_account_id": "11223344-5566-7788-99aa-bbccddeeff00",
+      "category_id": "e9c0d1f2-3456-4789-01cd-ef0123456789"
+    }
+  },
+  "response": {
+    "http_status": 200,
+    "headers": {
+      "Content-Type": "application/json"
+    },
+    "body": {
+      "status": "needs_confirmation",
+      "request_id": "5bc07186-7939-4784-d51e-4eb85188c1c8",
+      "draft": {
+        "occurred_on": "2026-09-06",
+        "merchant": "未知商户",
+        "original_amount": "52.00",
+        "original_currency": "CNY",
+        "from_account": {
+          "id": "11223344-5566-7788-99aa-bbccddeeff00",
+          "name": "招商银行储蓄卡"
+        },
+        "category": {
+          "id": "e9c0d1f2-3456-4789-01cd-ef0123456789",
+          "name": "餐饮美食"
+        },
+        "payment_mode": "one_off",
+        "total_periods": null,
+        "remarks": null
+      },
+      "warnings": [],
+      "display_summary": "⚠️ 请确认 (已修订)\n52.00 CNY · 未知商户\n招商银行储蓄卡 · 餐饮美食"
+    }
+  },
+  "shortcut_consumed_fields": [
+    "status",
+    "request_id",
+    "draft",
+    "warnings",
+    "display_summary"
+  ]
+}

@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "flow_id": "04_expense_confirm_request_response",
+  "description": "Confirmation of a pending needs_confirmation draft via device empty body request.",
+  "request": {
+    "method": "POST",
+    "path": "/api/v1/ingestion-requests/5bc07186-7939-4784-d51e-4eb85188c1c8/confirm",
+    "headers": {
+      "Authorization": "Bearer vbl_dev_sample_token_sanitized",
+      "Content-Type": "application/json"
+    },
+    "body": {}
+  },
+  "response": {
+    "http_status": 200,
+    "headers": {
+      "Content-Type": "application/json"
+    },
+    "body": {
+      "status": "committed",
+      "request_id": "5bc07186-7939-4784-d51e-4eb85188c1c8",
+      "transaction_id": "fa01e203-4567-4890-12de-f01234567890",
+      "payment_mode": "one_off",
+      "display_summary": "¥56.00 · 未知商户\n招商银行储蓄卡 · 餐饮美食\n2026-09-06"
+    }
+  },
+  "shortcut_consumed_fields": [
+    "status",
+    "request_id",
+    "transaction_id",
+    "payment_mode",
+    "display_summary"
+  ]
+}

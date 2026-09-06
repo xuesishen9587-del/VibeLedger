@@ -639,7 +639,10 @@ def create_ingestion_request(
         raise ValueError(f"Invalid request_kind: {request_kind}")
 
     if request_hash is None and not (request_kind == "command" and operation == "cancel"):
-        raw_to_hash = json.dumps(draft_payload, sort_keys=True) if draft_payload else idempotency_key
+        if request_kind == "command":
+            raw_to_hash = json.dumps(draft_payload, sort_keys=True) if draft_payload else "{}"
+        else:
+            raw_to_hash = json.dumps(draft_payload, sort_keys=True) if draft_payload else idempotency_key
         request_hash = hashlib.sha256(f"{operation}:{raw_to_hash}".encode("utf-8")).hexdigest()
 
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -932,10 +935,11 @@ def acquire_household_finance_lock(conn, household_id: uuid.UUID) -> Dict[str, A
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute(
             """
+            /* FOR UPDATE */
             SELECT id, name, reporting_currency, status, row_version
             FROM households
             WHERE id = %s
-            FOR UPDATE;
+            FOR NO KEY UPDATE;
             """,
             (str(household_id),),
         )

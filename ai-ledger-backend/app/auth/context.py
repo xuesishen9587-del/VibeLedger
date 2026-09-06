@@ -42,3 +42,11 @@ class AuthContext:
         if self.is_device and self.device_id:
             return f"device:{self.device_id}"
         return f"user:{self.user_id}"
+
+    @staticmethod
+    def system_scope(household_id: UUID) -> str:
+        """
+        Minimal infrastructure for trusted internal code to derive
+        system:<household_uuid> only from a server-known household ID.
+        """
+        return f"system:{household_id}"

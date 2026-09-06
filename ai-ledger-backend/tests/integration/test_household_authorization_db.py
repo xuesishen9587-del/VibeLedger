@@ -160,7 +160,10 @@ class TestHouseholdAuthorizationDb(BaseDbTestCase):
         # User A attempts to modify User B's account
         res = self.client.patch(
             f"/api/v1/accounts/{self.account_b_id}",
-            headers={"Authorization": f"Bearer {self.jwt_user_a}"},
+            headers={
+                "Authorization": f"Bearer {self.jwt_user_a}",
+                "Idempotency-Key": "key-cross-household-patch-01"
+            },
             json={
                 "name": "Hacked Account Name",
                 "expected_version": 0

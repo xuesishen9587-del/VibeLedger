@@ -97,7 +97,10 @@ class TestApiConcurrency(BaseDbTestCase):
                     "name": f"Renamed Account {idx}",
                     "expected_version": 0
                 },
-                headers=self.headers
+                headers={
+                    **self.headers,
+                    "Idempotency-Key": f"key-race-patch-{idx}-{uuid4().hex}"
+                }
             )
             results.append((res.status_code, res.json()))
 

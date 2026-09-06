@@ -3,9 +3,12 @@ from typing import Optional, Dict, Any, List
 from uuid import UUID, uuid4
 import psycopg2
 from fastapi import APIRouter, Depends, Query, status, HTTPException
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, ConfigDict
 
-from app.api.deps import get_db_connection, get_authenticated_actor
+from app.api.deps import get_db_connection, get_authenticated_actor, require_idempotency_key, get_auth_context
+from app.auth.context import AuthContext
+import app.services.account_commands as account_commands
 from app.db import transaction
 from app.domain.money import validate_currency_code
 from app.domain.transactions import (
@@ -153,408 +156,102 @@ def get_account(
 @router.post("", status_code=status.HTTP_201_CREATED, summary="Create Account")
 def create_account(
     payload: CreateAccountRequest,
-    device: Dict[str, Any] = Depends(get_authenticated_actor),
+    idempotency_key: str = Depends(require_idempotency_key),
+    auth_context: AuthContext = Depends(get_auth_context),
     conn: Any = Depends(get_db_connection)
-) -> Dict[str, Any]:
+) -> JSONResponse:
     """
-    Creates a new account in the authenticated household.
+    Creates a new account in the authenticated household as a short durable command.
     Spending and balance observations are independent; does not create transactions or snapshots.
     """
-    currency = validate_currency_code(payload.currency)
-    household_id = device["household_id"]
-
-    if payload.account_type == "credit" and payload.risk_level is not None:
-        raise LinkedAccountInvalidError("Credit accounts cannot have a risk level.")
-
-    balance_scope = payload.balance_scope.strip()
-    opened_on = payload.opened_on or date.today()
-
-    if payload.owner_user_id is not None:
-        if not accounts_repo.check_user_in_household(conn, payload.owner_user_id, household_id):
-            raise UserNotInHouseholdError(payload.owner_user_id)
-
-    if accounts_repo.check_account_name_exists(conn, household_id, payload.name):
-        raise AccountNameConflictError(payload.name)
-
-    account_id = uuid4()
-
-    try:
-        with transaction(conn):
-            created = accounts_repo.create_account(
-                conn=conn,
-                account_id=account_id,
-                household_id=household_id,
-                name=payload.name.strip(),
-                balance_scope=balance_scope,
-                account_type=payload.account_type,
-                currency=currency,
-                owner_user_id=payload.owner_user_id,
-                risk_level=payload.risk_level,
-                opened_on=opened_on,
-                closed_on=None,
-                status='active',
-                statement_import_enabled=payload.statement_import_enabled
-            )
-            actor_type, actor_user_id, actor_device_id = _get_audit_actor_info(device)
-            audit_repo.insert_audit_event(
-                conn=conn,
-                household_id=household_id,
-                actor_type=actor_type,
-                entity_type="account",
-                entity_id=account_id,
-                action="create",
-                actor_user_id=actor_user_id,
-                actor_device_id=actor_device_id,
-                after_data={
-                    "name": payload.name.strip(),
-                    "balance_scope": balance_scope,
-                    "account_type": payload.account_type,
-                    "currency": currency,
-                    "owner_user_id": str(payload.owner_user_id) if payload.owner_user_id else None,
-                    "risk_level": payload.risk_level,
-                    "opened_on": opened_on.isoformat(),
-                    "closed_on": None,
-                    "status": "active",
-                    "statement_import_enabled": payload.statement_import_enabled,
-                }
-            )
-    except psycopg2.IntegrityError as e:
-        if "uq_accounts_active_name" in str(e) or "accounts" in str(e):
-            raise AccountNameConflictError(payload.name)
-        raise
-
-    return _format_account(created)
+    res, status_code = account_commands.create_account_command(
+        conn=conn,
+        auth_context=auth_context,
+        idempotency_key=idempotency_key,
+        payload=payload
+    )
+    return JSONResponse(status_code=status_code, content=res)
 
 @router.patch("/{account_id}", summary="Update Account Metadata")
 def patch_account(
     account_id: UUID,
     payload: PatchAccountRequest,
-    device: Dict[str, Any] = Depends(get_authenticated_actor),
+    idempotency_key: str = Depends(require_idempotency_key),
+    auth_context: AuthContext = Depends(get_auth_context),
     conn: Any = Depends(get_db_connection)
-) -> Dict[str, Any]:
+) -> JSONResponse:
     """
-    Updates mutable metadata on an account using row_version optimistic concurrency control.
+    Updates mutable metadata on an account using row_version optimistic concurrency control as a short durable command.
     """
-    household_id = device["household_id"]
-
-    expected_ver = payload.expected_version
-
-    fields_set = payload.model_fields_set
-
-    with transaction(conn):
-        acquire_household_finance_lock(conn, household_id)
-        existing = accounts_repo.get_account(conn, account_id, household_id)
-        if not existing:
-            raise AccountResourceNotFoundError(account_id)
-
-        if existing["row_version"] != expected_ver:
-            raise RowVersionConflictError()
-
-        # 1. Determine complete resulting state
-        if "name" in fields_set:
-            if payload.name is None or not payload.name.strip():
-                raise LinkedAccountInvalidError("Account name cannot be empty.")
-            new_name = payload.name.strip()
-        else:
-            new_name = existing["name"]
-
-        if "balance_scope" in fields_set:
-            if payload.balance_scope is None or not payload.balance_scope.strip():
-                raise LinkedAccountInvalidError("balance_scope cannot be empty.")
-            new_scope = payload.balance_scope.strip()
-        else:
-            new_scope = existing.get("balance_scope", "asset")
-
-        if "risk_level" in fields_set:
-            new_risk = payload.risk_level
-        else:
-            new_risk = existing.get("risk_level")
-
-        if "owner_user_id" in fields_set:
-            new_owner = payload.owner_user_id
-        else:
-            new_owner = existing.get("owner_user_id")
-
-        if "opened_on" in fields_set and payload.opened_on is not None:
-            new_opened_on = payload.opened_on
-        else:
-            new_opened_on = existing["opened_on"]
-
-        if "statement_import_enabled" in fields_set and payload.statement_import_enabled is not None:
-            new_stmt_enabled = payload.statement_import_enabled
-        else:
-            new_stmt_enabled = existing.get("statement_import_enabled", False)
-
-        if "account_type" in fields_set and payload.account_type is not None:
-            new_type = payload.account_type
-        else:
-            new_type = existing["account_type"]
-
-        if "currency" in fields_set and payload.currency is not None:
-            new_currency = validate_currency_code(payload.currency)
-        else:
-            new_currency = existing["currency"]
-
-        # 2. Validate complete resulting state
-        if new_type == "credit" and new_risk is not None:
-            raise LinkedAccountInvalidError("Credit accounts cannot have a risk level.")
-
-        if new_opened_on != existing["opened_on"]:
-            if existing.get("closed_on") and new_opened_on > existing["closed_on"]:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Account opened_on cannot be after closed_on."
-                )
-            if not accounts_repo.check_account_observations_within_lifetime(
-                conn, household_id, account_id, new_opened_on
-            ):
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Account has financial observations before new opened_on date."
-                )
-
-        if new_currency != existing["currency"]:
-            if accounts_repo.has_financial_history(conn, household_id, account_id):
-                raise CurrencyImmutableError()
-
-        if new_type != existing["account_type"]:
-            if accounts_repo.has_financial_history(conn, household_id, account_id):
-                raise AccountTypeImmutableError()
-
-        if new_name.lower() != existing["name"].lower():
-            if accounts_repo.check_account_name_exists(conn, household_id, new_name, exclude_account_id=account_id):
-                raise AccountNameConflictError(new_name)
-
-        if new_owner is not None and new_owner != existing.get("owner_user_id"):
-            if not accounts_repo.check_user_in_household(conn, new_owner, household_id):
-                raise UserNotInHouseholdError(new_owner)
-
-        updated = accounts_repo.update_account(
-            conn=conn,
-            household_id=household_id,
-            account_id=account_id,
-            name=new_name,
-            balance_scope=new_scope,
-            account_type=new_type,
-            currency=new_currency,
-            owner_user_id=new_owner,
-            risk_level=new_risk,
-            opened_on=new_opened_on,
-            statement_import_enabled=new_stmt_enabled,
-            expected_row_version=expected_ver,
-            fields_set=fields_set
-        )
-        if not updated:
-            raise RowVersionConflictError()
-
-        before_data = {
-            "name": existing["name"],
-            "balance_scope": existing.get("balance_scope"),
-            "account_type": existing["account_type"],
-            "currency": existing["currency"],
-            "owner_user_id": str(existing["owner_user_id"]) if existing.get("owner_user_id") else None,
-            "risk_level": existing.get("risk_level"),
-            "opened_on": existing["opened_on"].isoformat() if hasattr(existing.get("opened_on"), "isoformat") else str(existing.get("opened_on")),
-            "status": existing["status"],
-            "statement_import_enabled": existing.get("statement_import_enabled", False),
-        }
-        after_data = {
-            "name": updated["name"],
-            "balance_scope": updated.get("balance_scope"),
-            "account_type": updated["account_type"],
-            "currency": updated["currency"],
-            "owner_user_id": str(updated["owner_user_id"]) if updated.get("owner_user_id") else None,
-            "risk_level": updated.get("risk_level"),
-            "opened_on": updated["opened_on"].isoformat() if hasattr(updated.get("opened_on"), "isoformat") else str(updated.get("opened_on")),
-            "status": updated["status"],
-            "statement_import_enabled": updated.get("statement_import_enabled", False),
-        }
-
-        actor_type, actor_user_id, actor_device_id = _get_audit_actor_info(device)
-        audit_repo.insert_audit_event(
-            conn=conn,
-            household_id=household_id,
-            actor_type=actor_type,
-            entity_type="account",
-            entity_id=account_id,
-            action="update",
-            actor_user_id=actor_user_id,
-            actor_device_id=actor_device_id,
-            before_data=before_data,
-            after_data=after_data,
-            reason=payload.reason
-        )
-
-    return _format_account(updated)
+    res, status_code = account_commands.patch_account_command(
+        conn=conn,
+        auth_context=auth_context,
+        idempotency_key=idempotency_key,
+        account_id=account_id,
+        payload=payload
+    )
+    return JSONResponse(status_code=status_code, content=res)
 
 @router.post("/{account_id}/close", summary="Close Account")
 def close_account(
     account_id: UUID,
     payload: CloseAccountRequest,
-    device: Dict[str, Any] = Depends(get_authenticated_actor),
+    idempotency_key: str = Depends(require_idempotency_key),
+    auth_context: AuthContext = Depends(get_auth_context),
     conn: Any = Depends(get_db_connection)
-) -> Dict[str, Any]:
+) -> JSONResponse:
     """
-    Closes an active account. Requires expected_version, closing_snapshot_id (explicit zero balance), and closed_on.
+    Closes an active account as a short durable command. Requires expected_version, closing_snapshot_id (explicit zero balance), and closed_on.
     """
-    household_id = device["household_id"]
-
-    expected_ver = payload.expected_version
-
-    if not payload.closing_snapshot_id:
-        raise HTTPException(status_code=400, detail="closing_snapshot_id is required to close an account.")
-
-    closed_on = payload.closed_on or date.today()
-
-    with transaction(conn):
-        acquire_household_finance_lock(conn, household_id)
-        existing = accounts_repo.get_account(conn, account_id, household_id)
-        if not existing:
-            raise AccountResourceNotFoundError(account_id)
-
-        if existing["row_version"] != expected_ver:
-            raise RowVersionConflictError()
-
-        if existing["status"] != "active":
-            raise HTTPException(status_code=400, detail="Only active accounts can be closed.")
-
-        if closed_on < existing["opened_on"]:
-            raise HTTPException(status_code=400, detail="closed_on cannot be earlier than opened_on.")
-
-        # Validate closing snapshot
-        try:
-            closing_snap = accounts_repo.validate_closing_snapshot_for_close(
-                conn=conn,
-                household_id=household_id,
-                account_id=account_id,
-                closing_snapshot_id=payload.closing_snapshot_id,
-                account=existing,
-                closed_on=closed_on
-            )
-        except (ValueError, AccountResourceNotFoundError) as e:
-            raise HTTPException(status_code=400, detail=str(e))
-
-        updated = accounts_repo.close_account(conn, household_id, account_id, expected_ver, closed_on)
-        if not updated:
-            raise RowVersionConflictError()
-
-        actor_type, actor_user_id, actor_device_id = _get_audit_actor_info(device)
-        audit_repo.insert_audit_event(
-            conn=conn,
-            household_id=household_id,
-            actor_type=actor_type,
-            entity_type="account",
-            entity_id=account_id,
-            action="close",
-            actor_user_id=actor_user_id,
-            actor_device_id=actor_device_id,
-            before_data={"status": "active", "closed_on": None},
-            after_data={
-                "status": "closed",
-                "closed_on": closed_on.isoformat(),
-                "closing_snapshot_id": str(payload.closing_snapshot_id)
-            },
-            reason=payload.reason
-        )
-
-    return _format_account(updated)
+    res, status_code = account_commands.close_account_command(
+        conn=conn,
+        auth_context=auth_context,
+        idempotency_key=idempotency_key,
+        account_id=account_id,
+        payload=payload
+    )
+    return JSONResponse(status_code=status_code, content=res)
 
 @router.post("/{account_id}/reopen", summary="Reopen Account")
 def reopen_account(
     account_id: UUID,
     payload: ReopenAccountRequest,
-    device: Dict[str, Any] = Depends(get_authenticated_actor),
+    idempotency_key: str = Depends(require_idempotency_key),
+    auth_context: AuthContext = Depends(get_auth_context),
     conn: Any = Depends(get_db_connection)
-) -> Dict[str, Any]:
+) -> JSONResponse:
     """
-    Reopens a closed account, clearing closed_on.
+    Reopens a closed account as a short durable command, clearing closed_on.
     """
-    household_id = device["household_id"]
-
-    expected_ver = payload.expected_version
-
-    with transaction(conn):
-        acquire_household_finance_lock(conn, household_id)
-        existing = accounts_repo.get_account(conn, account_id, household_id)
-        if not existing:
-            raise AccountResourceNotFoundError(account_id)
-
-        if existing["row_version"] != expected_ver:
-            raise RowVersionConflictError()
-
-        if existing["status"] != "closed":
-            raise HTTPException(status_code=400, detail="Only closed accounts can be reopened.")
-
-        updated = accounts_repo.reopen_account(conn, household_id, account_id, expected_ver)
-        if not updated:
-            raise RowVersionConflictError()
-
-        actor_type, actor_user_id, actor_device_id = _get_audit_actor_info(device)
-        audit_repo.insert_audit_event(
-            conn=conn,
-            household_id=household_id,
-            actor_type=actor_type,
-            entity_type="account",
-            entity_id=account_id,
-            action="reopen",
-            actor_user_id=actor_user_id,
-            actor_device_id=actor_device_id,
-            before_data={"status": "closed", "closed_on": existing["closed_on"].isoformat() if existing.get("closed_on") else None},
-            after_data={"status": "active", "closed_on": None},
-            reason=payload.reason
-        )
-
-    return _format_account(updated)
+    res, status_code = account_commands.reopen_account_command(
+        conn=conn,
+        auth_context=auth_context,
+        idempotency_key=idempotency_key,
+        account_id=account_id,
+        payload=payload
+    )
+    return JSONResponse(status_code=status_code, content=res)
 
 @router.post("/{account_id}/cancel", summary="Cancel Account")
 def cancel_account(
     account_id: UUID,
     payload: CancelAccountRequest,
-    device: Dict[str, Any] = Depends(get_authenticated_actor),
+    idempotency_key: str = Depends(require_idempotency_key),
+    auth_context: AuthContext = Depends(get_auth_context),
     conn: Any = Depends(get_db_connection)
-) -> Dict[str, Any]:
+) -> JSONResponse:
     """
-    Cancels an unused account with no financial references.
+    Cancels an unused account with no financial references as a short durable command.
     """
-    household_id = device["household_id"]
+    res, status_code = account_commands.cancel_account_command(
+        conn=conn,
+        auth_context=auth_context,
+        idempotency_key=idempotency_key,
+        account_id=account_id,
+        payload=payload
+    )
+    return JSONResponse(status_code=status_code, content=res)
 
-    expected_ver = payload.expected_version
-
-    with transaction(conn):
-        acquire_household_finance_lock(conn, household_id)
-        existing = accounts_repo.get_account(conn, account_id, household_id)
-        if not existing:
-            raise AccountResourceNotFoundError(account_id)
-
-        if existing["row_version"] != expected_ver:
-            raise RowVersionConflictError()
-
-        if existing["status"] != "active":
-            raise HTTPException(status_code=400, detail="Only active accounts can be cancelled.")
-
-        if accounts_repo.has_financial_history(conn, household_id, account_id):
-            raise HTTPException(status_code=400, detail="Cannot cancel account with existing financial history.")
-
-        updated = accounts_repo.cancel_account(conn, household_id, account_id, expected_ver)
-        if not updated:
-            raise RowVersionConflictError()
-
-        actor_type, actor_user_id, actor_device_id = _get_audit_actor_info(device)
-        audit_repo.insert_audit_event(
-            conn=conn,
-            household_id=household_id,
-            actor_type=actor_type,
-            entity_type="account",
-            entity_id=account_id,
-            action="update",
-            actor_user_id=actor_user_id,
-            actor_device_id=actor_device_id,
-            before_data={"status": "active"},
-            after_data={"status": "cancelled"},
-            reason=payload.reason
-        )
-
-    return _format_account(updated)
 
 # --- Aliases ---
 

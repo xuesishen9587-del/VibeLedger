@@ -34,6 +34,28 @@ class TestAccountsApiDb(BaseDbTestCase):
                     conn.close()
         cls.app.dependency_overrides[get_db_connection] = _get_db
 
+        orig_post = cls.client.post
+        orig_patch = cls.client.patch
+
+        def _wrapped_post(url, *args, **kwargs):
+            headers = dict(kwargs.get("headers") or {})
+            if url.startswith("/api/v1/accounts") and "/aliases" not in url:
+                if "Idempotency-Key" not in headers:
+                    headers["Idempotency-Key"] = f"key-{uuid4().hex}"
+            kwargs["headers"] = headers
+            return orig_post(url, *args, **kwargs)
+
+        def _wrapped_patch(url, *args, **kwargs):
+            headers = dict(kwargs.get("headers") or {})
+            if url.startswith("/api/v1/accounts") and "/aliases" not in url:
+                if "Idempotency-Key" not in headers:
+                    headers["Idempotency-Key"] = f"key-{uuid4().hex}"
+            kwargs["headers"] = headers
+            return orig_patch(url, *args, **kwargs)
+
+        cls.client.post = _wrapped_post
+        cls.client.patch = _wrapped_patch
+
     def seed_test_data(self):
         self.household_id = uuid4()
         self.user_id = uuid4()

@@ -621,3 +621,184 @@ class TestAccountCommandReceiptsDb(BaseDbTestCase):
 
             cur.execute("SELECT COUNT(*) FROM ingestion_requests WHERE household_id = %s AND idempotency_key = %s;", (str(self.household_id), key))
             self.assertEqual(cur.fetchone()[0], 1)
+
+    def test_12_patch_field_presence_command_identity_conflicts(self):
+        """
+        Requirements for Defect 1:
+        - Omitted risk_level vs explicit risk_level: null under same actor/key conflicts (409 IDEMPOTENCY_KEY_REUSE)
+        - Omitted owner_user_id vs explicit owner_user_id: null under same actor/key conflicts (409 IDEMPOTENCY_KEY_REUSE)
+        - Neither changed command is silently replayed
+        - Exact retry of truly identical PATCH still replays successfully
+        - Stale expected_version exact replay continues to work
+        """
+        acc_id = uuid4()
+        accounts_repo.create_account(
+            self.conn,
+            account_id=acc_id,
+            household_id=self.household_id,
+            name="Patch Field Pres Acc",
+            account_type="investment",
+            currency="CNY",
+            owner_user_id=self.user_id,
+            risk_level="medium",
+            opened_on=date(2026, 1, 1)
+        )
+        self.conn.commit()
+
+        # --- Case A: risk_level omitted vs explicit null ---
+        key_a = f"idemp-key-patch-risk-{uuid4().hex[:8]}"
+        headers_a = {**self.device_headers, "Idempotency-Key": key_a}
+
+        # 1. First execution: omit risk_level
+        payload_a_omitted = {
+            "name": "Renamed Without Risk",
+            "expected_version": 0
+        }
+        res_a1 = self.client.patch(f"/api/v1/accounts/{acc_id}", json=payload_a_omitted, headers=headers_a)
+        self.assertEqual(res_a1.status_code, 200)
+        self.assertEqual(res_a1.json()["name"], "Renamed Without Risk")
+        self.assertEqual(res_a1.json()["risk_level"], "medium")
+        self.assertEqual(res_a1.json()["row_version"], 1)
+
+        # 2. Exact retry of the truly identical PATCH (even with now-stale expected_version=0) replays successfully
+        res_a_replay = self.client.patch(f"/api/v1/accounts/{acc_id}", json=payload_a_omitted, headers=headers_a)
+        self.assertEqual(res_a_replay.status_code, 200)
+        self.assertEqual(res_a_replay.json(), res_a1.json())
+
+        # 3. Same key with explicit risk_level: null conflicts with IDEMPOTENCY_KEY_REUSE
+        payload_a_null = {
+            "name": "Renamed Without Risk",
+            "risk_level": None,
+            "expected_version": 0
+        }
+        res_a_conflict = self.client.patch(f"/api/v1/accounts/{acc_id}", json=payload_a_null, headers=headers_a)
+        self.assertEqual(res_a_conflict.status_code, 409)
+        self.assertEqual(res_a_conflict.json()["error"]["code"], "IDEMPOTENCY_KEY_REUSE")
+
+        # Verify DB state: risk_level is still "medium", not cleared to null
+        acc = accounts_repo.get_account(self.conn, acc_id, self.household_id)
+        self.assertEqual(acc["risk_level"], "medium")
+        self.assertEqual(acc["row_version"], 1)
+
+        # --- Case B: owner_user_id omitted vs explicit null ---
+        key_b = f"idemp-key-patch-owner-{uuid4().hex[:8]}"
+        headers_b = {**self.device_headers, "Idempotency-Key": key_b}
+
+        # 1. First execution: omit owner_user_id
+        payload_b_omitted = {
+            "name": "Renamed Without Owner",
+            "expected_version": 1
+        }
+        res_b1 = self.client.patch(f"/api/v1/accounts/{acc_id}", json=payload_b_omitted, headers=headers_b)
+        self.assertEqual(res_b1.status_code, 200)
+        self.assertEqual(res_b1.json()["name"], "Renamed Without Owner")
+        self.assertEqual(res_b1.json()["owner_user_id"], str(self.user_id))
+        self.assertEqual(res_b1.json()["row_version"], 2)
+
+        # 2. Exact retry of the truly identical PATCH replays successfully
+        res_b_replay = self.client.patch(f"/api/v1/accounts/{acc_id}", json=payload_b_omitted, headers=headers_b)
+        self.assertEqual(res_b_replay.status_code, 200)
+        self.assertEqual(res_b_replay.json(), res_b1.json())
+
+        # 3. Same key with explicit owner_user_id: null conflicts with IDEMPOTENCY_KEY_REUSE
+        payload_b_null = {
+            "name": "Renamed Without Owner",
+            "owner_user_id": None,
+            "expected_version": 1
+        }
+        res_b_conflict = self.client.patch(f"/api/v1/accounts/{acc_id}", json=payload_b_null, headers=headers_b)
+        self.assertEqual(res_b_conflict.status_code, 409)
+        self.assertEqual(res_b_conflict.json()["error"]["code"], "IDEMPOTENCY_KEY_REUSE")
+
+        # Verify DB state: owner_user_id is still self.user_id, not cleared
+        acc = accounts_repo.get_account(self.conn, acc_id, self.household_id)
+        self.assertEqual(acc["owner_user_id"], self.user_id)
+        self.assertEqual(acc["row_version"], 2)
+
+    def test_13_deterministic_400_rejection_and_replay_byte_identical(self):
+        """
+        Requirements for Defect 2:
+        - Actual Stage 2A HTTP 400 rejection path (invalid closing snapshot)
+        - First request returns deterministic 400 with BAD_REQUEST payload
+        - Receipt in DB has terminal status='rejected', response_http_status=400, response_payload matching first JSON body
+        - Identical retry returns exactly the same status and JSON body
+        - No account mutation occurs
+        - No audit event for nonexistent change occurs
+        - Same key with changed command returns IDEMPOTENCY_KEY_REUSE (409)
+        """
+        acc_id = uuid4()
+        accounts_repo.create_account(
+            self.conn,
+            account_id=acc_id,
+            household_id=self.household_id,
+            name="Close Reject Target Acc",
+            account_type="cash",
+            currency="CNY",
+            opened_on=date(2026, 1, 1)
+        )
+        self.conn.commit()
+
+        key = f"idemp-key-close-reject-{uuid4().hex[:8]}"
+        headers = {**self.device_headers, "Idempotency-Key": key}
+        fake_snap_id = uuid4()
+        payload = {
+            "expected_version": 0,
+            "closed_on": "2026-06-01",
+            "closing_snapshot_id": str(fake_snap_id)
+        }
+
+        # 1. First execution fails with deterministic 400
+        res1 = self.client.post(f"/api/v1/accounts/{acc_id}/close", json=payload, headers=headers)
+        self.assertEqual(res1.status_code, 400)
+        body1 = res1.json()
+        self.assertEqual(body1["error"]["code"], "BAD_REQUEST")
+        self.assertEqual(body1["error"]["retryable"], False)
+        self.assertIn(f"Closing snapshot {fake_snap_id} not found", body1["error"]["message"])
+        self.assertEqual(body1["detail"], body1["error"]["message"])
+
+        # 2. Receipt is terminal 'rejected' and stores exact status and payload
+        with self.conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT status, response_http_status, failure_code, committed_at, response_payload
+                FROM ingestion_requests
+                WHERE household_id = %s AND idempotency_key = %s;
+                """,
+                (str(self.household_id), key)
+            )
+            row = cur.fetchone()
+            self.assertIsNotNone(row)
+            self.assertEqual(row[0], "rejected")
+            self.assertEqual(row[1], 400)
+            self.assertEqual(row[2], "BAD_REQUEST")
+            self.assertIsNone(row[3]) # committed_at must be NULL
+            self.assertEqual(row[4], body1) # saved response_payload exactly equals first JSON body
+
+        # 3. Identical retry returns exactly the same status and JSON body
+        res2 = self.client.post(f"/api/v1/accounts/{acc_id}/close", json=payload, headers=headers)
+        self.assertEqual(res2.status_code, 400)
+        self.assertEqual(res2.json(), body1)
+
+        # 4. Verify no account mutation occurred
+        acc = accounts_repo.get_account(self.conn, acc_id, self.household_id)
+        self.assertEqual(acc["status"], "active")
+        self.assertIsNone(acc["closed_on"])
+        self.assertEqual(acc["row_version"], 0)
+
+        # 5. Verify no audit event for nonexistent change occurred
+        with self.conn.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) FROM audit_events WHERE household_id = %s AND entity_id = %s AND action = 'close';",
+                (str(self.household_id), str(acc_id))
+            )
+            self.assertEqual(cur.fetchone()[0], 0)
+
+        # 6. Same key with changed command returns IDEMPOTENCY_KEY_REUSE (409)
+        changed_payload = {
+            "expected_version": 0,
+            "closed_on": "2026-06-02",
+            "closing_snapshot_id": str(fake_snap_id)
+        }
+        res3 = self.client.post(f"/api/v1/accounts/{acc_id}/close", json=changed_payload, headers=headers)
+        self.assertEqual(res3.status_code, 409)
+        self.assertEqual(res3.json()["error"]["code"], "IDEMPOTENCY_KEY_REUSE")

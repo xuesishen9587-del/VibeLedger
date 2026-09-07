@@ -7,6 +7,7 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 from fastapi import HTTPException
 
+from app.api.errors import extract_error_details
 from app.auth.context import AuthContext
 from app.domain.money import validate_currency_code
 from app.domain.transactions import (
@@ -73,75 +74,6 @@ def _get_audit_actor_info(auth_context: AuthContext) -> Tuple[str, Optional[UUID
         if auth_context.device_id is not None:
             return "device", auth_context.user_id, auth_context.device_id
         return "user", auth_context.user_id, None
-
-
-def _extract_error_details(exc: Exception) -> Tuple[int, str, Dict[str, Any]]:
-    if isinstance(exc, LedgerDomainError):
-        status_code = 422
-        if isinstance(exc, RowVersionConflictError):
-            status_code = 409
-        elif isinstance(exc, AccountResourceNotFoundError):
-            status_code = 404
-        elif isinstance(exc, (AccountNameConflictError, CurrencyImmutableError, AccountTypeImmutableError, UserNotInHouseholdError, LinkedAccountInvalidError)):
-            status_code = 422
-
-        code = getattr(exc, "code", "VALIDATION_ERROR")
-        msg = getattr(exc, "message", str(exc))
-        payload = {
-            "error": {
-                "code": code,
-                "message": msg,
-                "retryable": False,
-                "details": getattr(exc, "details", {})
-            },
-            "detail": msg
-        }
-        return status_code, code, payload
-
-    elif isinstance(exc, HTTPException):
-        status_code = exc.status_code
-        if isinstance(exc.detail, dict) and "error" in exc.detail:
-            payload = exc.detail
-            code = exc.detail["error"].get("code", f"HTTP_{status_code}")
-        else:
-            code = "HTTP_ERROR"
-            if status_code == 400:
-                code = "BAD_REQUEST"
-            elif status_code == 401:
-                code = "UNAUTHORIZED"
-            elif status_code == 403:
-                code = "FORBIDDEN"
-            elif status_code == 404:
-                code = "NOT_FOUND"
-            elif status_code == 409:
-                code = "CONFLICT"
-            elif status_code == 422:
-                code = "INVALID_REQUEST"
-            msg = str(exc.detail) if exc.detail else "An HTTP error occurred."
-            payload = {
-                "error": {
-                    "code": code,
-                    "message": msg,
-                    "retryable": (status_code >= 500),
-                    "details": {}
-                },
-                "detail": msg
-            }
-        return status_code, code, payload
-
-    status_code = 500
-    code = "INTERNAL_SERVER_ERROR"
-    msg = str(exc)
-    payload = {
-        "error": {
-            "code": code,
-            "message": msg,
-            "retryable": False,
-            "details": {}
-        },
-        "detail": msg
-    }
-    return status_code, code, payload
 
 
 def execute_account_command(
@@ -250,7 +182,7 @@ def execute_account_command(
             result_payload, http_status = mutation_fn(conn, active_receipt_id)
         except (LedgerDomainError, HTTPException) as exc:
             cur.execute("ROLLBACK TO SAVEPOINT account_command_mutation;")
-            status_code, failure_code, err_payload = _extract_error_details(exc)
+            status_code, failure_code, err_payload = extract_error_details(exc)
             cur.execute(
                 """
                 UPDATE ingestion_requests
@@ -374,7 +306,7 @@ def patch_account_command(
     payload: Any,
 ) -> Tuple[Dict[str, Any], int]:
     operation = f"PATCH /api/v1/accounts/{account_id}"
-    body = payload.model_dump(mode="json")
+    body = payload.model_dump(mode="json", exclude_unset=True)
     fields_set = payload.model_fields_set
 
     def _mutate(c: Any, rid: UUID) -> Tuple[Dict[str, Any], int]:

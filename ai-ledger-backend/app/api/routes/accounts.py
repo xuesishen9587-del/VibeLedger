@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field, ConfigDict
 from app.api.deps import get_db_connection, get_authenticated_actor, require_idempotency_key, get_auth_context
 from app.auth.context import AuthContext
 import app.services.account_commands as account_commands
+import app.services.alias_commands as alias_commands
 from app.db import transaction
 from app.domain.money import validate_currency_code
 from app.domain.transactions import (
@@ -288,126 +289,40 @@ def list_account_aliases(
 def create_account_alias(
     account_id: UUID,
     payload: CreateAliasRequest,
-    device: Dict[str, Any] = Depends(get_authenticated_actor),
+    idempotency_key: str = Depends(require_idempotency_key),
+    auth_context: AuthContext = Depends(get_auth_context),
     conn: Any = Depends(get_db_connection)
-) -> Dict[str, Any]:
-    household_id = device["household_id"]
-    existing = accounts_repo.get_account(conn, account_id, household_id)
-    if not existing:
-        raise AccountResourceNotFoundError(account_id)
-
-    raw_alias = payload.alias.strip()
-    normalized = raw_alias.lower()
-
-    if accounts_repo.check_account_alias_exists(conn, account_id, normalized, household_id=household_id):
-        raise AccountAliasConflictError(raw_alias)
-
-    alias_id = uuid4()
-    try:
-        with transaction(conn):
-            accounts_repo.create_account_alias(
-                conn=conn,
-                alias_id=alias_id,
-                account_id=account_id,
-                alias_text=raw_alias,
-                normalized_alias=normalized,
-                status='active',
-                household_id=household_id
-            )
-            actor_type, actor_user_id, actor_device_id = _get_audit_actor_info(device)
-            audit_repo.insert_audit_event(
-                conn=conn,
-                household_id=household_id,
-                actor_type=actor_type,
-                entity_type="account_alias",
-                entity_id=alias_id,
-                action="create",
-                actor_user_id=actor_user_id,
-                actor_device_id=actor_device_id,
-                after_data={"account_id": str(account_id), "alias": raw_alias}
-            )
-    except psycopg2.IntegrityError as e:
-        if "uq_account_aliases_active" in str(e) or "account_aliases" in str(e):
-            raise AccountAliasConflictError(raw_alias)
-        raise
-
-    alias_obj = accounts_repo.get_account_alias(conn, alias_id=alias_id, household_id=household_id, account_id=account_id)
-    return {
-        "id": str(alias_obj["id"]),
-        "household_id": str(alias_obj["household_id"]),
-        "account_id": str(alias_obj["account_id"]),
-        "alias": alias_obj["alias_text"],
-        "status": alias_obj["status"],
-        "row_version": alias_obj.get("row_version", 0),
-        "created_at": alias_obj["created_at"].isoformat() if hasattr(alias_obj.get("created_at"), "isoformat") else str(alias_obj.get("created_at")),
-        "updated_at": alias_obj["updated_at"].isoformat() if hasattr(alias_obj.get("updated_at"), "isoformat") else str(alias_obj.get("updated_at"))
-    }
+) -> JSONResponse:
+    """
+    Creates a new alias for an account as a short durable command.
+    """
+    res, status_code = alias_commands.create_alias_command(
+        conn=conn,
+        auth_context=auth_context,
+        idempotency_key=idempotency_key,
+        account_id=account_id,
+        payload=payload
+    )
+    return JSONResponse(status_code=status_code, content=res)
 
 @router.patch("/{account_id}/aliases/{alias_id}", summary="Update Account Alias")
 def patch_account_alias(
     account_id: UUID,
     alias_id: UUID,
     payload: PatchAliasRequest,
-    device: Dict[str, Any] = Depends(get_authenticated_actor),
+    idempotency_key: str = Depends(require_idempotency_key),
+    auth_context: AuthContext = Depends(get_auth_context),
     conn: Any = Depends(get_db_connection)
-) -> Dict[str, Any]:
-    household_id = device["household_id"]
-    existing = accounts_repo.get_account(conn, account_id, household_id)
-    if not existing:
-        raise AccountResourceNotFoundError(account_id)
-
-    alias_obj = accounts_repo.get_account_alias(conn, alias_id=alias_id, household_id=household_id, account_id=account_id)
-    if not alias_obj:
-        raise AliasResourceNotFoundError(alias_id)
-
-    expected_ver = payload.expected_version
-    if alias_obj.get("row_version") != expected_ver:
-        raise RowVersionConflictError()
-
-    clean_alias = payload.alias.strip() if payload.alias is not None else None
-    if clean_alias is not None:
-        if accounts_repo.check_account_alias_exists(conn, account_id, clean_alias.lower(), exclude_alias_id=alias_id, household_id=household_id):
-            raise AccountAliasConflictError(clean_alias)
-
-    try:
-        with transaction(conn):
-            updated = accounts_repo.update_account_alias(
-                conn=conn,
-                household_id=household_id,
-                account_id=account_id,
-                alias_id=alias_id,
-                expected_version=expected_ver,
-                alias_text=clean_alias,
-                status=payload.status
-            )
-            if not updated:
-                raise RowVersionConflictError()
-
-            actor_type, actor_user_id, actor_device_id = _get_audit_actor_info(device)
-            audit_repo.insert_audit_event(
-                conn=conn,
-                household_id=household_id,
-                actor_type=actor_type,
-                entity_type="account_alias",
-                entity_id=alias_id,
-                action="update",
-                actor_user_id=actor_user_id,
-                actor_device_id=actor_device_id,
-                before_data={"alias": alias_obj["alias_text"], "status": alias_obj["status"]},
-                after_data={"alias": updated["alias_text"], "status": updated["status"]}
-            )
-    except psycopg2.IntegrityError as e:
-        if "uq_account_aliases_active" in str(e) or "account_aliases" in str(e):
-            raise AccountAliasConflictError(clean_alias or "")
-        raise
-
-    return {
-        "id": str(updated["id"]),
-        "household_id": str(updated["household_id"]),
-        "account_id": str(updated["account_id"]),
-        "alias": updated["alias_text"],
-        "status": updated["status"],
-        "row_version": updated["row_version"],
-        "created_at": updated["created_at"].isoformat() if hasattr(updated["created_at"], "isoformat") else str(updated["created_at"]),
-        "updated_at": updated["updated_at"].isoformat() if hasattr(updated["updated_at"], "updated_at") else str(updated["updated_at"])
-    }
+) -> JSONResponse:
+    """
+    Updates an existing account alias as a short durable command.
+    """
+    res, status_code = alias_commands.patch_alias_command(
+        conn=conn,
+        auth_context=auth_context,
+        idempotency_key=idempotency_key,
+        account_id=account_id,
+        alias_id=alias_id,
+        payload=payload
+    )
+    return JSONResponse(status_code=status_code, content=res)

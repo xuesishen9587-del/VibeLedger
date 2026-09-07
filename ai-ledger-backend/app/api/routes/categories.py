@@ -1,17 +1,14 @@
 from typing import Optional, Dict, Any
-from uuid import UUID, uuid4
-from fastapi import APIRouter, Depends, Query, status, HTTPException
+from uuid import UUID
+from fastapi import APIRouter, Depends, Query, status
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, ConfigDict
 
-from app.api.deps import get_db_connection, get_authenticated_actor
-from app.db import transaction
-from app.domain.transactions import (
-    CategoryResourceNotFoundError,
-    CategoryNameConflictError,
-    RowVersionConflictError
-)
+from app.api.deps import get_db_connection, get_authenticated_actor, require_idempotency_key, get_auth_context
+from app.auth.context import AuthContext
+from app.domain.transactions import CategoryResourceNotFoundError
 import app.repositories.categories as categories_repo
-import app.repositories.audit as audit_repo
+import app.services.category_commands as category_commands
 
 router = APIRouter(prefix="/api/v1/categories", tags=["Categories"])
 
@@ -29,19 +26,6 @@ class PatchCategoryRequest(BaseModel):
     description: Optional[str] = Field(None, max_length=500, description="Category description")
     status: Optional[str] = Field(None, pattern="^(active|inactive)$", description="Category status")
     expected_version: int = Field(..., ge=0, description="Optimistic concurrency control version")
-
-def _get_audit_actor_info(actor: Dict[str, Any]) -> tuple[str, Optional[UUID], Optional[UUID]]:
-    auth_mode = actor.get("auth_mode")
-    user_id = actor.get("user_id")
-    device_id = actor.get("device_id")
-    if auth_mode == "browser":
-        return "user", user_id, None
-    elif auth_mode == "device":
-        return "device", user_id, device_id
-    else:
-        if device_id is not None:
-            return "device", user_id, device_id
-        return "user", user_id, None
 
 def _format_category(cat: Dict[str, Any]) -> Dict[str, Any]:
     return {
@@ -89,123 +73,39 @@ def get_category(
 @router.post("", status_code=status.HTTP_201_CREATED, summary="Create Category")
 def create_category(
     payload: CreateCategoryRequest,
-    device: Dict[str, Any] = Depends(get_authenticated_actor),
+    idempotency_key: str = Depends(require_idempotency_key),
+    auth_context: AuthContext = Depends(get_auth_context),
     conn: Any = Depends(get_db_connection)
-) -> Dict[str, Any]:
+) -> JSONResponse:
     """
-    Creates a new category under the authenticated household.
+    Creates a new category under the authenticated household as a short durable command.
     """
-    household_id = device["household_id"]
-    clean_name = payload.name.strip()
-    clean_desc = payload.description.strip() if payload.description else None
-
-    if categories_repo.check_category_name_exists(conn, household_id, payload.type, clean_name):
-        raise CategoryNameConflictError(clean_name, payload.type)
-
-    category_id = uuid4()
-    with transaction(conn):
-        created = categories_repo.create_category(
-            conn=conn,
-            category_id=category_id,
-            household_id=household_id,
-            name=clean_name,
-            category_type=payload.type,
-            description=clean_desc,
-            is_fallback=False,
-            status='active'
-        )
-        actor_type, actor_user_id, actor_device_id = _get_audit_actor_info(device)
-        audit_repo.insert_audit_event(
-            conn=conn,
-            household_id=household_id,
-            actor_type=actor_type,
-            entity_type="category",
-            entity_id=category_id,
-            action="create",
-            actor_user_id=actor_user_id,
-            actor_device_id=actor_device_id,
-            after_data={
-                "name": clean_name,
-                "category_type": payload.type,
-                "description": clean_desc,
-                "is_fallback": False,
-                "status": "active"
-            }
-        )
-
-    return _format_category(created)
+    res, status_code = category_commands.create_category_command(
+        conn=conn,
+        auth_context=auth_context,
+        idempotency_key=idempotency_key,
+        payload=payload
+    )
+    return JSONResponse(status_code=status_code, content=res)
 
 @router.patch("/{category_id}", summary="Update Category")
 def patch_category(
     category_id: UUID,
     payload: PatchCategoryRequest,
-    device: Dict[str, Any] = Depends(get_authenticated_actor),
+    idempotency_key: str = Depends(require_idempotency_key),
+    auth_context: AuthContext = Depends(get_auth_context),
     conn: Any = Depends(get_db_connection)
-) -> Dict[str, Any]:
+) -> JSONResponse:
     """
-    Updates an existing category within the authenticated household.
+    Updates an existing category within the authenticated household as a short durable command.
     """
-    household_id = device["household_id"]
-    existing = categories_repo.get_category(conn, category_id, household_id)
-    if not existing:
-        raise CategoryResourceNotFoundError(category_id)
-
-    expected_ver = payload.expected_version
-    if existing["row_version"] != expected_ver:
-        raise RowVersionConflictError()
-
-    clean_name = payload.name.strip() if payload.name is not None else None
-    if clean_name and clean_name.lower() != existing["name"].lower():
-        if categories_repo.check_category_name_exists(
-            conn, household_id, existing["category_type"], clean_name, exclude_category_id=category_id
-        ):
-            raise CategoryNameConflictError(clean_name, existing["category_type"])
-
-    clean_desc = payload.description.strip() if payload.description is not None else None
-
-    # If deactivating via status in patch
-    if payload.status == "inactive" and existing.get("is_fallback"):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Fallback category cannot be archived."
-        )
-
-    with transaction(conn):
-        updated = categories_repo.update_category(
-            conn=conn,
-            household_id=household_id,
-            category_id=category_id,
-            name=clean_name,
-            description=clean_desc,
-            status=payload.status,
-            expected_version=expected_ver,
-            fields_set=payload.model_fields_set
-        )
-        if not updated:
-            raise RowVersionConflictError()
-
-        actor_type, actor_user_id, actor_device_id = _get_audit_actor_info(device)
-        audit_repo.insert_audit_event(
-            conn=conn,
-            household_id=household_id,
-            actor_type=actor_type,
-            entity_type="category",
-            entity_id=category_id,
-            action="update",
-            actor_user_id=actor_user_id,
-            actor_device_id=actor_device_id,
-            before_data={
-                "name": existing["name"],
-                "description": existing.get("description"),
-                "status": existing["status"]
-            },
-            after_data={
-                "name": updated["name"],
-                "description": updated.get("description"),
-                "status": updated["status"]
-            }
-        )
-
-    return _format_category(updated)
+    res, status_code = category_commands.patch_category_command(
+        conn=conn,
+        auth_context=auth_context,
+        idempotency_key=idempotency_key,
+        category_id=category_id,
+        payload=payload
+    )
+    return JSONResponse(status_code=status_code, content=res)
 
 

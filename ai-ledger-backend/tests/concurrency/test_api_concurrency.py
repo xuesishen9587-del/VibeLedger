@@ -146,7 +146,10 @@ class TestApiConcurrency(BaseDbTestCase):
                     "name": f"Renamed Cat {idx}",
                     "expected_version": 0
                 },
-                headers=self.headers
+                headers={
+                    **self.headers,
+                    "Idempotency-Key": f"key-race-cat-patch-{idx}-{uuid4().hex}"
+                }
             )
             results.append((res.status_code, res.json()))
 
@@ -173,17 +176,20 @@ class TestApiConcurrency(BaseDbTestCase):
         results = []
         threads = []
 
-        def worker():
+        def worker(idx):
             client = TestClient(self.app)
             res = client.post(
                 f"/api/v1/accounts/{self.acc_checking_id}/aliases",
                 json={"alias": "招行卡"},
-                headers=self.headers
+                headers={
+                    **self.headers,
+                    "Idempotency-Key": f"key-race-alias-create-{idx}-{uuid4().hex}"
+                }
             )
             results.append((res.status_code, res.json()))
 
-        for _ in range(4):
-            t = threading.Thread(target=worker)
+        for i in range(4):
+            t = threading.Thread(target=worker, args=(i,))
             threads.append(t)
 
         for t in threads:

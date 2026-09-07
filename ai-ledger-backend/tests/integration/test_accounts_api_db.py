@@ -39,7 +39,7 @@ class TestAccountsApiDb(BaseDbTestCase):
 
         def _wrapped_post(url, *args, **kwargs):
             headers = dict(kwargs.get("headers") or {})
-            if url.startswith("/api/v1/accounts") and "/aliases" not in url:
+            if url.startswith("/api/v1/accounts"):
                 if "Idempotency-Key" not in headers:
                     headers["Idempotency-Key"] = f"key-{uuid4().hex}"
             kwargs["headers"] = headers
@@ -47,7 +47,7 @@ class TestAccountsApiDb(BaseDbTestCase):
 
         def _wrapped_patch(url, *args, **kwargs):
             headers = dict(kwargs.get("headers") or {})
-            if url.startswith("/api/v1/accounts") and "/aliases" not in url:
+            if url.startswith("/api/v1/accounts"):
                 if "Idempotency-Key" not in headers:
                     headers["Idempotency-Key"] = f"key-{uuid4().hex}"
             kwargs["headers"] = headers

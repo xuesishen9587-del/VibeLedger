@@ -30,6 +30,14 @@ def format_alias(alias_obj: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _is_alias_conflict(e: psycopg2.IntegrityError) -> bool:
+    diag = getattr(e, "diag", None)
+    constraint_name = getattr(diag, "constraint_name", None)
+    if constraint_name is not None:
+        return constraint_name == "uq_account_aliases_active"
+    return '"uq_account_aliases_active"' in str(e) or "'uq_account_aliases_active'" in str(e)
+
+
 def create_alias_command(
     conn: Any,
     auth_context: AuthContext,
@@ -64,7 +72,7 @@ def create_alias_command(
                 household_id=household_id,
             )
         except psycopg2.IntegrityError as e:
-            if "uq_account_aliases_active" in str(e) or "account_aliases" in str(e):
+            if _is_alias_conflict(e):
                 raise AccountAliasConflictError(raw_alias)
             raise
 
@@ -137,7 +145,7 @@ def patch_alias_command(
             if not updated:
                 raise RowVersionConflictError()
         except psycopg2.IntegrityError as e:
-            if "uq_account_aliases_active" in str(e) or "account_aliases" in str(e):
+            if _is_alias_conflict(e):
                 raise AccountAliasConflictError(clean_alias or "")
             raise
 

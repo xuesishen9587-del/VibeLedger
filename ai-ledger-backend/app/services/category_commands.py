@@ -31,6 +31,14 @@ def format_category(cat: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _is_category_conflict(e: psycopg2.IntegrityError) -> bool:
+    diag = getattr(e, "diag", None)
+    constraint_name = getattr(diag, "constraint_name", None)
+    if constraint_name is not None:
+        return constraint_name == "uq_categories_active_name"
+    return '"uq_categories_active_name"' in str(e) or "'uq_categories_active_name'" in str(e)
+
+
 def create_category_command(
     conn: Any,
     auth_context: AuthContext,
@@ -61,7 +69,7 @@ def create_category_command(
                 status="active",
             )
         except psycopg2.IntegrityError as e:
-            if "uq_categories_name_type" in str(e) or "categories" in str(e):
+            if _is_category_conflict(e):
                 raise CategoryNameConflictError(clean_name, payload.type)
             raise
 
@@ -138,7 +146,7 @@ def patch_category_command(
             if not updated:
                 raise RowVersionConflictError()
         except psycopg2.IntegrityError as e:
-            if "uq_categories_name_type" in str(e) or "categories" in str(e):
+            if _is_category_conflict(e):
                 raise CategoryNameConflictError(clean_name or existing["name"], existing["category_type"])
             raise
 

@@ -7,6 +7,7 @@ from fastapi import HTTPException
 
 from app.api.errors import extract_error_details
 from app.auth.context import AuthContext
+from app.domain.auth import DeviceNotFoundError
 from app.domain.transactions import (
     LedgerDomainError,
     IdempotencyKeyReuseError,
@@ -33,20 +34,22 @@ def compute_command_hash(operation: str, body: Dict[str, Any]) -> str:
     return hashlib.sha256(payload_str.encode("utf-8")).hexdigest()
 
 
-def get_audit_actor_info(auth_context: AuthContext) -> Tuple[str, Optional[UUID], Optional[UUID]]:
-    if auth_context.is_browser:
+def get_audit_actor_info(auth_context: Any) -> Tuple[str, Optional[UUID], Optional[UUID]]:
+    if getattr(auth_context, "is_system", False):
+        return "system", None, None
+    elif getattr(auth_context, "is_browser", False):
         return "user", auth_context.user_id, None
-    elif auth_context.is_device:
+    elif getattr(auth_context, "is_device", False):
         return "device", auth_context.user_id, auth_context.device_id
     else:
-        if auth_context.device_id is not None:
+        if getattr(auth_context, "device_id", None) is not None:
             return "device", auth_context.user_id, auth_context.device_id
-        return "user", auth_context.user_id, None
+        return "user", getattr(auth_context, "user_id", None), None
 
 
 def execute_durable_command(
     conn: Any,
-    auth_context: AuthContext,
+    auth_context: Any,
     idempotency_key: str,
     operation: str,
     body: Dict[str, Any],
@@ -73,7 +76,7 @@ def execute_durable_command(
     request_hash = compute_command_hash(operation, body)
     household_id = auth_context.household_id
     user_id = auth_context.user_id
-    device_id = auth_context.device_id if auth_context.is_device else None
+    device_id = auth_context.device_id if getattr(auth_context, "is_device", False) else None
     actor_scope = auth_context.actor_scope
     receipt_id = uuid4()
 
@@ -148,7 +151,7 @@ def execute_durable_command(
         cur.execute("SAVEPOINT durable_command_mutation;")
         try:
             result_payload, http_status = mutation_fn(conn, active_receipt_id)
-        except (LedgerDomainError, HTTPException) as exc:
+        except (LedgerDomainError, DeviceNotFoundError, HTTPException) as exc:
             cur.execute("ROLLBACK TO SAVEPOINT durable_command_mutation;")
             status_code, failure_code, err_payload = extract_error_details(exc)
             cur.execute(

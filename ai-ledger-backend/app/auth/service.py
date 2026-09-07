@@ -18,6 +18,7 @@ from app.repositories import devices as repo_devices
 from app.repositories import users as repo_users
 from app.repositories import household_members as repo_members
 from app.repositories import audit as repo_audit
+from app.services.durable_commands import execute_durable_command, get_audit_actor_info
 
 
 class AuthService:
@@ -198,11 +199,20 @@ class AuthService:
         return device_dict, raw_token
 
     @staticmethod
-    def revoke_device(conn, auth_context: AuthContext, device_id: UUID) -> Dict[str, Any]:
+    def revoke_device(
+        conn,
+        auth_context: AuthContext,
+        device_id: UUID,
+        source_request_id: UUID,
+    ) -> Dict[str, Any]:
         """
         Revokes a device belonging to the caller's user.
         Raises DeviceNotFoundError if the device does not exist or belongs to another user.
+        Requires mandatory source_request_id linking the mutation and audit event to a command receipt.
         """
+        if not source_request_id:
+            raise ValueError("source_request_id is required for device revocation.")
+
         device_dict = repo_devices.revoke_device(
             conn,
             device_id=device_id,
@@ -212,13 +222,14 @@ class AuthService:
         if not device_dict:
             raise DeviceNotFoundError(f"Device {device_id} not found.")
 
-        actor_type = "user" if auth_context.is_browser else "device"
+        actor_type, actor_user_id, actor_device_id = get_audit_actor_info(auth_context)
         repo_audit.insert_audit_event(
             conn,
             household_id=auth_context.household_id,
             actor_type=actor_type,
-            actor_user_id=auth_context.user_id,
-            actor_device_id=auth_context.device_id,
+            actor_user_id=actor_user_id,
+            actor_device_id=actor_device_id,
+            source_request_id=source_request_id,
             entity_type="device",
             entity_id=device_id,
             action="update",
@@ -226,3 +237,44 @@ class AuthService:
         )
 
         return device_dict
+
+    @staticmethod
+    def revoke_device_command(
+        conn,
+        auth_context: AuthContext,
+        device_id: UUID,
+        idempotency_key: str,
+    ) -> Tuple[Dict[str, Any], int]:
+        operation = f"POST /api/v1/devices/{device_id}/revoke"
+        body: Dict[str, Any] = {}
+
+        def _mutate(c: Any, receipt_id: UUID) -> Tuple[Dict[str, Any], int]:
+            revoked_dev = AuthService.revoke_device(
+                conn=c,
+                auth_context=auth_context,
+                device_id=device_id,
+                source_request_id=receipt_id,
+            )
+            result = {
+                "device": {
+                    "device_id": str(revoked_dev["device_id"]),
+                    "user_id": str(revoked_dev["user_id"]),
+                    "device_name": revoked_dev["device_name"],
+                    "platform": revoked_dev["platform"],
+                    "status": revoked_dev["status"],
+                    "client_version": revoked_dev.get("client_version"),
+                    "created_at": revoked_dev["created_at"].isoformat() if revoked_dev.get("created_at") else None,
+                    "last_seen_at": revoked_dev["last_seen_at"].isoformat() if revoked_dev.get("last_seen_at") else None,
+                    "revoked_at": revoked_dev["revoked_at"].isoformat() if revoked_dev.get("revoked_at") else None,
+                }
+            }
+            return result, 200
+
+        return execute_durable_command(
+            conn=conn,
+            auth_context=auth_context,
+            idempotency_key=idempotency_key,
+            operation=operation,
+            body=body,
+            mutation_fn=_mutate,
+        )

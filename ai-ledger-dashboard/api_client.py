@@ -638,6 +638,9 @@ class ApiClient:
         }
         return self.request("POST", "/api/v1/devices", json_data=payload)
 
-    def revoke_device(self, device_id: str) -> Dict[str, Any]:
+    def revoke_device(self, device_id: str, idempotency_key: str) -> Dict[str, Any]:
         """POST /api/v1/devices/{device_id}/revoke"""
-        return self.request("POST", f"/api/v1/devices/{device_id}/revoke")
+        if not idempotency_key:
+            raise ValueError("idempotency_key is required for revoke_device")
+        headers = {"Idempotency-Key": idempotency_key}
+        return self.request("POST", f"/api/v1/devices/{device_id}/revoke", headers=headers)

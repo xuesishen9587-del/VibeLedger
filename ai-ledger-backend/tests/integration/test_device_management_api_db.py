@@ -209,7 +209,10 @@ class TestDeviceManagementApiDb(BaseDbTestCase):
         # 2. Revoke device
         revoke_res = self.client.post(
             f"/api/v1/devices/{device_id}/revoke",
-            headers={"Authorization": f"Bearer {self.jwt_user1}"}
+            headers={
+                "Authorization": f"Bearer {self.jwt_user1}",
+                "Idempotency-Key": f"key-revoke-{uuid4().hex}",
+            }
         )
         self.assertEqual(revoke_res.status_code, 200)
         revoked_info = revoke_res.json()["device"]
@@ -244,7 +247,10 @@ class TestDeviceManagementApiDb(BaseDbTestCase):
         # User 2 attempts to revoke User 1's device -> must return 404 (isolation)
         res_revoke = self.client.post(
             f"/api/v1/devices/{device_id}/revoke",
-            headers={"Authorization": f"Bearer {self.jwt_user2}"}
+            headers={
+                "Authorization": f"Bearer {self.jwt_user2}",
+                "Idempotency-Key": f"key-cross-{uuid4().hex}",
+            }
         )
         self.assertEqual(res_revoke.status_code, 404)
         self.assertEqual(res_revoke.json()["error"]["code"], "DEVICE_NOT_FOUND")
@@ -253,7 +259,10 @@ class TestDeviceManagementApiDb(BaseDbTestCase):
         random_id = uuid4()
         res = self.client.post(
             f"/api/v1/devices/{random_id}/revoke",
-            headers={"Authorization": f"Bearer {self.jwt_user1}"}
+            headers={
+                "Authorization": f"Bearer {self.jwt_user1}",
+                "Idempotency-Key": f"key-nonexistent-{uuid4().hex}",
+            }
         )
         self.assertEqual(res.status_code, 404)
         self.assertEqual(res.json()["error"]["code"], "DEVICE_NOT_FOUND")

@@ -30,6 +30,8 @@ from app.api.routes.devices import router as devices_router
 from app.api.routes.work_queue import router as work_queue_router
 from app.api.routes.audit import router as audit_router
 from app.api.routes.history import router as history_router
+from app.api.routes.spending_reports import router as spending_reports_router
+from app.api.routes.spending_schedules import router as spending_schedules_router
 
 def create_app() -> FastAPI:
     """
@@ -54,6 +56,8 @@ def create_app() -> FastAPI:
     app.include_router(accounts_router)
     app.include_router(categories_router)
     app.include_router(transactions_router)
+    app.include_router(spending_reports_router)
+    app.include_router(spending_schedules_router)
     app.include_router(dashboard_router)
     app.include_router(credit_cards_router)
     app.include_router(installments_router)

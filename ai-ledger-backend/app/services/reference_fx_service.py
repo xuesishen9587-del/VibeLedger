@@ -38,6 +38,22 @@ class FrankfurterFxProvider(FxRateProvider):
             d = d - timedelta(days=2)
         return d.isoformat()
 
+    def fetch_quote(self, from_currency: str, to_currency: str, as_of: date):
+        """Dated quote for independent spending; retain the provider's effective date."""
+        url = f"{self.base_url}/{as_of.isoformat()}?from={from_currency}&to={to_currency}"
+        try:
+            request = urllib.request.Request(url, headers={"Accept": "application/json", "User-Agent": "VibeLedger/1.0"})
+            with urllib.request.urlopen(request, timeout=min(self.timeout, 5)) as response:
+                data = json.loads(response.read(65536), parse_float=Decimal)
+            effective = date.fromisoformat(data["date"])
+            rate = Decimal(str(data["rates"][to_currency]))
+            if not 0 <= (as_of - effective).days <= 7 or not rate.is_finite() or not 0 < rate < Decimal("1e12"):
+                return None
+            return {"from_currency": from_currency, "to_currency": to_currency,
+                    "rate_as_of": effective, "rate": rate, "source": "frankfurter"}
+        except (OSError, ValueError, KeyError, TypeError, ArithmeticError):
+            return None
+
     def fetch_rate(self, from_currency: str, to_currency: str, as_of: Optional[date] = None) -> Optional[Decimal]:
         from_curr = validate_currency_code(from_currency)
         to_curr = validate_currency_code(to_currency)

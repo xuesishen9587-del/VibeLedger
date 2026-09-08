@@ -29,7 +29,13 @@ from dashboard_controller import (
     build_category_patch_payload,
     is_batch_ready_to_commit
 )
-from settings_controller import SettingsActionController, MutationModifiedPendingError
+from settings_controller import (
+    SettingsActionController,
+    MutationModifiedPendingError,
+    SLOT_CREATE_ACCOUNT,
+    SLOT_CREATE_ALIAS,
+    SLOT_CREATE_CATEGORY,
+)
 
 # --- 页面全局设置 ---
 st.set_page_config(page_title="Vibe Finance Center", page_icon="🏦", layout="wide")
@@ -1032,10 +1038,15 @@ elif menu == "📋 交易明细与纠错/作废":
 # 页面 7: ⚙️ 账户与分类管理 (Canonical S1 Settings)
 # ==============================================================================
 elif menu == "⚙️ 账户与分类管理":
-    st.title("⚙️ 账户与分类管理")
-    st.markdown("通过后端 REST API 维护家庭金融账户、账户别名及收支分类")
-
     settings_ctrl = SettingsActionController()
+    col_hdr1, col_hdr2 = st.columns([5, 1])
+    with col_hdr1:
+        st.title("⚙️ 账户与分类管理")
+        st.markdown("通过后端 REST API 维护家庭金融账户、账户别名及收支分类")
+    with col_hdr2:
+        if st.button("🔄 刷新状态", key="btn_settings_refresh", help="清除未决操作状态并重新加载最新数据"):
+            settings_ctrl.clear_all_actions()
+            st.rerun()
 
     tab_acc, tab_cat = st.tabs(["🏦 账户管理与别名", "🏷️ 收支分类管理"])
 
@@ -1117,6 +1128,7 @@ elif menu == "⚙️ 账户与分类管理":
                                     action_key=acc_action_key,
                                     operation="patch_account",
                                     payload=payload,
+                                    resource_id=str(target_edit_acc["id"]),
                                     mutation_fn=lambda k: client.update_account(target_edit_acc["id"], payload, idempotency_key=k)
                                 )
                                 st.success("🎉 账户信息已更新！")
@@ -1167,7 +1179,7 @@ elif menu == "⚙️ 账户与分类管理":
                     if n_opened.strip():
                         create_payload["opened_on"] = n_opened.strip()
 
-                    create_acc_action_key = f"create_acc_{n_name.strip()}_{n_curr}"
+                    create_acc_action_key = SLOT_CREATE_ACCOUNT
                     try:
                         settings_ctrl.execute_mutation(
                             action_key=create_acc_action_key,
@@ -1217,6 +1229,7 @@ elif menu == "⚙️ 账户与分类管理":
                                             action_key=alias_action_key,
                                             operation="patch_alias_archive",
                                             payload=archive_payload,
+                                            resource_id=f"{sel_alias_acc}:{al['id']}",
                                             mutation_fn=lambda k: client.update_account_alias(
                                                 account_id=sel_alias_acc,
                                                 alias_id=al["id"],
@@ -1246,13 +1259,14 @@ elif menu == "⚙️ 账户与分类管理":
             with st.form("add_alias_form", clear_on_submit=True):
                 new_alias_str = st.text_input("新增别名 (如: 工行Visa卡)")
                 if st.form_submit_button("添加别名") and new_alias_str.strip():
-                    add_alias_key = f"add_alias_{sel_alias_acc}_{new_alias_str.strip()}"
+                    add_alias_key = SLOT_CREATE_ALIAS
                     alias_payload = {"alias": new_alias_str.strip()}
                     try:
                         settings_ctrl.execute_mutation(
                             action_key=add_alias_key,
                             operation="create_alias",
                             payload=alias_payload,
+                            resource_id=str(sel_alias_acc),
                             mutation_fn=lambda k: client.create_account_alias(sel_alias_acc, new_alias_str.strip(), idempotency_key=k)
                         )
                         st.success("别名添加成功！")
@@ -1311,6 +1325,7 @@ elif menu == "⚙️ 账户与分类管理":
                                         action_key=cat_action_key,
                                         operation="patch_category",
                                         payload=cat_payload,
+                                        resource_id=str(target_edit_cat["id"]),
                                         mutation_fn=lambda k: client.update_category(target_edit_cat["id"], cat_payload, idempotency_key=k)
                                     )
                                     st.success("分类名称已更新！")
@@ -1338,6 +1353,7 @@ elif menu == "⚙️ 账户与分类管理":
                                     action_key=archive_cat_key,
                                     operation="patch_category_archive",
                                     payload=archive_payload,
+                                    resource_id=str(target_edit_cat["id"]),
                                     mutation_fn=lambda k: client.update_category(target_edit_cat["id"], archive_payload, idempotency_key=k)
                                 )
                                 st.success("分类已停用")
@@ -1362,7 +1378,7 @@ elif menu == "⚙️ 账户与分类管理":
             cat_type = st.selectbox("分类性质", ["expense", "income"])
             cat_desc = st.text_input("分类描述 (选填)", value="")
             if st.form_submit_button("创建分类") and cat_name.strip():
-                create_cat_key = f"create_cat_{cat_name.strip()}_{cat_type}"
+                create_cat_key = SLOT_CREATE_CATEGORY
                 create_cat_payload = {
                     "name": cat_name.strip(),
                     "category_type": cat_type,

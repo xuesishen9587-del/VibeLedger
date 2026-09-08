@@ -5,6 +5,11 @@ from typing import Any, Callable, Dict, Optional
 from api_client import BackendUnavailableError, ConflictError, TimeoutError
 
 
+SLOT_CREATE_ACCOUNT = "settings_create_account"
+SLOT_CREATE_ALIAS = "settings_create_alias"
+SLOT_CREATE_CATEGORY = "settings_create_category"
+
+
 class MutationModifiedPendingError(Exception):
     """
     Raised when the user modifies the intended mutation command after an unknown outcome
@@ -14,13 +19,26 @@ class MutationModifiedPendingError(Exception):
     pass
 
 
-def _compute_fingerprint(operation: str, payload: Any) -> str:
-    """Computes a deterministic JSON fingerprint for the intended mutation."""
+def _compute_fingerprint(
+    operation: str,
+    payload: Any,
+    resource_id: Optional[Any] = None,
+) -> str:
+    """
+    Computes a deterministic JSON fingerprint for the complete semantic command identity:
+    - operation
+    - target resource IDs where applicable
+    - canonical mutation body
+    """
+    identity = {
+        "operation": str(operation or ""),
+        "resource_id": str(resource_id) if resource_id is not None else None,
+        "payload": payload,
+    }
     try:
-        serialized = json.dumps(payload, sort_keys=True, default=str)
+        return json.dumps(identity, sort_keys=True, default=str)
     except Exception:
-        serialized = str(payload)
-    return f"{operation}:{serialized}"
+        return str(identity)
 
 
 class SettingsActionController:
@@ -29,9 +47,9 @@ class SettingsActionController:
     for logical UI actions in Dashboard Account / Alias / Category Settings.
 
     Guarantees:
-    - Exactly one stable Idempotency-Key per logical UI action.
+    - Exactly one stable Idempotency-Key per logical UI action slot.
     - Preserves key across network timeouts / backend unavailable retries.
-    - Rejects silent key reuse if intended payload changes after unknown outcome.
+    - Rejects silent key reuse if intended payload or target resource changes after unknown outcome.
     - Terminates logical action upon successful completion or terminal 4xx.
     - On 409 ROW_VERSION_CONFLICT: specifically terminates stale action,
       discards stale key, and requires reload so next intentional Save uses
@@ -56,13 +74,19 @@ class SettingsActionController:
             pass
         return self._internal_fallback
 
-    def get_or_create_action(self, action_key: str, payload: Any, operation: str = "") -> str:
+    def get_or_create_action(
+        self,
+        action_key: str,
+        payload: Any,
+        operation: str = "",
+        resource_id: Optional[Any] = None,
+    ) -> str:
         """
         Retrieves existing idempotency key for retry of same payload,
         or generates a fresh idempotency key for a new logical action.
         """
         store = self._get_store()
-        fp = _compute_fingerprint(operation, payload)
+        fp = _compute_fingerprint(operation, payload, resource_id=resource_id)
         existing = store.get(action_key)
 
         if existing:
@@ -74,8 +98,8 @@ class SettingsActionController:
                 else:
                     # User changed intended mutation after unknown outcome
                     raise MutationModifiedPendingError(
-                        f"Mutation payload for action '{action_key}' was modified while a previous attempt "
-                        "has an unknown outcome. Please reload current state before submitting a new command."
+                        f"Mutation command for action slot '{action_key}' was modified while a previous attempt "
+                        "has an unknown outcome. Please resolve or reload current state before submitting a new command."
                     )
             elif status == "conflict_reload_required":
                 # Previous attempt encountered ROW_VERSION_CONFLICT.
@@ -124,6 +148,11 @@ class SettingsActionController:
         store = self._get_store()
         store.pop(action_key, None)
 
+    def clear_all_actions(self) -> None:
+        """Explicitly discards all actions (e.g. on user reload / reset)."""
+        store = self._get_store()
+        store.clear()
+
     def is_conflict_reload_required(self, action_key: str) -> bool:
         """Checks if a previous attempt resulted in ROW_VERSION_CONFLICT."""
         store = self._get_store()
@@ -136,12 +165,18 @@ class SettingsActionController:
         operation: str,
         payload: Any,
         mutation_fn: Callable[[str], Any],
+        resource_id: Optional[Any] = None,
     ) -> Any:
         """
         Executes a mutation callable under the managed idempotency lifecycle.
         Automatically handles unknown-outcome retries and ROW_VERSION_CONFLICT.
         """
-        key = self.get_or_create_action(action_key, payload, operation)
+        key = self.get_or_create_action(
+            action_key=action_key,
+            payload=payload,
+            operation=operation,
+            resource_id=resource_id,
+        )
         try:
             result = mutation_fn(key)
             self.complete_action(action_key)

@@ -542,8 +542,10 @@ class TestS1AccountCategoryUIFoundations(unittest.TestCase):
         res = repo.create_household(mock_conn, name="Test", investment_review_change_ratio=Decimal("0.2000"))
         self.assertIsNotNone(res)
 
-    def test_idempotent_bootstrap_runs_cleanly(self):
+    @patch.object(repo, "add_household_member")
+    def test_idempotent_bootstrap_runs_cleanly(self, mock_add_mem):
         """Verify bootstrap_simplified_environment creates entities on first pass and verifies on second pass."""
+        mock_add_mem.return_value = {"role": "owner"}
         mock_conn = MagicMock()
         mock_cur = MagicMock()
         mock_conn.cursor.return_value.__enter__.return_value = mock_cur
@@ -554,8 +556,6 @@ class TestS1AccountCategoryUIFoundations(unittest.TestCase):
             {"id": str(uuid.uuid4())}, # create_household RETURNING
             None,  # user lookup
             {"id": str(uuid.uuid4())}, # create_user RETURNING
-            None,  # membership lookup
-            {"role": "owner"}, # add_household_member RETURNING
             # 15 expense categories lookup (all None)
             None, {"id": str(uuid.uuid4())},
             None, {"id": str(uuid.uuid4())},
@@ -592,7 +592,6 @@ class TestS1AccountCategoryUIFoundations(unittest.TestCase):
         second_pass_side_effects = [
             (str(hh_uuid), "CNY", date(2026, 1, 1), "Asia/Singapore", Decimal("0.2000"), "active"),  # household
             (str(user_uuid),),  # user
-            ("owner",),  # membership
         ]
         # 15 expense categories
         for _, desc, fallback in EXPENSE_CATEGORIES:
@@ -651,8 +650,10 @@ class TestS1AccountCategoryUIFoundations(unittest.TestCase):
             bootstrap_simplified_environment(mock_conn, household_name="Test Household")
         self.assertIn("exists but is not active", str(ctx.exception))
 
-    def test_bootstrap_detects_category_drift(self):
+    @patch.object(repo, "add_household_member")
+    def test_bootstrap_detects_category_drift(self, mock_add_mem):
         """Verify bootstrap_simplified_environment raises BootstrapDriftError on drifted category fields."""
+        mock_add_mem.return_value = {"role": "owner"}
         mock_conn = MagicMock()
         mock_cur = MagicMock()
         mock_conn.cursor.return_value.__enter__.return_value = mock_cur
@@ -663,7 +664,6 @@ class TestS1AccountCategoryUIFoundations(unittest.TestCase):
         mock_cur.fetchone.side_effect = [
             (str(hh_uuid), "CNY", date(2026, 1, 1), "Asia/Singapore", Decimal("0.2000"), "active"),
             (str(user_uuid),),
-            ("owner",),
             (str(uuid.uuid4()), "expense", EXPENSE_CATEGORIES[0][1], False, "inactive"),
         ]
         with self.assertRaises(BootstrapDriftError) as ctx:
@@ -674,15 +674,16 @@ class TestS1AccountCategoryUIFoundations(unittest.TestCase):
         mock_cur.fetchone.side_effect = [
             (str(hh_uuid), "CNY", date(2026, 1, 1), "Asia/Singapore", Decimal("0.2000"), "active"),
             (str(user_uuid),),
-            ("owner",),
             (str(uuid.uuid4()), "expense", "Altered Description", False, "active"),
         ]
         with self.assertRaises(BootstrapDriftError) as ctx:
             bootstrap_simplified_environment(mock_conn, household_name="Test Household")
         self.assertIn("description drift", str(ctx.exception))
 
-    def test_bootstrap_detects_account_drift(self):
+    @patch.object(repo, "add_household_member")
+    def test_bootstrap_detects_account_drift(self, mock_add_mem):
         """Verify bootstrap_simplified_environment raises BootstrapDriftError on drifted account fields."""
+        mock_add_mem.return_value = {"role": "owner"}
         mock_conn = MagicMock()
         mock_cur = MagicMock()
         mock_conn.cursor.return_value.__enter__.return_value = mock_cur
@@ -693,7 +694,6 @@ class TestS1AccountCategoryUIFoundations(unittest.TestCase):
         base_side_effects = [
             (str(hh_uuid), "CNY", date(2026, 1, 1), "Asia/Singapore", Decimal("0.2000"), "active"),
             (str(user_uuid),),
-            ("owner",),
         ]
         for _, desc, fallback in EXPENSE_CATEGORIES:
             base_side_effects.append((str(uuid.uuid4()), "expense", desc, fallback, "active"))
@@ -716,8 +716,10 @@ class TestS1AccountCategoryUIFoundations(unittest.TestCase):
             bootstrap_simplified_environment(mock_conn, household_name="Test Household")
         self.assertIn("balance_scope drift", str(ctx.exception))
 
-    def test_bootstrap_detects_identity_and_membership_drift(self):
+    @patch.object(repo, "add_household_member")
+    def test_bootstrap_detects_identity_and_membership_drift(self, mock_add_mem):
         """Verify bootstrap_simplified_environment raises BootstrapDriftError on identity or membership drift."""
+        mock_add_mem.return_value = {"role": "owner"}
         mock_conn = MagicMock()
         mock_cur = MagicMock()
         mock_conn.cursor.return_value.__enter__.return_value = mock_cur
@@ -752,20 +754,20 @@ class TestS1AccountCategoryUIFoundations(unittest.TestCase):
         self.assertIn("email drift", str(ctx.exception))
 
         # 4. Membership role mismatch (role is 'member' instead of 'owner')
+        mock_add_mem.return_value = {"role": "member"}
         mock_cur.fetchone.side_effect = [
             (str(hh_uuid), "CNY", date(2026, 1, 1), "Asia/Singapore", Decimal("0.2000"), "active"),
             (str(user_uuid), "default_owner", "owner@vibeledger.local", "active"),
-            ("member", 0),
         ]
         with self.assertRaises(BootstrapDriftError) as ctx:
             bootstrap_simplified_environment(mock_conn, household_name="Test Household")
         self.assertIn("expected 'owner'", str(ctx.exception))
 
         # 5. Active membership in another household
+        mock_add_mem.side_effect = repo.ActiveHouseholdMembershipConflictError("User already belongs to an active household")
         mock_cur.fetchone.side_effect = [
             (str(hh_uuid), "CNY", date(2026, 1, 1), "Asia/Singapore", Decimal("0.2000"), "active"),
             (str(user_uuid), "default_owner", "owner@vibeledger.local", "active"),
-            ("owner", 1), # other_active_count = 1
         ]
         with self.assertRaises(BootstrapDriftError) as ctx:
             bootstrap_simplified_environment(mock_conn, household_name="Test Household")

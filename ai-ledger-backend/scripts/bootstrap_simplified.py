@@ -185,36 +185,18 @@ def bootstrap_simplified_environment(
         summary["owner_user_id"] = str(user_id)
 
         # 3. Household Membership in target household
-        cur.execute(
-            """
-            SELECT hm.role,
-                   (SELECT count(*) FROM household_members hm2
-                    JOIN households h2 ON hm2.household_id = h2.id
-                    WHERE hm2.user_id = hm.user_id AND hm2.household_id <> hm.household_id AND h2.status = 'active') AS other_active_count
-            FROM household_members hm
-            WHERE hm.household_id = %s AND hm.user_id = %s;
-            """,
-            (str(hh_id), str(user_id)),
-        )
-        mem_row = cur.fetchone()
-        if mem_row:
-            existing_role = mem_row["role"] if isinstance(mem_row, dict) else str(mem_row[0])
-            if existing_role != "owner":
-                raise BootstrapDriftError(
-                    f"User {user_id} is already a member of household {hh_id} but has role '{existing_role}', expected 'owner'"
-                )
-            if isinstance(mem_row, dict):
-                other_count = mem_row.get("other_active_count", 0)
-            elif len(mem_row) > 1:
-                other_count = mem_row[1]
-            else:
-                other_count = 0
-            if other_count and int(other_count) > 0:
-                raise BootstrapDriftError(
-                    f"Owner user {user_id} already has an active membership in another household"
-                )
-        else:
-            repo.add_household_member(conn, hh_id, user_id, role="owner")
+        try:
+            member = repo.add_household_member(conn, hh_id, user_id, role="owner")
+        except repo.ActiveHouseholdMembershipConflictError as e:
+            raise BootstrapDriftError(
+                f"Owner user {user_id} already has an active membership in another household"
+            ) from e
+
+        existing_role = member.get("role") if isinstance(member, dict) else (str(member[2]) if len(member) > 2 else str(member[0]))
+        if existing_role != "owner":
+            raise BootstrapDriftError(
+                f"User {user_id} is already a member of household {hh_id} but has role '{existing_role}', expected 'owner'"
+            )
 
         # 4. Categories (15 Expense + 3 Income)
         for cat_name, cat_desc, is_fallback in EXPENSE_CATEGORIES:

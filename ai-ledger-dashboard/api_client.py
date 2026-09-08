@@ -240,46 +240,60 @@ class ApiClient:
     def create_account(
         self,
         name: str,
-        institution: str,
+        balance_scope: str,
         account_type: str,
         currency: str,
+        idempotency_key: str,
         owner_user_id: Optional[str] = None,
-        billing_day: Optional[int] = None,
-        due_day: Optional[int] = None,
-        linked_cash_account_id: Optional[str] = None
+        risk_level: Optional[str] = None,
+        opened_on: Optional[str] = None,
+        statement_import_enabled: bool = False
     ) -> Dict[str, Any]:
         """POST /api/v1/accounts"""
-        payload = {
+        if not idempotency_key:
+            raise ValueError("idempotency_key is required for create_account")
+        payload: Dict[str, Any] = {
             "name": name,
-            "institution": institution,
+            "balance_scope": balance_scope,
             "account_type": account_type,
             "currency": currency,
-            "owner_user_id": owner_user_id,
-            "billing_day": billing_day,
-            "due_day": due_day,
-            "linked_cash_account_id": linked_cash_account_id
+            "statement_import_enabled": statement_import_enabled
         }
-        return self.request("POST", "/api/v1/accounts", json_data=payload)
+        if owner_user_id:
+            payload["owner_user_id"] = owner_user_id
+        if risk_level:
+            payload["risk_level"] = risk_level
+        if opened_on:
+            payload["opened_on"] = opened_on
+        headers = {"Idempotency-Key": idempotency_key}
+        return self.request("POST", "/api/v1/accounts", json_data=payload, headers=headers)
 
-    def update_account(self, account_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    def update_account(self, account_id: str, payload: Dict[str, Any], idempotency_key: str) -> Dict[str, Any]:
         """PATCH /api/v1/accounts/{account_id}"""
-        return self.request("PATCH", f"/api/v1/accounts/{account_id}", json_data=payload)
-
-    def deactivate_account(self, account_id: str) -> Dict[str, Any]:
-        """POST /api/v1/accounts/{account_id}/deactivate"""
-        return self.request("POST", f"/api/v1/accounts/{account_id}/deactivate")
+        if not idempotency_key:
+            raise ValueError("idempotency_key is required for update_account")
+        headers = {"Idempotency-Key": idempotency_key}
+        return self.request("PATCH", f"/api/v1/accounts/{account_id}", json_data=payload, headers=headers)
 
     def list_account_aliases(self, account_id: str) -> Dict[str, Any]:
         """GET /api/v1/accounts/{account_id}/aliases"""
         return self.request("GET", f"/api/v1/accounts/{account_id}/aliases")
 
-    def create_account_alias(self, account_id: str, alias: str) -> Dict[str, Any]:
+    def create_account_alias(self, account_id: str, alias: str, idempotency_key: str) -> Dict[str, Any]:
         """POST /api/v1/accounts/{account_id}/aliases"""
-        return self.request("POST", f"/api/v1/accounts/{account_id}/aliases", json_data={"alias": alias})
+        if not idempotency_key:
+            raise ValueError("idempotency_key is required for create_account_alias")
+        headers = {"Idempotency-Key": idempotency_key}
+        return self.request("POST", f"/api/v1/accounts/{account_id}/aliases", json_data={"alias": alias}, headers=headers)
 
-    def delete_account_alias(self, account_id: str, alias_id: str) -> Dict[str, Any]:
-        """DELETE /api/v1/accounts/{account_id}/aliases/{alias_id}"""
-        return self.request("DELETE", f"/api/v1/accounts/{account_id}/aliases/{alias_id}")
+    def update_account_alias(
+        self, account_id: str, alias_id: str, payload: Dict[str, Any], idempotency_key: str
+    ) -> Dict[str, Any]:
+        """PATCH /api/v1/accounts/{account_id}/aliases/{alias_id}"""
+        if not idempotency_key:
+            raise ValueError("idempotency_key is required for update_account_alias")
+        headers = {"Idempotency-Key": idempotency_key}
+        return self.request("PATCH", f"/api/v1/accounts/{account_id}/aliases/{alias_id}", json_data=payload, headers=headers)
 
     # --- Categories ---
 
@@ -292,18 +306,24 @@ class ApiClient:
             params["status"] = status
         return self.request("GET", "/api/v1/categories", params=params)
 
-    def create_category(self, name: str, category_type: str) -> Dict[str, Any]:
+    def create_category(
+        self, name: str, category_type: str, idempotency_key: str, description: Optional[str] = None
+    ) -> Dict[str, Any]:
         """POST /api/v1/categories"""
-        payload = {"name": name, "type": category_type}
-        return self.request("POST", "/api/v1/categories", json_data=payload)
+        if not idempotency_key:
+            raise ValueError("idempotency_key is required for create_category")
+        payload: Dict[str, Any] = {"name": name, "type": category_type}
+        if description:
+            payload["description"] = description
+        headers = {"Idempotency-Key": idempotency_key}
+        return self.request("POST", "/api/v1/categories", json_data=payload, headers=headers)
 
-    def update_category(self, category_id: str, name: str) -> Dict[str, Any]:
+    def update_category(self, category_id: str, payload: Dict[str, Any], idempotency_key: str) -> Dict[str, Any]:
         """PATCH /api/v1/categories/{category_id}"""
-        return self.request("PATCH", f"/api/v1/categories/{category_id}", json_data={"name": name})
-
-    def deactivate_category(self, category_id: str) -> Dict[str, Any]:
-        """POST /api/v1/categories/{category_id}/deactivate"""
-        return self.request("POST", f"/api/v1/categories/{category_id}/deactivate")
+        if not idempotency_key:
+            raise ValueError("idempotency_key is required for update_category")
+        headers = {"Idempotency-Key": idempotency_key}
+        return self.request("PATCH", f"/api/v1/categories/{category_id}", json_data=payload, headers=headers)
 
     # --- Credit Cards & Installments ---
 

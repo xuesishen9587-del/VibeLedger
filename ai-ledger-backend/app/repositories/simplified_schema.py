@@ -151,6 +151,11 @@ def get_user(conn, user_id: uuid.UUID) -> Optional[Dict[str, Any]]:
         return dict(row) if row else None
 
 
+class ActiveHouseholdMembershipConflictError(ValueError):
+    """Raised when an active household membership already exists for the user."""
+    pass
+
+
 def add_household_member(
     conn,
     household_id: uuid.UUID,
@@ -161,6 +166,67 @@ def add_household_member(
         raise ValueError(f"Invalid member role: {role}")
 
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        # 1. Deterministic locking: lock user row to serialize concurrent membership attempts
+        cur.execute("SELECT id FROM users WHERE id = %s FOR UPDATE;", (str(user_id),))
+        user_row = cur.fetchone()
+        if user_row is not None and not isinstance(user_row, dict) and not isinstance(user_row, (tuple, list)):
+            pass
+
+        # 2. Inspect target household status
+        cur.execute("SELECT id, status FROM households WHERE id = %s;", (str(household_id),))
+        hh_row = cur.fetchone()
+        if hh_row is not None:
+            if isinstance(hh_row, dict):
+                hh_status = str(hh_row.get("status") or "active")
+            elif len(hh_row) > 1:
+                hh_status = str(hh_row[1])
+            else:
+                hh_status = str(hh_row[0])
+        else:
+            hh_status = "active"
+
+        # 3. If target household is active, enforce one-active-household invariant
+        if hh_status == "active":
+            cur.execute(
+                """
+                SELECT hm.household_id, hm.role, h.status AS household_status
+                FROM household_members hm
+                JOIN households h ON hm.household_id = h.id
+                WHERE hm.user_id = %s AND h.status = 'active';
+                """,
+                (str(user_id),),
+            )
+            active_mems = cur.fetchall()
+            if active_mems:
+                for mem in active_mems:
+                    mem_hh_id = str(mem["household_id"] if isinstance(mem, dict) else mem[0])
+                    if mem_hh_id != str(household_id):
+                        raise ActiveHouseholdMembershipConflictError(
+                            f"User {user_id} already belongs to an active household {mem_hh_id}"
+                        )
+                    else:
+                        # User already belongs to target active household.
+                        # Return existing membership unchanged (no silent role upsert).
+                        return dict(mem) if isinstance(mem, dict) else {
+                            "household_id": household_id,
+                            "user_id": user_id,
+                            "role": mem[1] if len(mem) > 1 else role,
+                        }
+
+        # Check if target membership already exists (e.g. if household is inactive)
+        cur.execute(
+            "SELECT household_id, user_id, role, joined_at FROM household_members WHERE household_id = %s AND user_id = %s;",
+            (str(household_id), str(user_id)),
+        )
+        existing = cur.fetchone()
+        if existing:
+            return dict(existing) if isinstance(existing, dict) else {
+                "household_id": household_id,
+                "user_id": user_id,
+                "role": existing[2] if len(existing) > 2 else role,
+            }
+
+        # 4. Insert new membership
         cur.execute(
             """
             INSERT INTO household_members (household_id, user_id, role, joined_at)
@@ -169,7 +235,8 @@ def add_household_member(
             """,
             (str(household_id), str(user_id), role),
         )
-        return dict(cur.fetchone())
+        res = cur.fetchone()
+        return dict(res) if isinstance(res, dict) else {"household_id": household_id, "user_id": user_id, "role": role}
 
 
 def get_household_member(

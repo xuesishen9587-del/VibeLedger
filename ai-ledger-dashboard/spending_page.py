@@ -177,6 +177,28 @@ def _schedules(client, save, categories, accounts, source_draft=None):
         with st.form("new_spending_schedule" + suffix):
             name = st.text_input("计划名称")
             kind = st.selectbox("计划类型", ["installment"] if source_draft else ["installment", "recurring"])
+            conversion_mode = "new_schedule"
+            chosen_candidate = None
+            manual_candidate_id = ""
+            candidates = {}
+            if not source_draft:
+                try:
+                    resp = client.request("GET", "/api/v1/transactions", params={"transaction_type": "expense", "limit": 50})
+                    candidates = {r["id"]: r for r in resp.get("items", []) if not r.get("schedule_occurrence_id")}
+                except Exception:
+                    candidates = {}
+                conversion_mode = st.selectbox(
+                    "计划来源",
+                    ["new_schedule", "convert_expense"],
+                    format_func=lambda v: {"new_schedule": "新建普通计划", "convert_expense": "由已保存全额支出转换为分期"}[v]
+                )
+                chosen_candidate = st.selectbox(
+                    "选择要转换的已记录支出（仅转换时需要）",
+                    [None, *candidates],
+                    format_func=lambda k: "未选择（普通新建）" if k is None else
+                    f"{candidates[k].get('occurred_on')} · {candidates[k].get('merchant') or '未填商户'} · {candidates[k]['original_amount']} {candidates[k]['original_currency']} · {k[:8]}"
+                )
+                manual_candidate_id = st.text_input("或直接输入支出 ID（仅转换时需要）")
             amount = st.text_input("每期金额", "0.00")
             currency = st.selectbox("计划币种", ["CNY", "SGD", "USD", "EUR", "JPY"])
             count = st.number_input("期数（循环支出可用 0 表示持续）", min_value=0, max_value=1200, value=12, step=1)
@@ -186,20 +208,47 @@ def _schedules(client, save, categories, accounts, source_draft=None):
             category = st.selectbox("计划分类", list(names), format_func=names.get)
             account = st.selectbox("计划账户", list(accounts), format_func=accounts.get)
             if st.form_submit_button("预览日期和金额"):
-                body = {"name": name, "kind": kind, "amount_per_period": amount, "currency": currency,
-                        "period_count": count or None, "start_month": str(start.replace(day=1)),
-                        "day_of_month": day, "merchant": merchant, "category_id": category, "account_id": account}
-                try:
-                    preview = client.request("POST", "/api/v1/spending-schedules/preview", json_data=body)
-                    if source_draft:
-                        body.update(source_draft_request_id=source_draft["request_id"], expected_draft_version=source_draft["row_version"])
-                    st.session_state[preview_key] = (body, preview)
-                except Exception as exc:
-                    st.session_state.pop(preview_key, None)
-                    st.error(str(exc))
+                target_tx = None
+                valid = True
+                if not source_draft and conversion_mode == "convert_expense":
+                    if kind != "installment":
+                        st.session_state.pop(preview_key, None)
+                        st.error("只有分期计划支持转换已有支出。")
+                        valid = False
+                    else:
+                        chosen_id = manual_candidate_id.strip() if manual_candidate_id and manual_candidate_id.strip() else chosen_candidate
+                        if not chosen_id:
+                            st.session_state.pop(preview_key, None)
+                            st.error("请先选择或输入要转换的已记录支出。")
+                            valid = False
+                        else:
+                            try:
+                                target_tx = client.request("GET", f"/api/v1/transactions/{chosen_id}")
+                            except Exception as exc:
+                                target_tx = candidates.get(chosen_id)
+                                if not target_tx:
+                                    st.session_state.pop(preview_key, None)
+                                    st.error(f"无法获取原支出：{exc}")
+                                    valid = False
+                if valid:
+                    body = {"name": name, "kind": kind, "amount_per_period": amount, "currency": currency,
+                            "period_count": count or None, "start_month": str(start.replace(day=1)),
+                            "day_of_month": day, "merchant": merchant, "category_id": category, "account_id": account}
+                    try:
+                        preview = client.request("POST", "/api/v1/spending-schedules/preview", json_data=dict(body))
+                        if source_draft:
+                            body.update(source_draft_request_id=source_draft["request_id"], expected_draft_version=source_draft["row_version"])
+                        elif target_tx:
+                            body.update(replaces_transaction_id=target_tx["id"], expected_transaction_version=target_tx["row_version"])
+                        st.session_state[preview_key] = (body, preview)
+                    except Exception as exc:
+                        st.session_state.pop(preview_key, None)
+                        st.error(str(exc))
         if preview_key in st.session_state:
             body, preview = st.session_state[preview_key]
             st.write(f"待保存预览：{body['name']} · 每期 {body['amount_per_period']} {body['currency']} · {body['period_count'] or '持续'} 期")
+            if body.get("replaces_transaction_id"):
+                st.caption(f"将转换并替换原支出：{body['replaces_transaction_id']} · 版本 {body['expected_transaction_version']}")
             st.write("已到期期数", len(preview["due_periods"]), "合计", preview["due_total"])
             st.dataframe(preview["due_periods"])
             st.write("后续日期", preview["upcoming_dates"])
@@ -210,8 +259,8 @@ def _schedules(client, save, categories, accounts, source_draft=None):
         if source_draft:
             return
         response = client.request("GET", "/api/v1/spending-schedules", params={"cursor": st.session_state.get("schedule_cursor")})
-        schedules = response["items"]
-        if response["next_cursor"] and st.button("下一页计划"):
+        schedules = response.get("items", []) if isinstance(response, dict) else []
+        if isinstance(response, dict) and response.get("next_cursor") and st.button("下一页计划"):
             st.session_state["schedule_cursor"] = response["next_cursor"]
             st.rerun()
         if st.session_state.get("schedule_cursor") and st.button("返回计划第一页"):

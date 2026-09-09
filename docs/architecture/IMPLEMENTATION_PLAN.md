@@ -129,6 +129,13 @@ Do not modify accepted staging/production identities or reuse device tokens acro
 
 ### S2 — Spending capture, metadata review and monthly schedules
 
+Implementation checkpoint **2026-09-09**: S1 remains accepted. S2 now has local
+simplified capture/recovery, metadata Review, schedules/system catch-up and spending
+FX/report UI implementation, with 143 backend integration tests passing. This is
+not formal S2 acceptance: independent review and isolated real-device/household
+checks remain. See [the current handoff](../../PROJECT_CONTEXT.md) for exact scope,
+remaining UI coverage, test evidence and the uncommitted workspace status.
+
 * Retain the expense endpoint body/normal result, simplify its financial write, keep
   natural-language revisions and deterministic validation.
 * Add durable reserve/extract/finalize/cancel behavior; unknown account/category are

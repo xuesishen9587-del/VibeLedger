@@ -2,6 +2,8 @@
 import json
 from datetime import date
 from uuid import uuid4
+from datetime import timedelta
+from app.auth.context import SystemCommandActor
 from psycopg2 import sql
 from app.domain.spending import fail, money, money_text, local_today
 from app.domain.spending_schedules import due_date, due_periods
@@ -150,13 +152,48 @@ def catch_up(conn, actor, rid, schedule, today):
     finish(conn, actor, rid, schedule)
 
 
-def create(conn, actor, key, data):
+def prepare_quotes(conn, actor, key, schedules, provider):
+    """Bounded preparation before command/source/household locks; missing FX stays explicit."""
+    if provider is None or settings.get_ingestion_request_by_key(conn, actor.household_id, actor.actor_scope, key):
+        return
+    from app.services.spending_reports import prime_quote
+    today = local_today(settings.get_household(conn, actor.household_id))
+    attempts = set()
+    for schedule in schedules:
+        if schedule.get("status", "active") != "active":
+            continue
+        if not schedule.get("start_month") or not schedule.get("day_of_month"):
+            continue
+        existing = {r["period_no"] for r in repo.rows(conn,
+            "SELECT period_no FROM schedule_occurrences WHERE household_id=%s AND schedule_id=%s",
+            (actor.household_id, schedule["id"]))} if schedule.get("id") else set()
+        for number, day in due_periods(schedule, today):
+            if number in existing:
+                continue
+            pair = (schedule["currency"], day)
+            if pair in attempts:
+                continue
+            if len(attempts) == 5:
+                return
+            attempts.add(pair)
+            prime_quote(conn, actor.household_id, {"original_amount": schedule["amount_per_period"], "original_currency": schedule["currency"], "occurred_on": day}, provider)
+
+
+def create(conn, actor, key, data, provider=None):
+    prepare_quotes(conn, actor, key, [data], provider)
     def mutate(c, rid):
         today = local_today(settings.get_household(c, actor.household_id))
         if data["acknowledged_due_through"] != str(today):
             fail("SCHEDULE_PREVIEW_STALE", "Refresh the dates and acknowledge due spending before Save.", 409)
         values = terms(c, actor.household_id, {k: v for k, v in data.items() if k not in
-                       ("acknowledged_due_through", "replaces_transaction_id", "expected_transaction_version")})
+                       ("acknowledged_due_through", "replaces_transaction_id", "expected_transaction_version", "source_draft_request_id", "expected_draft_version")})
+        source = None
+        if data.get("source_draft_request_id"):
+            source = settings.get_ingestion_request(c, actor.household_id, data["source_draft_request_id"])
+            if source["row_version"] != data["expected_draft_version"]:
+                fail("DRAFT_CHANGED", "The source draft changed. Reload it.", 409)
+            if source["status"] != "needs_confirmation" or source["draft_payload"].get("payment_mode") != "installment":
+                fail("INVALID_REQUEST_STATE", "An uncommitted installment draft is required.", 409)
         replaced = data.get("replaces_transaction_id")
         if replaced:
             prior = spending.require_record(c, actor.household_id, replaced, data["expected_transaction_version"])
@@ -168,11 +205,79 @@ def create(conn, actor, key, data):
         schedule = insert(c, "spending_schedules", values)
         history(c, actor, rid, schedule, "create")
         catch_up(c, actor, rid, schedule, today)
+        if source:
+            settings.finalize_ingestion_request(c, actor.household_id, source["id"], source["row_version"],
+                "rejected", {"status": "rejected", "request_id": str(source["id"]), "schedule_id": str(schedule["id"]),
+                             "display_summary": "Recorded as a monthly spending schedule."}, 200)
         return output(get(c, actor.household_id, schedule["id"])), 201
-    return execute_durable_command(conn, actor, key, "POST /api/v1/spending-schedules", data, mutate)
+    sources = [data["source_draft_request_id"]] if data.get("source_draft_request_id") else []
+    return execute_durable_command(conn, actor, key, "POST /api/v1/spending-schedules", data, mutate,
+                                   source_expense_request_ids=sources)
 
 
-def change(conn, actor, key, identity, action, data):
+def freshness(conn, household_id):
+    today = local_today(settings.get_household(conn, household_id))
+    through = today
+    schedules = repo.rows(conn, "SELECT * FROM spending_schedules WHERE household_id=%s AND status IN ('active','paused')", (household_id,))
+    for schedule in schedules:
+        materialized = {r["period_no"] for r in repo.rows(conn, "SELECT period_no FROM schedule_occurrences WHERE household_id=%s AND schedule_id=%s", (household_id, schedule["id"]))}
+        for number, day in due_periods(schedule, today):
+            if number not in materialized:
+                through = min(through, day - timedelta(days=1))
+                break
+    return str(through)
+
+
+def run_due(factory, provider=None):
+    """Trusted internal daily entry point. HTTP/OIDC wiring is a separate S5 concern."""
+    from app.services.capture_receipts import session
+    from app.services.spending_reports import prime_quote
+    class PeriodNoLongerDue(Exception):
+        pass
+    with session(factory) as conn:
+        households = repo.rows(conn, "SELECT id FROM households WHERE status='active' ORDER BY id")
+    processed = 0
+    for household in households:
+        hh = household["id"]
+        with session(factory) as conn:
+            today = local_today(settings.get_household(conn, hh))
+            schedules = repo.rows(conn, "SELECT * FROM spending_schedules WHERE household_id=%s AND status IN ('active','paused') ORDER BY id", (hh,))
+        for schedule in schedules:
+            for number, day in due_periods(schedule, today):
+                actor = SystemCommandActor(hh, schedule["created_by_user_id"])
+                key = f"schedule:{schedule['id']}:{number}"
+                with session(factory) as conn:
+                    # Check existing identity before any optional network work.
+                    prior = repo.rows(conn, "SELECT id FROM schedule_occurrences WHERE household_id=%s AND schedule_id=%s AND period_no=%s", (hh, schedule["id"], number))
+                    if prior:
+                        continue
+                    if provider and schedule["status"] == "active":
+                        prime_quote(conn, hh, {"original_amount": schedule["amount_per_period"], "original_currency": schedule["currency"], "occurred_on": day}, provider)
+                    def mutate(c, rid):
+                        current = get(c, hh, schedule["id"])
+                        current_household = settings.get_household(c, hh)
+                        if current_household["status"] != "active":
+                            raise PeriodNoLongerDue()
+                        actual_today = local_today(current_household)
+                        eligible = dict(due_periods(current, actual_today))
+                        if current["status"] not in ("active", "paused") or number not in eligible:
+                            raise PeriodNoLongerDue()
+                        occurrence = materialize_period(c, actor, rid, current, number, eligible[number])
+                        finish(c, actor, rid, current)
+                        return output(occurrence), 200
+                    try:
+                        execute_durable_command(conn, actor, key, "POST /internal/spending-schedules/period",
+                            {"schedule_id": str(schedule["id"]), "period_no": number}, mutate)
+                    except PeriodNoLongerDue:
+                        continue  # No terminal receipt may block this period if it becomes due later.
+                    processed += 1
+    return {"processed": processed}
+
+
+def change(conn, actor, key, identity, action, data, provider=None):
+    if provider:
+        candidates = repo.rows(conn, "SELECT * FROM spending_schedules WHERE household_id=%s AND id=%s", (actor.household_id, identity))
+        prepare_quotes(conn, actor, key, candidates, provider)
     def mutate(c, rid):
         schedule = get(c, actor.household_id, identity, data["expected_version"])
         if schedule["status"] in ("cancelled", "completed"):
@@ -213,7 +318,10 @@ def change(conn, actor, key, identity, action, data):
     return execute_durable_command(conn, actor, key, operation, data, mutate)
 
 
-def materialize(conn, actor, key):
+def materialize(conn, actor, key, provider=None):
+    if provider:
+        candidates = repo.rows(conn, "SELECT * FROM spending_schedules WHERE household_id=%s AND status='active' ORDER BY id", (actor.household_id,))
+        prepare_quotes(conn, actor, key, candidates, provider)
     def mutate(c, rid):
         today = local_today(settings.get_household(c, actor.household_id))
         schedules = repo.rows(c, "SELECT * FROM spending_schedules WHERE household_id=%s AND status IN ('active','paused') ORDER BY id", (actor.household_id,))
@@ -224,7 +332,14 @@ def materialize(conn, actor, key):
     return execute_durable_command(conn, actor, key, "POST /api/v1/spending-schedules/materialize", {}, mutate)
 
 
-def resolve(conn, actor, key, identity, data):
+def resolve(conn, actor, key, identity, data, provider=None):
+    if provider and data["action"] == "record_separately" and not settings.get_ingestion_request_by_key(conn, actor.household_id, actor.actor_scope, key):
+        from app.services.spending_reports import prime_quote
+        rows = repo.rows(conn, "SELECT * FROM schedule_occurrences WHERE household_id=%s AND id=%s AND status='needs_confirmation'",
+                         (actor.household_id, identity))
+        if rows:
+            prime_quote(conn, actor.household_id, {"original_amount": rows[0]["amount"],
+                "original_currency": rows[0]["currency"], "occurred_on": rows[0]["due_on"]}, provider)
     def mutate(c, rid):
         matches = repo.rows(c, "SELECT * FROM schedule_occurrences WHERE household_id=%s AND id=%s", (actor.household_id, identity))
         if not matches:
@@ -254,3 +369,41 @@ def resolve(conn, actor, key, identity, data):
         finish(c, actor, rid, schedule)
         return output(row), 200
     return execute_durable_command(conn, actor, key, f"POST /api/v1/schedule-occurrences/{identity}/resolve", data, mutate)
+
+
+def bind_capture_period(conn, actor, receipt_id, draft, fields):
+    """Bind explicit capture/import intent under its outer receipt and household lock."""
+    if any(draft.get(key) is None for key in ("schedule_id", "period_no", "expected_schedule_version")):
+        fail("INVALID_SCHEDULE", "Select a schedule, period and current version.")
+    schedule = get(conn, actor.household_id, draft["schedule_id"], draft["expected_schedule_version"])
+    number = draft["period_no"]
+    if schedule["period_count"] is not None and number > schedule["period_count"]:
+        fail("INVALID_SCHEDULE", "The period is outside this schedule.")
+    day = due_date(schedule["start_month"], schedule["day_of_month"], number)
+    if day > local_today(settings.get_household(conn, actor.household_id)):
+        fail("INVALID_SCHEDULE", "Future periods cannot be recorded early.")
+    matches = repo.rows(conn, "SELECT * FROM schedule_occurrences WHERE household_id=%s AND schedule_id=%s AND period_no=%s",
+                        (actor.household_id, schedule["id"], number))
+    occurrence = matches[0] if matches else None
+    expected_amount = occurrence["amount"] if occurrence else schedule["amount_per_period"]
+    if money(fields["original_amount"], fields["original_currency"]) != expected_amount or fields["original_currency"] != schedule["currency"] or str(fields["occurred_on"]) != str(day):
+        fail("SCHEDULE_OCCURRENCE_CONFLICT", "The captured amount, currency and date must match the selected period.", 409)
+    if occurrence and occurrence["status"] == "recorded":
+        transaction = repo.rows(conn, "SELECT * FROM transactions WHERE household_id=%s AND schedule_occurrence_id=%s",
+                               (actor.household_id, occurrence["id"]))[0]
+        if transaction["status"] != "committed":
+            fail("SCHEDULE_OCCURRENCE_CONFLICT", "This period was voided and cannot be regenerated.", 409)
+        return transaction
+    if schedule["status"] != "active" or (occurrence and occurrence["status"] == "skipped"):
+        fail("INVALID_REQUEST_STATE", "This schedule period is not available.", 409)
+    if not occurrence:
+        occurrence = insert(conn, "schedule_occurrences", {"id": uuid4(), "household_id": actor.household_id,
+            "schedule_id": schedule["id"], "period_no": number, "due_on": day, "amount": expected_amount,
+            "currency": schedule["currency"], "category_id": schedule["category_id"], "account_id": schedule["account_id"],
+            "status": "needs_confirmation"})
+    transaction = spending.create_record(conn, actor, receipt_id, fields, source="shortcut",
+        date_source=draft["date_source"], category_uncertain=draft["category_uncertain"], occurrence_id=occurrence["id"])
+    changed = update(conn, "schedule_occurrences", actor.household_id, occurrence["id"], {"status": "recorded"})
+    history(conn, actor, receipt_id, changed, "update", occurrence, entity="schedule_occurrence")
+    finish(conn, actor, receipt_id, schedule)
+    return transaction

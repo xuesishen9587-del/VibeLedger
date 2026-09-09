@@ -1,7 +1,9 @@
 """S2 Spending and saved-metadata Review; REST-only presentation."""
 from datetime import date
+from decimal import Decimal
 import streamlit as st
 from spending_controller import SpendingActions
+from time_utils import get_dashboard_today
 
 
 def render(client, review_only=False):
@@ -40,24 +42,44 @@ def render(client, review_only=False):
         st.error(str(exc))
         return
     st.caption(f"待修正记录 {counts['transactions']} · 缺失账户 {counts['missing_account']} · 分类不确定 {counts['category_uncertain']} · 计划待决定 {counts['schedule_occurrences']}")
-    if counts["drafts"]:
-        st.info(f"另有 {counts['drafts']} 条未保存的截图／导入草稿。截图复核入口将在 S2 后续接入。")
     account_names = {None: "账户未知", **{a["id"]: a["name"] for a in accounts}}
     category_names = {c["id"]: c["name"] for c in categories}
+    if counts["drafts"] and review_only:
+        from capture_review import render as render_capture_review
+        render_capture_review(client, save, account_names, expense_categories)
+    elif counts["drafts"]:
+        st.info(f"另有 {counts['drafts']} 条截图草稿，请进入支出复核页面处理。")
     if counts["schedule_occurrences"]:
         with st.expander("计划待决定的期间", expanded=review_only):
             pending = client.request("GET", "/api/v1/review", params={"section": "schedule", "limit": 200})
             for occurrence in pending["items"]:
                 st.write(occurrence["due_on"], occurrence["amount"], occurrence["currency"])
+                matches = client.request("GET", "/api/v1/transactions", params={
+                    "from": occurrence["due_on"], "to": occurrence["due_on"],
+                    "transaction_type": "expense", "limit": 200})
+                candidates = {r["id"]: r for r in matches["items"]
+                              if not r.get("schedule_occurrence_id")
+                              and r["original_currency"] == occurrence["currency"]
+                              and Decimal(r["original_amount"]) == Decimal(occurrence["amount"])}
                 with st.form("period_" + occurrence["id"]):
                     action = st.selectbox("处理方式", ["link_existing", "record_separately", "skip"],
                         format_func=lambda v: {"link_existing": "关联已记录支出", "record_separately": "确认是另一笔支出", "skip": "跳过本期"}[v])
-                    target = st.text_input("关联支出 ID（从下方记录详情复制）")
+                    target = st.selectbox("同日同金额的已记录支出", [None, *candidates],
+                        format_func=lambda key: "请选择" if key is None else
+                        f"{candidates[key].get('merchant') or '未填商户'} · {candidates[key]['original_amount']} {candidates[key]['original_currency']} · {key[:8]}")
+                    if matches["next_cursor"]:
+                        st.caption("当天记录超过 200 条，可在支出列表找到记录并填写下方 ID。")
+                    manual_target = st.text_input("其他关联支出 ID（可留空）")
                     if st.form_submit_button("保存本期决定"):
                         body = {"expected_version": occurrence["row_version"], "action": action}
                         try:
                             if action == "link_existing":
-                                linked = client.request("GET", "/api/v1/transactions/" + target)
+                                linked = candidates.get(target)
+                                if manual_target:
+                                    linked = client.request("GET", "/api/v1/transactions/" + manual_target)
+                                if not linked:
+                                    st.error("请先选择已记录支出。")
+                                    continue
                                 body.update(transaction_id=linked["id"], expected_transaction_version=linked["row_version"])
                             if save("period_" + occurrence["id"], "POST", f"/api/v1/schedule-occurrences/{occurrence['id']}/resolve", body):
                                 st.rerun()
@@ -67,10 +89,12 @@ def render(client, review_only=False):
                 st.caption("还有待决定期间；处理当前记录后刷新以继续。")
 
     if not review_only:
+        from spending_report_view import render as render_report
+        render_report(client, actions, category_names)
         with st.expander("记录支出／退款／收入"):
             with st.form("spending_create"):
                 kind = st.selectbox("类型", ["expense", "refund", "cash_income"])
-                day = st.date_input("发生日期", value=date.today())
+                day = st.date_input("发生日期", value=get_dashboard_today())
                 amount = st.text_input("金额", "0.00")
                 currency = st.selectbox("币种", ["CNY", "SGD", "USD", "EUR", "JPY"])
                 category = st.selectbox("分类", list(category_names), format_func=category_names.get)
@@ -142,19 +166,21 @@ def render(client, review_only=False):
         st.rerun()
 
 
-def _schedules(client, save, categories, accounts):
+def _schedules(client, save, categories, accounts, source_draft=None):
+    suffix = "_" + source_draft["request_id"] if source_draft else ""
+    preview_key = "spending_schedule_preview" + suffix
     with st.expander("月度循环／分期计划"):
         if not categories:
             st.info("请先在设置中添加支出分类。")
             return
         names = {c["id"]: c["name"] for c in categories}
-        with st.form("new_spending_schedule"):
+        with st.form("new_spending_schedule" + suffix):
             name = st.text_input("计划名称")
-            kind = st.selectbox("计划类型", ["installment", "recurring"])
+            kind = st.selectbox("计划类型", ["installment"] if source_draft else ["installment", "recurring"])
             amount = st.text_input("每期金额", "0.00")
             currency = st.selectbox("计划币种", ["CNY", "SGD", "USD", "EUR", "JPY"])
             count = st.number_input("期数（循环支出可用 0 表示持续）", min_value=0, max_value=1200, value=12, step=1)
-            start = st.date_input("起始月份", value=date.today().replace(day=1))
+            start = st.date_input("起始月份", value=get_dashboard_today().replace(day=1))
             day = st.number_input("每月几号", min_value=1, max_value=31, value=1, step=1)
             merchant = st.text_input("计划商户")
             category = st.selectbox("计划分类", list(names), format_func=names.get)
@@ -165,21 +191,32 @@ def _schedules(client, save, categories, accounts):
                         "day_of_month": day, "merchant": merchant, "category_id": category, "account_id": account}
                 try:
                     preview = client.request("POST", "/api/v1/spending-schedules/preview", json_data=body)
-                    st.session_state["spending_schedule_preview"] = (body, preview)
+                    if source_draft:
+                        body.update(source_draft_request_id=source_draft["request_id"], expected_draft_version=source_draft["row_version"])
+                    st.session_state[preview_key] = (body, preview)
                 except Exception as exc:
-                    st.session_state.pop("spending_schedule_preview", None)
+                    st.session_state.pop(preview_key, None)
                     st.error(str(exc))
-        if "spending_schedule_preview" in st.session_state:
-            body, preview = st.session_state["spending_schedule_preview"]
+        if preview_key in st.session_state:
+            body, preview = st.session_state[preview_key]
             st.write(f"待保存预览：{body['name']} · 每期 {body['amount_per_period']} {body['currency']} · {body['period_count'] or '持续'} 期")
             st.write("已到期期数", len(preview["due_periods"]), "合计", preview["due_total"])
             st.dataframe(preview["due_periods"])
             st.write("后续日期", preview["upcoming_dates"])
-            if st.button("保存以上预览计划"):
-                if save("create_schedule", "POST", "/api/v1/spending-schedules", {**body, "acknowledged_due_through": preview["acknowledged_due_through"]}):
-                    st.session_state.pop("spending_schedule_preview", None)
+            if st.button("保存以上预览计划", key="save_preview" + suffix):
+                if save("create_schedule" + suffix, "POST", "/api/v1/spending-schedules", {**body, "acknowledged_due_through": preview["acknowledged_due_through"]}):
+                    st.session_state.pop(preview_key, None)
                     st.rerun()
-        schedules = client.request("GET", "/api/v1/spending-schedules")["items"]
+        if source_draft:
+            return
+        response = client.request("GET", "/api/v1/spending-schedules", params={"cursor": st.session_state.get("schedule_cursor")})
+        schedules = response["items"]
+        if response["next_cursor"] and st.button("下一页计划"):
+            st.session_state["schedule_cursor"] = response["next_cursor"]
+            st.rerun()
+        if st.session_state.get("schedule_cursor") and st.button("返回计划第一页"):
+            st.session_state["schedule_cursor"] = None
+            st.rerun()
         for row in schedules:
             st.write(row["name"], row["amount_per_period"], row["currency"], row["status"])
             if row["status"] in ("active", "paused"):

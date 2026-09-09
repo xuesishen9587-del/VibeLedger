@@ -12,7 +12,7 @@ from app.domain.transactions import (
     LedgerDomainError,
     IdempotencyKeyReuseError,
 )
-from app.repositories.simplified_schema import acquire_household_finance_lock
+from app.repositories.simplified_schema import acquire_household_finance_lock, lock_ingestion_requests_in_order
 
 
 def to_json(val: Any) -> Optional[str]:
@@ -54,6 +54,7 @@ def execute_durable_command(
     operation: str,
     body: Dict[str, Any],
     mutation_fn: Callable[[Any, UUID], Tuple[Dict[str, Any], int]],
+    *, source_expense_request_ids=(),
 ) -> Tuple[Dict[str, Any], int]:
     """
     Orchestrates the canonical durable command receipt lifecycle:
@@ -144,6 +145,18 @@ def execute_durable_command(
 
             if existing["status"] == "processing":
                 raise IdempotencyKeyReuseError("Command is currently processing.")
+
+        if source_expense_request_ids:
+            # The newly inserted command is private until this transaction commits.
+            # Lock the command and existing capture receipts together in ID order,
+            # before acquiring the household lock. Capture edits never acquire a
+            # command receipt. Replays above do not depend on mutable source state.
+            cur.execute("SELECT id,request_kind FROM ingestion_requests WHERE household_id=%s "
+                        "AND id=ANY(%s::uuid[])", (str(household_id), [str(i) for i in source_expense_request_ids]))
+            sources = cur.fetchall()
+            if len(sources) != len(set(source_expense_request_ids)) or any(r["request_kind"] != "expense" for r in sources):
+                raise HTTPException(404, "Expense draft not found.")
+            lock_ingestion_requests_in_order(conn, household_id, [active_receipt_id, *source_expense_request_ids])
 
         # Lock ordering: receipt lock held -> household finance lock
         acquire_household_finance_lock(conn, household_id)

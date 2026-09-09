@@ -69,6 +69,7 @@ def refresh(conn, actor, key, data, provider):
 
 
 def report(conn, household_id, start, end):
+    from app.services.spending_schedules import freshness
     if start > end:
         fail("INVALID_DATE", "The date range is reversed.")
     records = repo.rows(conn, "SELECT * FROM transactions WHERE household_id=%s AND status='committed' "
@@ -95,6 +96,7 @@ def report(conn, household_id, start, end):
             buckets[key(row)].append(row)
         return [{"key": name, **totals(rows, amount_key)} for name, rows in sorted(buckets.items())]
     return {"from": str(start), "to": str(end), "reporting_currency": household["reporting_currency"],
+            "schedules_current_through": freshness(conn, household_id),
             **totals(records, "reporting_amount"),
             "native_currency_totals": groups(lambda r: r["original_currency"], "original_amount"),
             "category": groups(lambda r: str(r["category_id"]), "reporting_amount"),

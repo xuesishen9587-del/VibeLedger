@@ -1,6 +1,6 @@
 # VibeLedger project handoff
 
-Updated: **2026-09-08**. Architecture baseline reviewed on
+Updated: **2026-09-09**. Architecture baseline reviewed on
 `refactor/astra-simplify-architecture` at `3ac0ed6`.
 The accepted simplification is committed at `83e479a`; this focused documentation
 revision adds the household's schedule, statement, metadata-review and gain requirements.
@@ -54,12 +54,14 @@ characterization tests are committed and verified.
 **S1 — Fresh database, identities and settings is formally accepted**, including
 independent review, per the user's 2026-09-08 handoff. Do not reopen it without an
 actual regression. This supersedes the former note that PostgreSQL execution was
-pending. PR #17 and the local `experiment/astra-simplified` branch both started this
-implementation session at `ef062684d9063e8d6f7c597437c1465819771125`.
+pending. The current `experiment/astra-simplified` session started at user-committed
+`46224c4` (S2 partially implemented), with a clean working tree.
 
 **S2 — Spending capture, metadata review and monthly schedules is in progress.**
-The 2026-09-08 changes are local and uncommitted; no PR update, deployment or S2
-acceptance has been performed. The three canonical documents remain authoritative.
+The earlier 2026-09-08 checkpoint is committed at `46224c4`. The additional
+2026-09-09 work described below is local and uncommitted; this session has not
+updated PR #17 or deployed anything. S2 is not formally accepted. The three
+canonical documents remain authoritative.
 
 Implemented and locally tested in this checkpoint:
 
@@ -80,38 +82,70 @@ Implemented and locally tested in this checkpoint:
 * S2 extends history existence checks to transactions and spending schedule entities.
   The accepted S1 schema/migration bytes and Settings action logic are unchanged.
 
-Remaining S2 work (do not claim CAP-01..05 or full SCHED/FX/UI acceptance yet):
+Added in the 2026-09-09 checkpoint:
 
-1. Replace the old `/expenses` and ingestion service/routes with durable
-   reserve/extract/finalize/cancel, conservative intent/date/confidence gates,
-   one-request ordinary capture, and browser/device-safe revise/confirm/reject.
-   The old capture paths still refer to the former ledger schema and are not usable
-   against the simplified database; do not deploy this checkpoint as complete S2.
-2. Add explicit screenshot-to-period binding and atomic consumption of a screenshot
-   draft when creating a schedule, including the multi-receipt lock-order proofs.
-   Existing manual expenses can already link via pending occurrence resolution;
-   future S3 statement import must use the same occurrence identity.
-3. Add trusted daily per-occurrence system receipts and missed-run freshness reporting;
-   only browser-driven catch-up exists now. HTTP OIDC deployment wiring remains S5.
-   Scheduled entries currently use cached FX; add bounded due-date quote preparation
-   outside locks to match the entry-time lookup contract fully.
-4. Finish Dashboard coverage: automatic missing-FX refresh, report presentation,
-   schedule-list pagination and richer period-link choices. Full four-page navigation,
-   investment review and consumer login remain S4. Legacy non-S2 pages still exist.
-5. Complete adversarial and real-device CAP/SCHED/FX acceptance. Extend tests for
-   stale preview dates, future term edits, inactive-reference fallback, cross-source
-   races, statement identity and source-draft conversion. Request independent review
-   before calling S2 accepted.
+* `/expenses` and `/ingestion-requests` now use the simplified capture pipeline:
+  short durable reservation, model extraction with no open database connection,
+  receipt/household-locked finalization, conservative intent/date/confidence gates,
+  same-key replay, processing recovery and cancellation tombstones. Raw images,
+  correction notes and model raw responses are not persisted. Image validation
+  bounds encoded bytes and decoded dimensions; HTTP validation errors omit inputs.
+* Natural-language and structured revisions stay drafts. Model revision output is
+  validated against the same bounded edit schema. Browser expected versions and
+  last-editor guards prevent bodyless device confirmation of unseen Dashboard edits.
+  Clear expenses retain unknown-account/uncertain-category fallback behavior.
+* Explicit capture-to-period binding reuses the occurrence's transaction; source
+  installment drafts can be consumed atomically by schedule creation. The S1 command
+  executor has one opt-in source-receipt parameter: it locks command/source receipts
+  in UUID order before the household lock; ordinary S1 commands remain unchanged.
+* `spending_schedules.run_due(connection_factory, provider)` is a trusted internal
+  daily entry point with deterministic per-period system command keys. Daily and
+  browser catch-up share occurrence identity; freshness derives missed due periods.
+  HTTP scheduler/OIDC/deployment wiring belongs to S5 and has not been deployed.
+* Due-date FX preparation is bounded outside financial locks, skips already posted
+  periods, and leaves missing conversions explicit. Pending periods recorded
+  separately also prepare eligible FX before their command lock.
+* Dashboard Review now exposes screenshot drafts, structured/NL revision, explicit
+  confirm/reject, full-purchase choice, period binding and source-draft schedule
+  preview/Save. Schedule and draft lists paginate. Pending-period linking offers
+  matching expense choices. Spending displays complete/known/original-currency
+  totals and attempts missing-FX refresh once per session/day, with manual retry.
+* Added adversarial proofs for cancellation/extraction and revision races,
+  concurrent confirmation/source consumption/job catch-up, two devices sharing
+  a textual key, duplicate changes since review, source/finalize rollback,
+  processing recovery, oversized images and expired capture deadlines. Schedule
+  tests cover stale previews, immutable posted calendars/amounts and inactive
+  category fallback. Streamlit AppTest covers draft edit/confirm separation and
+  bounded automatic FX refresh without claiming partial totals are complete.
+
+Remaining before formal S2 acceptance:
+
+1. Independent review of the new capture pipeline, source-receipt extension and
+   schedule/FX/UI paths. No independent review was performed in this session.
+   Existing legacy service tests still run but do not certify target capture;
+   the new S2 API/database tests exercise the replacement routes directly.
+2. Real iPhone Shortcut smoke tests on an isolated simplified service, including
+   recovery after network loss, cancel-before-late-POST and conservative drafts.
+   Local tests use typed fake model outputs; live Gemini transport/deadline behavior
+   and the real phone flow have not been verified in this checkpoint.
+3. Finish household UI acceptance, including schedule creation/binding and atomic
+   conversion of an already-saved full-price expense. That conversion is available
+   through the backend but still lacks a dedicated Dashboard action. Capture binding
+   currently lists the first 200 schedules; the main schedule list paginates.
+4. Statement overlap/identity integration remains S3. Four-page navigation,
+   investment Review and consumer login remain S4; legacy non-S2 pages/routes still
+   exist until replacement/cleanup. Do not deploy this checkpoint as the completed
+   simplified application or claim all canonical acceptance IDs are signed off.
 
 Local verification on disposable Docker PostgreSQL 17 (no remote database):
 
 | Suite | Result |
 |---|---|
-| Backend unit discovery | 227 passed (223 before this session) |
-| Backend integration discovery | 114 passed, including 15 new S2 persistence/API cases |
+| Backend unit discovery | 229 passed |
+| Backend integration discovery | 143 passed, including 15 spending and 29 capture/schedule S2 cases |
 | Migration discovery | 5 passed |
 | Concurrency discovery | 9 passed; S2 also tests concurrent refunds and catch-up in its integration file |
-| Dashboard discovery | 54 passed, including Streamlit AppTest metadata correction and retry-controller tests |
+| Dashboard discovery | 56 passed, including metadata correction, draft edit/confirm, FX presentation and retry-controller tests |
 
 Use `ai-ledger-backend/venv_backend/Scripts/python.exe` on this host. The system
 Python lacks application dependencies. Reproduce database checks with

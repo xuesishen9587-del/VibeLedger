@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, StrictStr, model_validator
 from app.api.deps import get_db_connection, require_browser_auth, require_idempotency_key
+from app.api.routes.transactions import get_fx_provider
 from app.domain.spending import fail
 from app.repositories import spending as repo
 from app.services import spending_schedules as service
@@ -30,11 +31,17 @@ class CreateSchedule(ScheduleTerms):
     acknowledged_due_through: date
     replaces_transaction_id: Optional[UUID] = None
     expected_transaction_version: Optional[int] = Field(None, ge=0)
+    source_draft_request_id: Optional[UUID] = None
+    expected_draft_version: Optional[int] = Field(None, ge=0)
 
     @model_validator(mode="after")
     def replacement_version(self):
         if (self.replaces_transaction_id is None) != (self.expected_transaction_version is None):
             raise ValueError("Replacement requires the expense ID and version together.")
+        if (self.source_draft_request_id is None) != (self.expected_draft_version is None):
+            raise ValueError("A source draft requires its ID and version together.")
+        if self.source_draft_request_id and self.replaces_transaction_id:
+            raise ValueError("Use a source draft or an existing expense, not both.")
         return self
 
 
@@ -84,8 +91,8 @@ def preview(payload: ScheduleTerms, actor=Depends(require_browser_auth), conn=De
 
 
 @router.post("/spending-schedules/materialize")
-def materialize(actor=Depends(require_browser_auth), conn=Depends(get_db_connection), key=Depends(require_idempotency_key)):
-    result, code = service.materialize(conn, actor, key)
+def materialize(actor=Depends(require_browser_auth), conn=Depends(get_db_connection), key=Depends(require_idempotency_key), provider=Depends(get_fx_provider)):
+    result, code = service.materialize(conn, actor, key, provider)
     return JSONResponse(result, status_code=code)
 
 
@@ -98,8 +105,8 @@ def list_schedules(cursor: Optional[UUID] = None, limit: int = Query(50, ge=1, l
 
 
 @router.post("/spending-schedules")
-def create(payload: CreateSchedule, actor=Depends(require_browser_auth), conn=Depends(get_db_connection), key=Depends(require_idempotency_key)):
-    result, code = service.create(conn, actor, key, payload.model_dump(mode="json"))
+def create(payload: CreateSchedule, actor=Depends(require_browser_auth), conn=Depends(get_db_connection), key=Depends(require_idempotency_key), provider=Depends(get_fx_provider)):
+    result, code = service.create(conn, actor, key, payload.model_dump(mode="json"), provider)
     return JSONResponse(result, status_code=code)
 
 
@@ -118,23 +125,23 @@ def get_schedule(identity: UUID, after_period: int = Query(0, ge=0), limit: int 
 
 @router.patch("/spending-schedules/{identity}")
 def patch_schedule(identity: UUID, payload: PatchSchedule, actor=Depends(require_browser_auth),
-                   conn=Depends(get_db_connection), key=Depends(require_idempotency_key)):
+                   conn=Depends(get_db_connection), key=Depends(require_idempotency_key), provider=Depends(get_fx_provider)):
     data = payload.model_dump(mode="json", exclude_unset=True)
     if not (data.keys() - {"expected_version", "reason"}):
         fail("INVALID_SCHEDULE", "Supply at least one changed term.")
-    result, code = service.change(conn, actor, key, identity, "patch", data)
+    result, code = service.change(conn, actor, key, identity, "patch", data, provider)
     return JSONResponse(result, status_code=code)
 
 
 @router.post("/spending-schedules/{identity}/{action}")
 def transition(identity: UUID, action: Literal["pause", "resume", "cancel"], payload: ChangeSchedule,
-               actor=Depends(require_browser_auth), conn=Depends(get_db_connection), key=Depends(require_idempotency_key)):
-    result, code = service.change(conn, actor, key, identity, action, payload.model_dump(mode="json"))
+               actor=Depends(require_browser_auth), conn=Depends(get_db_connection), key=Depends(require_idempotency_key), provider=Depends(get_fx_provider)):
+    result, code = service.change(conn, actor, key, identity, action, payload.model_dump(mode="json"), provider)
     return JSONResponse(result, status_code=code)
 
 
 @router.post("/schedule-occurrences/{identity}/resolve")
 def resolve(identity: UUID, payload: ResolvePeriod, actor=Depends(require_browser_auth),
-            conn=Depends(get_db_connection), key=Depends(require_idempotency_key)):
-    result, code = service.resolve(conn, actor, key, identity, payload.model_dump(mode="json"))
+            conn=Depends(get_db_connection), key=Depends(require_idempotency_key), provider=Depends(get_fx_provider)):
+    result, code = service.resolve(conn, actor, key, identity, payload.model_dump(mode="json"), provider)
     return JSONResponse(result, status_code=code)

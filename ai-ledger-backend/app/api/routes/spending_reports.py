@@ -41,6 +41,7 @@ def review(section: Literal["transaction", "draft", "schedule"] = "transaction",
            cursor: Optional[str] = None, limit: int = Query(50, ge=1, le=200),
            actor=Depends(require_browser_auth), conn=Depends(get_db_connection)):
     hh = actor.household_id
+    from app.services.spending_schedules import freshness
     counts = repo.rows(conn, "SELECT count(*) AS transactions, "
         "count(*) FILTER (WHERE account_id IS NULL AND NOT account_review_acknowledged) AS missing_account, "
         "count(*) FILTER (WHERE category_uncertain) AS category_uncertain FROM transactions "
@@ -69,6 +70,7 @@ def review(section: Literal["transaction", "draft", "schedule"] = "transaction",
                   "next_cursor": str(records[limit-1]["id"]) if len(records)>limit else None}
     household = settings.get_household(conn, hh)
     return {"section": section, "counts": counts, **result,
+            "schedules_current_through": freshness(conn, hh),
             "investment_review_change_ratio": str(household["investment_review_change_ratio"]),
             "settings_row_version": household["row_version"],
             "supported_sections": ["transaction", "draft", "schedule"]}

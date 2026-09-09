@@ -210,6 +210,9 @@ def extract_error_details(exc: Exception) -> Tuple[int, str, Dict[str, Any]]:
     return status_code, code, payload
 
 async def validation_exception_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+    if request.url.path == "/api/v1/expenses" or request.url.path.startswith("/api/v1/ingestion-requests"):
+        # Pydantic errors include input values. Never echo image bytes or correction notes.
+        return build_error_response(422, "INVALID_REQUEST", "Capture input validation failed.")
     status_code, _, payload = extract_error_details(exc)
     return JSONResponse(status_code=status_code, content=payload)
 

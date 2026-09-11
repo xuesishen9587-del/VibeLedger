@@ -371,7 +371,7 @@ def resolve(conn, actor, key, identity, data, provider=None):
     return execute_durable_command(conn, actor, key, f"POST /api/v1/schedule-occurrences/{identity}/resolve", data, mutate)
 
 
-def bind_capture_period(conn, actor, receipt_id, draft, fields):
+def bind_capture_period(conn, actor, receipt_id, draft, fields, *, source="shortcut", item_key=None):
     """Bind explicit capture/import intent under its outer receipt and household lock."""
     if any(draft.get(key) is None for key in ("schedule_id", "period_no", "expected_schedule_version")):
         fail("INVALID_SCHEDULE", "Select a schedule, period and current version.")
@@ -401,8 +401,8 @@ def bind_capture_period(conn, actor, receipt_id, draft, fields):
             "schedule_id": schedule["id"], "period_no": number, "due_on": day, "amount": expected_amount,
             "currency": schedule["currency"], "category_id": schedule["category_id"], "account_id": schedule["account_id"],
             "status": "needs_confirmation"})
-    transaction = spending.create_record(conn, actor, receipt_id, fields, source="shortcut",
-        date_source=draft["date_source"], category_uncertain=draft["category_uncertain"], occurrence_id=occurrence["id"])
+    transaction = spending.create_record(conn, actor, receipt_id, fields, source=source,
+        date_source=draft["date_source"], category_uncertain=draft["category_uncertain"], occurrence_id=occurrence["id"], item_key=item_key)
     changed = update(conn, "schedule_occurrences", actor.household_id, occurrence["id"], {"status": "recorded"})
     history(conn, actor, receipt_id, changed, "update", occurrence, entity="schedule_occurrence")
     finish(conn, actor, receipt_id, schedule)

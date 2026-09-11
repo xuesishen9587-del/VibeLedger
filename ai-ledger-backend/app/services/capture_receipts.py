@@ -69,20 +69,20 @@ def response(row, recovery=False):
             "display_summary": "Please review the expense before saving."}, 200
 
 
-def reserve(conn, actor, key, request_hash=None, digest=None, captured_at=None, client_version=None, cancel=False):
+def reserve(conn, actor, key, request_hash=None, digest=None, captured_at=None, client_version=None, cancel=False, *, request_kind="expense", operation="POST /api/v1/expenses"):
     authorize(conn, actor)
     inserted = repo.rows(conn, "INSERT INTO ingestion_requests(id,household_id,user_id,device_id,actor_scope,"
         "idempotency_key,request_kind,operation,request_hash,image_sha256,captured_at,client_version,status,last_editor_scope) "
         "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'processing',%s) "
         "ON CONFLICT(household_id,actor_scope,idempotency_key) DO NOTHING RETURNING *",
         (uuid4(), actor.household_id, actor.user_id, actor.device_id, actor.actor_scope, key,
-         "command" if cancel else "expense", "cancel" if cancel else "POST /api/v1/expenses",
+         "command" if cancel else request_kind, "cancel" if cancel else operation,
          request_hash, digest, captured_at, client_version, actor.actor_scope))
     if inserted:
         return inserted[0], True
     existing = repo.rows(conn, "SELECT * FROM ingestion_requests WHERE household_id=%s AND actor_scope=%s "
                          "AND idempotency_key=%s FOR UPDATE", (actor.household_id, actor.actor_scope, key))[0]
-    if not cancel and existing["request_hash"] is not None and (existing["request_hash"] != request_hash or existing["operation"] != "POST /api/v1/expenses"):
+    if not cancel and existing["request_hash"] is not None and (existing["request_hash"] != request_hash or existing["operation"] != operation):
         fail("IDEMPOTENCY_KEY_REUSE", "This key belongs to a different request.", 409)
     return existing, False
 

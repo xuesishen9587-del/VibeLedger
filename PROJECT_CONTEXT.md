@@ -1,176 +1,134 @@
 # VibeLedger project handoff
 
-Updated: **2026-09-09**. Architecture baseline reviewed on
-`refactor/astra-simplify-architecture` at `3ac0ed6`.
-The accepted simplification is committed at `83e479a`; this focused documentation
-revision adds the household's schedule, statement, metadata-review and gain requirements.
+Updated: **2026-09-11**.
 
-## Current state
+## Authority and accepted baseline
 
-* `ai-ledger-backend/app/` is a substantial implemented FastAPI application, not an
-  unbuilt prototype. Its root `main.py` is the older prototype entry point.
-* `ai-ledger-dashboard/app.py` already uses backend REST through `api_client.py`.
-  It does not directly own PostgreSQL business logic.
-* Migrations 0001–0009 implement the previous architecture (20 application tables).
-  They do not implement the Phase 12.5 risk/category-description/multi-account
-  capture proposal. Do not treat that proposal as a prerequisite anymore.
-* The user reports staging runtime and real-device Expense Shortcut acceptance
-  complete. The deployment runbook documents the earlier runtime gate; this
-  architecture review did not rerun remote acceptance.
-* Production fresh cutover has not happened. Historical legacy-data migration is
-  not required. No production deployment is part of the architecture task.
-* Canonical S1 is formally accepted per the household handoff. Canonical S2 is
-  in progress; the runtime is an intermediate implementation, not deployment-ready.
+1. [TARGET_DOMAIN_MODEL](TARGET_DOMAIN_MODEL.md)
+2. [CONTRACTS](docs/architecture/CONTRACTS.md)
+3. [IMPLEMENTATION_PLAN](docs/architecture/IMPLEMENTATION_PLAN.md)
 
-## Source of truth
+**S1 and S2 are formally accepted**, per the user's 2026-09-11 handoff.
+S2 real-device acceptance passed direct capture, confirm/revise, idempotent recovery,
+404 cancellation tombstones, duplicates and real Gemini integration. Do not reopen
+these stages without a genuine regression. This supersedes the prior handoff's
+pending S2 acceptance notes. S2 code is committed through `298499c`, including
+Dashboard full-price-expense conversion to installment schedules.
 
-Read [TARGET_DOMAIN_MODEL](TARGET_DOMAIN_MODEL.md),
-[CONTRACTS](docs/architecture/CONTRACTS.md), and
-[IMPLEMENTATION_PLAN](docs/architecture/IMPLEMENTATION_PLAN.md).
-[Architecture index](docs/architecture/README.md) explains consolidation and authority.
-The old “frozen” Phase 12.5 documents are superseded, available in Git at `3ac0ed6`.
+This S3 session began on `experiment/astra-simplified` at `298499c` with a clean
+working tree. Current S3 changes are **local and uncommitted**, not pushed or deployed.
+No S3 independent review, live model acceptance or formal acceptance is claimed.
 
-## Target in one paragraph
+## Current stage: S3 — Balances, wealth, risk and statement import
 
-Keep reliable screenshot expense capture and independent dated account balances.
-Wealth comes from the latest observed assets and debts, with freshness and coverage
-visible. Spending does not move balances; balance updates do not invent spending.
-Investment gain is the change in value minus net additions; absent flow inputs mean
-zero assumed flow and an estimated gain, distinct from user-confirmed gain. Review
-surfaces unusual estimates and saved expenses with unknown accounts or uncertain
-Other categories. Support monthly recurring/installment spending and selected-account
-statement import for batch spending plus a dated balance. Keep FastAPI, Streamlit,
-Supabase, device tokens/receipts, Decimal, household auth and small change history.
-Remove general reconciliation, balance projections, generic links and separate
-audit/work-queue user interfaces.
+Implemented in this checkpoint:
 
-## Next implementation work
+* `domain/balances.py` and `services/balance_service.py` provide one native signed
+  observation path. Manual multi-account Save is atomic; zero is valid. Currency,
+  account lifetime, future dates, same-time/date-only conflicts, current head and
+  account versions are checked under the household lock. Correction voids the old
+  record and inserts a replacement; void/reopen/closure guards preserve history.
+  A later nonzero observation cannot silently replace a closed account's zero.
+* `/balance-updates`, `/accounts/{id}/snapshots`, `/snapshots/{id}/correct|void`
+  replace the old reconciliation-based snapshot route. Account reads now include
+  their latest active observation. No balance operation writes spending or ledger
+  adjustments. Snapshot and statement-line history is household scoped.
+* `/reports/wealth` returns latest observations, known/null-complete totals,
+  positive-asset risk buckets, missing/old observations and FX coverage. Current
+  stale cached FX remains explicitly dated; historical stale/future FX is excluded.
+  `/reports/wealth-history` carries forward observations at balance/lifetime events,
+  including gaps before initialization; historical risk allocation is not asserted.
+  Explicit FX refresh also prepares current wealth quotes without changing balances.
+* `/balance-captures` uses typed Gemini extraction outside DB connections, existing
+  durable receipts, conservative account/scope/debt/date gates, total evidence and
+  explicit whole-row corrections/exclusions. Credit monthly bills do not become
+  total debt. Browser/device confirmation rules are retained. Amounts and selected
+  rows commit together. Sanitized row choices survive for history; raw images do not.
+* `/accounts/{id}/statement-imports` accepts a bounded PDF and memory-only password,
+  claims household/account/document identity, parses outside financial locks and
+  always creates one preview. New-key repeated files return the canonical request.
+  Temporary original PDFs are removed on success/failure. Limits: 20 MiB, 50 pages,
+  1,000 lines and 120-second parse deadline; model transport records coverage signals.
+* Statement evidence is immutable in `statement_lines`; edits live in the draft.
+  Import supports expenses/fees, explicit unlinked refunds, nonspending skips,
+  explicit duplicate links/separate purchases, provider IDs and schedule periods.
+  Missing business dates never use posting dates. Wrong/uncertain account identity
+  and partial coverage need explicit confirmation. Per-line `confirm_facts` prevents
+  editing one UI page from confirming unseen low-confidence rows on another page.
+* Statement Save rechecks duplicates and target versions under the shared lock;
+  financial rows, optional balance, line outcomes, audit and receipt are atomic.
+  Existing same-time/value observations can be explicitly reused. Source/date
+  provenance stays `statement`, including first creation through a due period.
+* Dashboard Wealth now offers honest totals, native dated balances, manual bulk
+  updates, screenshot review, snapshot history/correction/void, and current FX retry.
+  Statement import replaces the old reconciliation destination. One paginated
+  preview supports line decisions and optional closing balance. Review also exposes
+  balance/statement drafts. Unknown upload outcomes preserve the key for recovery
+  or cancellation. S1 Settings and S2 spending remain available.
 
-**S0** (freeze working boundary and runnable baseline) is **completed** on commit
-`f9ca292cfd0a7437fcc274d236e160344566daa5`. Sanitized wire fixtures, the Shortcut
-compatibility boundary specification, migration checksums, and offline boundary
-characterization tests are committed and verified.
+Narrow shared extensions: capture receipt reservation accepts a kind/operation
+(defaults unchanged); ingestion dispatches typed balance/statement drafts; schedule
+binding accepts statement provenance/item identity (Shortcut defaults unchanged).
+The accepted 16-table baseline and migration files have **not changed**.
 
-**S1 — Fresh database, identities and settings is formally accepted**, including
-independent review, per the user's 2026-09-08 handoff. Do not reopen it without an
-actual regression. This supersedes the former note that PostgreSQL execution was
-pending. The current `experiment/astra-simplified` session started at user-committed
-`46224c4` (S2 partially implemented), with a clean working tree.
+## Local verification
 
-**S2 — Spending capture, metadata review and monthly schedules is in progress.**
-The earlier 2026-09-08 checkpoint is committed at `46224c4`. The additional
-2026-09-09 work described below is local and uncommitted; this session has not
-updated PR #17 or deployed anything. S2 is not formally accepted. The three
-canonical documents remain authoritative.
-
-Implemented and locally tested in this checkpoint:
-
-* Independent manual expense/refund/income create, flat version-checked PATCH and
-  void, using S1 durable commands and the household lock. No balance projection.
-* Linked refund totals and correction/void guards, original-currency validation,
-  frozen reporting FX, effective-date provider quotes and missing-conversion refresh.
-* Spending report native/known/complete totals; saved-metadata Review counts/filters;
-  independent missing-account acknowledgement and uncertain-category correction.
-* Monthly schedule preview/create, finite or ongoing recurrence, month-end clamp,
-  due-only catch-up, pause/resume/cancel, pending duplicate resolution, and atomic
-  conversion of an identified full-price expense into period spending. Recorded
-  occurrences, including voided expenses, are never regenerated by catch-up.
-* Dashboard Spending and saved-metadata Review replace the old transaction-correction
-  and work-queue destinations. Manual entries, metadata edits, amount/date edits,
-  void/history, schedule creation/control and pending-period decisions use REST.
-  Unknown mutation outcomes retain the original command and key for explicit retry.
-* S2 extends history existence checks to transactions and spending schedule entities.
-  The accepted S1 schema/migration bytes and Settings action logic are unchanged.
-
-Added in the 2026-09-09 checkpoint:
-
-* `/expenses` and `/ingestion-requests` now use the simplified capture pipeline:
-  short durable reservation, model extraction with no open database connection,
-  receipt/household-locked finalization, conservative intent/date/confidence gates,
-  same-key replay, processing recovery and cancellation tombstones. Raw images,
-  correction notes and model raw responses are not persisted. Image validation
-  bounds encoded bytes and decoded dimensions; HTTP validation errors omit inputs.
-* Natural-language and structured revisions stay drafts. Model revision output is
-  validated against the same bounded edit schema. Browser expected versions and
-  last-editor guards prevent bodyless device confirmation of unseen Dashboard edits.
-  Clear expenses retain unknown-account/uncertain-category fallback behavior.
-* Explicit capture-to-period binding reuses the occurrence's transaction; source
-  installment drafts can be consumed atomically by schedule creation. The S1 command
-  executor has one opt-in source-receipt parameter: it locks command/source receipts
-  in UUID order before the household lock; ordinary S1 commands remain unchanged.
-* `spending_schedules.run_due(connection_factory, provider)` is a trusted internal
-  daily entry point with deterministic per-period system command keys. Daily and
-  browser catch-up share occurrence identity; freshness derives missed due periods.
-  HTTP scheduler/OIDC/deployment wiring belongs to S5 and has not been deployed.
-* Due-date FX preparation is bounded outside financial locks, skips already posted
-  periods, and leaves missing conversions explicit. Pending periods recorded
-  separately also prepare eligible FX before their command lock.
-* Dashboard Review now exposes screenshot drafts, structured/NL revision, explicit
-  confirm/reject, full-purchase choice, period binding and source-draft schedule
-  preview/Save. Schedule and draft lists paginate. Pending-period linking offers
-  matching expense choices. Spending displays complete/known/original-currency
-  totals and attempts missing-FX refresh once per session/day, with manual retry.
-* Added adversarial proofs for cancellation/extraction and revision races,
-  concurrent confirmation/source consumption/job catch-up, two devices sharing
-  a textual key, duplicate changes since review, source/finalize rollback,
-  processing recovery, oversized images and expired capture deadlines. Schedule
-  tests cover stale previews, immutable posted calendars/amounts and inactive
-  category fallback. Streamlit AppTest covers draft edit/confirm separation and
-  bounded automatic FX refresh without claiming partial totals are complete.
-
-Remaining before formal S2 acceptance:
-
-1. Independent review of the new capture pipeline, source-receipt extension and
-   schedule/FX/UI paths. No independent review was performed in this session.
-   Existing legacy service tests still run but do not certify target capture;
-   the new S2 API/database tests exercise the replacement routes directly.
-2. Real iPhone Shortcut smoke tests on an isolated simplified service, including
-   recovery after network loss, cancel-before-late-POST and conservative drafts.
-   Local tests use typed fake model outputs; live Gemini transport/deadline behavior
-   and the real phone flow have not been verified in this checkpoint.
-3. Finish household UI acceptance, including schedule creation/binding and atomic
-   conversion of an already-saved full-price expense. That conversion is available
-   through the backend but still lacks a dedicated Dashboard action. Capture binding
-   currently lists the first 200 schedules; the main schedule list paginates.
-4. Statement overlap/identity integration remains S3. Four-page navigation,
-   investment Review and consumer login remain S4; legacy non-S2 pages/routes still
-   exist until replacement/cleanup. Do not deploy this checkpoint as the completed
-   simplified application or claim all canonical acceptance IDs are signed off.
-
-Local verification on disposable Docker PostgreSQL 17 (no remote database):
+Disposable Docker PostgreSQL 17 on loopback port 55432; no remote financial database.
 
 | Suite | Result |
 |---|---|
-| Backend unit discovery | 229 passed |
-| Backend integration discovery | 143 passed, including 15 spending and 29 capture/schedule S2 cases |
+| Backend unit discovery | 231 passed |
+| Backend integration discovery | 164 passed (21 new S3 cases) |
 | Migration discovery | 5 passed |
-| Concurrency discovery | 9 passed; S2 also tests concurrent refunds and catch-up in its integration file |
-| Dashboard discovery | 56 passed, including metadata correction, draft edit/confirm, FX presentation and retry-controller tests |
+| Concurrency discovery | 9 passed; S3 concurrency also covered in integration |
+| Dashboard discovery | 67 passed (2 new S3 AppTest cases) |
 
-Use `ai-ledger-backend/venv_backend/Scripts/python.exe` on this host. The system
-Python lacks application dependencies. Reproduce database checks with
-`scripts/run_local_integration.ps1 -Python .\venv_backend\Scripts\python.exe`
-from the backend directory (Docker PostgreSQL listens only on loopback port 55432).
-Unit, migration, concurrency and Dashboard suites use `python -m unittest discover`
-with their respective `tests/unit`, `tests/migration`, `tests/concurrency`, and
-Dashboard `tests` directories. Set the local harness's ENVIRONMENT/DATABASE_URL/
-DB_SCHEMA explicitly for backend tests; never inherit `.env` database credentials.
-Test output includes fixture-generated staging tokens; keep raw logs out of Git.
+New S3 tests cover zero/partial wealth, stale versus missing FX, atomic rollback,
+concurrent heads, backdates, corrections/closure protection, debt and total evidence,
+unknown-row exclusion, changed configuration, statement duplicate identities,
+concurrent imports, refund/skip decisions, balance-only imports, explicit observation
+reuse, statement-to-schedule identity and unseen-page review protection. PDF unit
+tests exercise encryption/password failures, page/byte limits, and temporary cleanup.
+Models are faked in DB tests; local passing tests are not live model acceptance.
 
-The user requests pausing when the five-hour allowance has **less than 10% remaining**.
-Check usage periodically, stop new feature work at that threshold, and leave a tested
-checkpoint plus an explicit completed/pending summary before exhausting the allowance.
+Use `ai-ledger-backend/venv_backend/Scripts/python.exe`, including for Dashboard.
+Set ENVIRONMENT=test, DATABASE_URL to the local harness DSN, and DB_SCHEMA explicitly.
+Run backend `scripts/run_integration_tests.py`; unittest discovery directories are
+`tests/unit`, `tests/migration`, `tests/concurrency`, and Dashboard `tests`.
+Do not run legacy root scripts against inherited .env credentials. Raw test logs
+can contain fixture tokens; they were removed and must not be committed.
 
-Consumer choices are specified, not blockers: last reported wealth, due-period
-installment spending, editable seeded categories, statement preview before Save,
-and estimated gains with an initial adjustable 20% unusual-change threshold.
-Monthly days beyond a month's length use its last day. The four requested additions
-do not reintroduce a reconciliation engine or projected account balances.
+## Remaining S3 work and acceptance
 
-## Workspace and operating notes
+1. Independent review and adversarial expansion of the new balance/statement paths.
+   In particular, review total/rounding scope, duplicate provider contradictions,
+   voided evidence, target-edit versus import races, and cancellation during PDF
+   parsing. Reuse the canonical BAL/WEALTH/STMT acceptance matrix, not old test counts.
+2. Live Gemini and real household balance screenshots/statements, encrypted PDFs,
+   long statements, partial/scanned documents and measured timeouts. Local temporary
+   cleanup is tested; hosted-resource/latency limits and prompt behavior need staging
+   evidence. No new live model request or deployment was made in this session.
+3. Finish UI acceptance/polish: wealth history has a backend step-series API but no
+   dedicated chart yet. Statement linking currently offers the first 200 transactions
+   and schedules; full target-search coverage is pending. Statement line editing is
+   paged in groups of 25, and draft lists paginate. Review clearing/retries need
+   household interaction tests beyond the two initial AppTests.
+4. Validate document completeness messaging and account-scope overrides with users.
+   Typed completeness signals cannot prove the model extracted every real row.
+   The known missing-currency -> INVALID_AMOUNT UX issue remains non-blocking and
+   unchanged in spending; new signed-balance validation distinguishes currency.
+5. S4 investment input/estimated-gain UI, complete four-page navigation and consumer
+   login remain future work. S5 removes remaining legacy report/investment/audit
+   routes/pages and wires/deploys daily scheduler authentication. The application
+   is not yet the completed simplified production release.
 
-Use PowerShell 7 (`pwsh.exe`) and UTF-8 on Windows. Never run legacy remote-dependent
-tests or destructive test cleanup against inherited credentials. Use a disposable
-local PostgreSQL test database/schema and the existing safety harness.
-`ai-ledger-backend/cloudbuild.phase12.yaml` predates this revision and remains
-untouched by this documentation work.
+No new product decision blocks development. Product authority remains unchanged:
+spending and balances are independent; absent investment flows imply estimated
+zero-flow gains (S4); statements never recreate reconciliation or infer flows.
+
+## Operating constraints
+
+Use PowerShell 7 (`pwsh.exe`) and UTF-8. Preserve accepted migrations/S1/S2 unless a
+real regression is found. Check account usage periodically. When the five-hour
+allowance has **less than 10% remaining**, stop new feature work, finish verification
+and handoff, and report completed/pending work before exhausting the allowance.

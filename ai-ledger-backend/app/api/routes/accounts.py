@@ -137,7 +137,8 @@ def list_accounts(
         account_type=account_type,
         owner_user_id=owner_user_id
     )
-    return {"items": [_format_account(a) for a in accounts], "next_cursor": None}
+    from app.services.balance_service import latest, output
+    return {"items": [_format_account({**a, "latest_snapshot": output(latest(conn, device["household_id"], a["id"]))}) for a in accounts], "next_cursor": None}
 
 @router.get("/{account_id}", summary="Get Account Details")
 def get_account(
@@ -152,7 +153,8 @@ def get_account(
     acc = accounts_repo.get_account(conn, account_id, household_id)
     if not acc:
         raise AccountResourceNotFoundError(account_id)
-    return _format_account(acc)
+    from app.services.balance_service import latest, output
+    return _format_account({**acc, "latest_snapshot": output(latest(conn, household_id, account_id))})
 
 @router.post("", status_code=status.HTTP_201_CREATED, summary="Create Account")
 def create_account(

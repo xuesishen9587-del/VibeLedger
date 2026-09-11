@@ -32,6 +32,8 @@ from app.api.routes.audit import router as audit_router
 from app.api.routes.history import router as history_router
 from app.api.routes.spending_reports import router as spending_reports_router
 from app.api.routes.spending_schedules import router as spending_schedules_router
+from app.api.routes.wealth import router as wealth_router
+from app.api.routes.balance_captures import router as balance_captures_router
 
 def create_app() -> FastAPI:
     """
@@ -62,6 +64,8 @@ def create_app() -> FastAPI:
     app.include_router(credit_cards_router)
     app.include_router(installments_router)
     app.include_router(snapshots_router)
+    app.include_router(wealth_router)
+    app.include_router(balance_captures_router)
     app.include_router(reconciliation_router)
     app.include_router(reconciliation_candidates_router)
     app.include_router(statements_router)

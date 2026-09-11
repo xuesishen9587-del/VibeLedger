@@ -186,6 +186,8 @@ def get_entity_history(
         "transaction": "transactions",
         "spending_schedule": "spending_schedules",
         "schedule_occurrence": "schedule_occurrences",
+        "account_snapshot": "account_snapshots",
+        "statement_line": "statement_lines",
     }
     table = table_map.get(entity_type)
     if table:

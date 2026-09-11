@@ -1,6 +1,6 @@
 # VibeLedger: household wealth and spending
 
-Status: **Simplified target, revised 2026-09-06; implementation pending.** This replaces the
+Status: **Simplified target, revised 2026-09-06; S1/S2 accepted, S3 in progress as of 2026-09-11.** This replaces the
 Phase 12.5 architecture. The existing staging implementation is the starting point.
 Read [the implementation contract](docs/architecture/CONTRACTS.md) and
 [transition and acceptance plan](docs/architecture/IMPLEMENTATION_PLAN.md) next.

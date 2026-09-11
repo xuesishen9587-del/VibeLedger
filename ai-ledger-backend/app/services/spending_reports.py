@@ -38,6 +38,12 @@ def prime_quote(conn, household_id, data, provider):
 def refresh(conn, actor, key, data, provider):
     existing = settings.get_ingestion_request_by_key(conn, actor.household_id, actor.actor_scope, key)
     if not existing:
+        # Refresh current wealth quotes without changing any observed balance.
+        from app.domain.spending import local_today
+        today = local_today(settings.get_household(conn, actor.household_id))
+        currencies = repo.rows(conn, "SELECT DISTINCT currency FROM accounts WHERE household_id=%s AND status='active' ORDER BY currency LIMIT 5", (actor.household_id,))
+        for item in currencies:
+            prime_quote(conn, actor.household_id, {"original_amount": "1", "original_currency": item["currency"], "occurred_on": today}, provider)
         selected = repo.rows(conn, "SELECT * FROM transactions WHERE household_id=%s AND status='committed' "
             "AND reporting_amount IS NULL AND (%s::date IS NULL OR occurred_on>=%s) "
             "AND (%s::date IS NULL OR occurred_on<=%s) ORDER BY occurred_on,id LIMIT 200",

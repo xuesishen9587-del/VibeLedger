@@ -129,12 +129,9 @@ Do not modify accepted staging/production identities or reuse device tokens acro
 
 ### S2 — Spending capture, metadata review and monthly schedules
 
-Implementation checkpoint **2026-09-09**: S1 remains accepted. S2 now has local
-simplified capture/recovery, metadata Review, schedules/system catch-up and spending
-FX/report UI implementation, with 143 backend integration tests passing. This is
-not formal S2 acceptance: independent review and isolated real-device/household
-checks remain. See [the current handoff](../../PROJECT_CONTEXT.md) for exact scope,
-remaining UI coverage, test evidence and the uncommitted workspace status.
+Acceptance update **2026-09-11**: S1 and S2 are formally accepted per the household
+handoff. S2 real-device capture, revision/confirmation, recovery/tombstones,
+duplicates and live Gemini passed. Do not reopen without a genuine regression.
 
 * Retain the expense endpoint body/normal result, simplify its financial write, keep
   natural-language revisions and deterministic validation.
@@ -154,6 +151,12 @@ SEC-01 and HIST-01 pass. A real-device
 smoke test on a new isolated service may begin, but does not replace final acceptance.
 
 ### S3 — Balance updates, wealth, risk and statement import
+
+Implementation checkpoint **2026-09-11**: local manual/screenshot observations,
+wealth/risk/history reads, statement preview/application and Dashboard entry points
+are implemented with 164 integration tests passing. S3 remains **in progress**;
+independent review, live balance/statement extraction and full UI acceptance remain.
+See [current handoff](../../PROJECT_CONTEXT.md) for exact scope and known UI limits.
 
 * Implement the single snapshot path, manual multi-account Save, correction/void and
   version/head checks; no reconciliation batch is created.

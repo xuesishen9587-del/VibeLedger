@@ -109,9 +109,12 @@ Implemented:
 Verification: local Python 3.10.21 **248 backend unit tests and 86 Dashboard tests**
 pass. Eleven new PostgreSQL integration cases cover lifecycle/replay, pair changes,
 restoration, concurrent inputs, split-versus-confirm, rollback, authorization,
-settings/history and native range coverage. PostgreSQL is unavailable locally;
-these cases must pass on CI before database validation is claimed. Applied
-migrations and S1/S2 financial write behavior are unchanged.
+settings/history and native range coverage. GitHub run
+[34706096878](https://github.com/xuesishen9587-del/VibeLedger/actions/runs/34706096878)
+on `ef59863` **passed all jobs**, including PostgreSQL Integration and Migration &
+Concurrency. This supplies the real-DB gate for the investment slice; PostgreSQL
+remains unavailable locally. Applied migrations and S1/S2 financial write behavior
+are unchanged. This subsequent handoff commit changes documentation only.
 
 Remaining S4 parent-stage obligations: four-page navigation consolidation,
 Supabase Auth login/refresh/logout and pinned JWKS validation (SEC-02), full

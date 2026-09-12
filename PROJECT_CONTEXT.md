@@ -71,7 +71,31 @@ Narrow shared extensions: capture receipt reservation accepts a kind/operation
 binding accepts statement provenance/item identity (Shortcut defaults unchanged).
 The accepted 16-table baseline and migration files have **not changed**.
 
-## Current continuation — statement balance reuse and recovery
+## Latest continuation — GitHub sync restored and wealth display
+
+The reconfigured GitHub connection successfully published the previously local
+`60327ae` checkpoint as `ac7494a` (identical Git tree, new commit metadata). Target
+branch `experiment/astra-simplified` was updated without force. GitHub run
+[34704864541](https://github.com/xuesishen9587-del/VibeLedger/actions/runs/34704864541)
+passed Dashboard, Unit, PostgreSQL Integration, Migration & Concurrency and Backend
+CI. This includes the new account-scoped snapshot lookup regression. Earlier App
+installation / HTTP 403 notes below are historical; actual writing now succeeds.
+
+The next Dashboard change exposes per-account missing/old balance status and
+configured balance scope. Accounts over 90 days old receive a named warning while
+their balances remain included. Positive credit balances are labelled as surplus
+and unclassified positive assets, including when their FX conversion is missing.
+Missing observations remain null and zero stays visible. Three display regressions
+cover 30/31/90/91-day flags, missing versus zero, debt versus surplus with missing
+FX, and the rendered warning without changing totals. No backend or migration
+behavior changes. S3 live household/model and independent acceptance remain open;
+this UI continuation does not claim S3 completion or begin deployment.
+
+Local Python 3.10.21 Dashboard discovery: **82 tests passed**. The three new display
+tests also passed independently. Backend behavior is unchanged; the full CI on the
+new continuation commit remains the remote verification gate.
+
+## Previous continuation — statement balance reuse and recovery
 
 The user pushed `30aff50`. Both GitHub runs 34691621535 and 34691619925
 **passed**, including PostgreSQL Integration, Migration & Concurrency, Unit,

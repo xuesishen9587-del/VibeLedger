@@ -9,6 +9,26 @@ from time_utils import format_iso_timestamp, get_dashboard_today
 from wealth_history_view import render as render_wealth_history
 
 
+def account_rows(accounts):
+    rows=[]
+    for account in accounts:
+        if account["balance"] is None:
+            status="尚未记录余额"
+        elif account.get("very_stale"):
+            status="超过 90 天未更新"
+        elif account.get("needs_update"):
+            status="超过 30 天，建议更新"
+        else:
+            status="已记录"
+        rows.append({"账户":account["name"],"覆盖范围":account.get("balance_scope"),
+            "原币余额":account["balance"],"币种":account["currency"],"观察时间":account["as_of"],
+            "余额状态":status,"折算金额":account["converted_amount"],"汇率日期":account["fx_as_of"],
+            "距今天数":account["age_days"],
+            "说明":"信用卡溢缴款 · 正资产，风险未分类"
+                if account.get("account_type")=="credit" and account["balance"] is not None and Decimal(account["balance"])>0 else ""})
+    return rows
+
+
 def render(client):
     st.title("最近报告的家庭财富")
     st.caption("余额来自各账户最近一次观察；支出不会自动改变余额。")
@@ -40,10 +60,12 @@ def render(client):
         st.write("账户观察日期",report["coverage"]["oldest_observation_at"],"至",report["coverage"]["newest_observation_at"])
         if report["coverage"]["stale_account_ids"]:
             st.warning("部分账户超过 30 天未更新；这些旧余额仍包含在已知金额中。")
+        very_stale=[r["name"] for r in report["accounts"] if r.get("very_stale")]
+        if very_stale:
+            st.warning("以下账户超过 90 天未更新，请优先补充余额："+"、".join(very_stale)+"。旧余额仍计入报告。")
         if report["coverage"]["stale_fx_currencies"]:
             st.warning("部分折算使用超过 7 天的旧汇率。")
-        st.dataframe([{"账户":r["name"],"原币余额":r["balance"],"币种":r["currency"],"观察时间":r["as_of"],
-            "折算金额":r["converted_amount"],"汇率日期":r["fx_as_of"],"距今天数":r["age_days"]} for r in report["accounts"]])
+        st.dataframe(account_rows(report["accounts"]))
         st.write("正资产风险分布（负债不进入分母）")
         st.dataframe([{"风险":r["risk_level"],"金额":r["amount"],"占已知正资产比例 %":r["percentage"]} for r in report["risk_buckets"]])
     missing=report["coverage"]["missing_fx_currencies"] or report["coverage"]["stale_fx_currencies"]

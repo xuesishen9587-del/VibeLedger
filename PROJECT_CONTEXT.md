@@ -19,7 +19,7 @@ The original S3 implementation was committed and pushed as `4a06657` after the
 2026-09-11 handoff. The 2026-09-12 continuation starts from that clean branch head.
 No S3 independent review, live model acceptance or formal acceptance is claimed.
 
-## Current stage: S3 — Balances, wealth, risk and statement import
+## S3 — Implemented; live and independent acceptance still pending
 
 Implemented in this checkpoint:
 
@@ -70,6 +70,54 @@ Narrow shared extensions: capture receipt reservation accepts a kind/operation
 (defaults unchanged); ingestion dispatches typed balance/statement drafts; schedule
 binding accepts statement provenance/item identity (Shortcut defaults unchanged).
 The accepted 16-table baseline and migration files have **not changed**.
+
+## Current continuation — S4 investment interval inputs and Review
+
+The user explicitly removed the five-hour quota monitoring requirement on
+2026-09-12. Continue normal development and sync completed checkpoints; do not
+poll usage or stop at the old 10% threshold. All older quota notes are historical.
+
+Parent `bbf43bc` passed all jobs in GitHub run 34705080205. This continuation begins
+S4 implementation while retaining the separate outstanding S3 acceptance gates.
+It does **not** claim S3 or S4 formal acceptance.
+
+Implemented:
+
+* New `investment_gains` domain/service/routes use the existing simplified
+  `investment_period_inputs` table. PUT requires both nonnegative native flow
+  totals, pair IDs and an explicit expected version (null only for creation).
+  Active consecutive observations are rechecked under the shared household lock.
+  Edit, void and reactivation keep one pair identity, audit and durable receipts.
+* Native-currency reports derive zero-flow estimates without creating inputs or
+  transactions, expose confirmed/estimated/mixed subtotals, first-observation
+  unavailability, actual time precision, date-range gaps and excluded crossing
+  intervals. Gains are never prorated. Optional reporting-currency translation
+  is not implemented; no FX or cross-currency aggregate is fabricated.
+* Corrected/split/voided observation pairs discard old assertions from reports.
+  A later split that is itself voided cannot resurrect an older confirmation:
+  immutable household-locked audit order determines whether explicit reconfirmation
+  is needed. Historical inputs and their audit remain available.
+* GET /review adds the paginated investment section and derived unusual-change
+  count. Threshold comparison includes exactly +/-20%, negative openings and
+  zero-to-nonzero changes. Browser-only household threshold edits are versioned
+  and audited. Confirmed zero flows clear review; withdrawal restores estimates.
+* Wealth and Review show investment forms with an explicit whole-interval checkbox,
+  recoverable command retries, void/history and date-range coverage. Settings
+  exposes the threshold. The old investment menu now delegates to this same view
+  and no longer submits legacy valuation/ledger writes.
+
+Verification: local Python 3.10.21 **248 backend unit tests and 86 Dashboard tests**
+pass. Eleven new PostgreSQL integration cases cover lifecycle/replay, pair changes,
+restoration, concurrent inputs, split-versus-confirm, rollback, authorization,
+settings/history and native range coverage. PostgreSQL is unavailable locally;
+these cases must pass on CI before database validation is claimed. Applied
+migrations and S1/S2 financial write behavior are unchanged.
+
+Remaining S4 parent-stage obligations: four-page navigation consolidation,
+Supabase Auth login/refresh/logout and pinned JWKS validation (SEC-02), full
+household UI acceptance (UI-01), and independent review. Existing legacy backend
+investment/report routes remain until S5 replacement/removal coverage. No live
+model calls, operator provisioning, staging or production deployment occurred.
 
 ## Latest continuation — GitHub sync restored and wealth display
 
@@ -280,6 +328,6 @@ zero-flow gains (S4); statements never recreate reconciliation or infer flows.
 ## Operating constraints
 
 Use PowerShell 7 (`pwsh.exe`) and UTF-8. Preserve accepted migrations/S1/S2 unless a
-real regression is found. Check account usage periodically. When the five-hour
-allowance has **less than 10% remaining**, stop new feature work, finish verification
-and handoff, and report completed/pending work before exhausting the allowance.
+real regression is found. The user
+removed quota monitoring and the 10% stopping rule on 2026-09-12. Continue normal
+development, verification, commits and GitHub synchronization.

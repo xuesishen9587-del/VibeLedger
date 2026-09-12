@@ -140,6 +140,8 @@ if menu == "💰 资产负债中心":
     from wealth_page import render
     try:
         render(client)
+        from investment_view import render as render_investments
+        render_investments(client)
     except Exception as exc:
         handle_api_error(exc, "加载财富失败")
 
@@ -237,60 +239,12 @@ elif menu == "📊 收支统计中心":
 # 页面 3: 📈 投资管理中心
 # ==============================================================================
 elif menu == "📈 投资管理中心":
-    st.title("📈 投资管理中心")
-    st.markdown("监控投资账户估值、已确认投资盈亏与资金进出（投资收益独立核算）")
-
+    from investment_view import render
+    st.caption("投资余额请在财富页的更新余额中记录。")
     try:
-        inv_summary = client.get_investments()
-        accounts_data = client.list_accounts(account_type="investment", status="active").get("items", [])
-    except Exception as e:
-        handle_api_error(e, "加载投资数据失败")
-        inv_summary = {}
-        accounts_data = []
-
-    # Item 3: KPI Metrics using total_valuation from backend
-    tot_val = Decimal(str(inv_summary.get("total_valuation", "0.00")))
-    pnl = Decimal(str(inv_summary.get("total_pnl", "0.00")))
-    rep_curr = inv_summary.get("reporting_currency", "CNY")
-
-    i1, i2 = st.columns(2)
-    with i1:
-        st.metric(label=f"投资总估值 ({rep_curr})", value=f"￥{tot_val:,.2f}" if rep_curr == "CNY" else f"{tot_val:,.2f} {rep_curr}")
-    with i2:
-        st.metric(label=f"累计确认投资盈亏 ({rep_curr})", value=f"￥{pnl:,.2f}" if rep_curr == "CNY" else f"{pnl:,.2f} {rep_curr}", delta=f"{'盈利' if pnl >= 0 else '亏损'}")
-
-    st.divider()
-
-    # Item 2: 投资估值录入与校准 (Aligned with Backend contract: total_asset_value, currency, as_of)
-    st.subheader("📝 投资账户估值快照录入 (Investment Valuation Snapshot)")
-    if accounts_data:
-        acc_dict = {a["name"]: a for a in accounts_data}
-        with st.form("investment_snapshot_form", clear_on_submit=True):
-            sel_inv_name = st.selectbox("选择投资账户", options=list(acc_dict.keys()))
-            inv_total_val = st.number_input("期末权威总资产估值", value=0.0, step=1000.0, format="%.2f")
-            inv_as_of = st.date_input("估值基准日期", value=get_dashboard_today())
-            submit_inv = st.form_submit_button("提交投资估值")
-
-            if submit_inv:
-                inv_acc = acc_dict[sel_inv_name]
-                try:
-                    iso_as_of = format_iso_timestamp(inv_as_of)
-                    res = client.create_investment_snapshot(
-                        account_id=inv_acc["id"],
-                        total_asset_value=Decimal(str(inv_total_val)),
-                        currency=inv_acc["currency"],
-                        as_of=iso_as_of
-                    )
-                    pnl_obj = res.get("investment_pnl")
-                    if pnl_obj is None:
-                        st.success(f"🎉 投资初始基准已成功建立！快照 ID: {res.get('snapshot_id')}")
-                    else:
-                        st.success(f"🎉 投资估值已提交！计算确认投资盈亏: {pnl_obj.get('currency', 'CNY')} {pnl_obj.get('pnl_amount', '0.00')}")
-                    st.rerun()
-                except Exception as ex:
-                    handle_api_error(ex, "投资估值提交失败")
-    else:
-        st.info("当前暂无投资类型账户。可在「账户与分类管理」中创建投资账户。")
+        render(client)
+    except Exception as exc:
+        handle_api_error(exc, "加载投资区间失败")
 
 
 # ==============================================================================
@@ -313,10 +267,17 @@ elif menu in ("💸 支出", "🔎 支出复核"):
             from statement_page import render as render_statements
             render_balance_drafts(client, SpendingActions(st.session_state.setdefault("_wealth_actions", {}), client))
             render_statements(client, review_only=True)
+            from investment_view import render as render_investments
+            render_investments(client, review_only=True)
     except Exception as exc:
         handle_api_error(exc, "加载支出失败")
 
 elif menu == "⚙️ 账户与分类管理":
+    from investment_view import render_settings as render_investment_settings
+    try:
+        render_investment_settings(client)
+    except Exception as exc:
+        handle_api_error(exc, "加载投资复核设置失败")
     settings_ctrl = SettingsActionController()
     col_hdr1, col_hdr2 = st.columns([5, 1])
     with col_hdr1:

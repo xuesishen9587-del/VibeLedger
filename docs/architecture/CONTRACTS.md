@@ -760,6 +760,21 @@ gain=null/status=unavailable/reason=FIRST_OBSERVATION. Pair changes expose old i
 in history and return reason=PAIR_CHANGED with a newly estimated gain, not a null gain.
 No active confirmation is fabricated when estimates are read.
 
+The native-only implementation returns `items`, `first_observations`, `unavailable`,
+`native_currency_totals`, `coverage:{complete,gaps}`, `excluded_boundary_intervals`
+and `historical_inputs`. Items include exact pair IDs, native values, actual
+period_start/end and time bases, effective flows, nullable confirmed_inputs,
+input_id/status/version for explicit edits/reactivation, and gain/review labels.
+A combined subtotal with any estimated interval is labelled estimated. Empty
+eligible interval sets have null combined_gain. No translated aggregate is returned
+until optional closing-date reference conversion is implemented.
+
+A split followed by voiding the inserted observation must not silently resurrect
+an older flow completeness assertion. Compare immutable audit write order for the
+intervening observation against the latest explicit flow confirmation; transaction
+start timestamps alone cannot order concurrent writers waiting on the finance lock.
+Explicit PUT with the existing input version can reconfirm the restored interval.
+
 For each native currency return confirmed_gain_subtotal, estimated_gain_subtotal,
 combined_gain and estimated/confirmed interval counts, plus coverage/gaps. Any combined
 amount containing estimates is labelled estimated; absence of confirmation is not a

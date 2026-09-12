@@ -187,12 +187,15 @@ def get_entity_history(
         "spending_schedule": "spending_schedules",
         "schedule_occurrence": "schedule_occurrences",
         "account_snapshot": "account_snapshots",
+        "investment_period_input": "investment_period_inputs",
+        "household": "households",
         "statement_line": "statement_lines",
     }
     table = table_map.get(entity_type)
     if table:
         with conn.cursor() as cur:
-            cur.execute(f"SELECT 1 FROM {table} WHERE household_id = %s AND id = %s LIMIT 1;", (household_id, str(entity_id)))
+            scope_column = "id" if table == "households" else "household_id"
+            cur.execute(f"SELECT 1 FROM {table} WHERE {scope_column} = %s AND id = %s LIMIT 1;", (household_id, str(entity_id)))
             if not cur.fetchone():
                 return None
 

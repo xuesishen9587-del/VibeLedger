@@ -37,7 +37,7 @@ def refresh_fx(payload: RefreshRequest, actor=Depends(require_browser_auth),
 
 
 @router.get("/review")
-def review(section: Literal["transaction", "draft", "schedule"] = "transaction",
+def review(section: Literal["transaction", "draft", "schedule", "investment"] = "transaction",
            cursor: Optional[str] = None, limit: int = Query(50, ge=1, le=200),
            actor=Depends(require_browser_auth), conn=Depends(get_db_connection)):
     hh = actor.household_id
@@ -51,7 +51,12 @@ def review(section: Literal["transaction", "draft", "schedule"] = "transaction",
         "AND status='needs_confirmation'", (hh,))[0]["n"]
     counts["schedule_occurrences"] = repo.rows(conn, "SELECT count(*) AS n FROM schedule_occurrences "
         "WHERE household_id=%s AND status='needs_confirmation'", (hh,))[0]["n"]
-    if section == "transaction":
+    from app.services.investment_gains import report as investment_report, review_page
+    investments = investment_report(conn, hh)
+    investment_page, counts["unusual_investment_estimates"] = review_page(investments, cursor if section == "investment" else None, limit)
+    if section == "investment":
+        result = investment_page
+    elif section == "transaction":
         result = page(conn, hh, {"status": "committed", "needs_metadata_review": True}, cursor, limit)
     else:
         position = None
@@ -73,4 +78,4 @@ def review(section: Literal["transaction", "draft", "schedule"] = "transaction",
             "schedules_current_through": freshness(conn, hh),
             "investment_review_change_ratio": str(household["investment_review_change_ratio"]),
             "settings_row_version": household["row_version"],
-            "supported_sections": ["transaction", "draft", "schedule"]}
+            "supported_sections": ["transaction", "draft", "schedule", "investment"]}

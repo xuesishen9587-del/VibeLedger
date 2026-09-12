@@ -174,6 +174,13 @@ independent of whether all household spending has been captured.
 
 ### S4 — Investment inputs and complete Dashboard
 
+Implementation checkpoint **2026-09-12**: investment interval inputs, derived
+native gains and unusual-change Review plus Dashboard forms are implemented.
+S4 is **in progress**: new real-DB cases await CI; four-page consolidation,
+consumer authentication/JWKS, independent and household acceptance remain open.
+S3 live/independent acceptance remains outstanding separately. See the current
+handoff for exact verification evidence; a passing slice is not S4 acceptance.
+
 * Implement confirmed interval flow inputs and zero-flow estimates by default;
   distinguish gain status and subtotals, invalidate old pair confirmations, and
   derive unusual-change Review items with the adjustable 20% initial threshold.

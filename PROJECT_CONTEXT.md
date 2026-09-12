@@ -1,117 +1,336 @@
-# VibeLedger Project Context & Agent Handoff
+# VibeLedger project handoff
 
-> Current stage:
-> **Phases 0–11 implemented, verified, reviewed, and merged to `main`.**
-> **Phase 11.5 (Pre-production Deployment & Runtime Readiness) staging runtime accepted.**
-> **Phase 12 (Real iPhone Shortcut v2 acceptance) completed in staging.**
-> **Phase 12.5 (Account / Asset Model Architecture Re-Freeze & Implementation) in progress.**
-> **Phase 13 (Production Fresh Cutover) strictly blocked until Phase 12.5 passes.**
+Updated: **2026-09-12**.
 
----
+## Authority and accepted baseline
 
-## 1. Project Goal
+1. [TARGET_DOMAIN_MODEL](TARGET_DOMAIN_MODEL.md)
+2. [CONTRACTS](docs/architecture/CONTRACTS.md)
+3. [IMPLEMENTATION_PLAN](docs/architecture/IMPLEMENTATION_PLAN.md)
 
-VibeLedger is a dedicated AI financial ledger for a two-person household:
-- **Daily Ingestion**: iPhone Shortcut captures single-expense screenshots, which Gemini parses into structured financial records.
-- **Asset Calibration**: Periodic bank/credit card Statement PDFs, Single Snapshots, and Multi-Account Asset Overview Captures provide ground-truth calibration to prevent ledger drift.
-- **Reporting Focus**: Holistic family balance sheet, cash flows, liabilities, risk distribution, and investment valuations. No couple AA, split-billing, or intra-household debt tracking.
+**S1 and S2 are formally accepted**, per the user's 2026-09-11 handoff.
+S2 real-device acceptance passed direct capture, confirm/revise, idempotent recovery,
+404 cancellation tombstones, duplicates and real Gemini integration. Do not reopen
+these stages without a genuine regression. This supersedes the prior handoff's
+pending S2 acceptance notes. S2 code is committed through `298499c`, including
+Dashboard full-price-expense conversion to installment schedules.
 
----
+The original S3 implementation was committed and pushed as `4a06657` after the
+2026-09-11 handoff. The 2026-09-12 continuation starts from that clean branch head.
+No S3 independent review, live model acceptance or formal acceptance is claimed.
 
-## 2. Current Legacy Runtime Summary
+## S3 — Implemented; live and independent acceptance still pending
 
-The existing codebase (`ai-ledger-backend` and `ai-ledger-dashboard`) is a **legacy prototype**:
+Implemented in this checkpoint:
 
-```text
-iPhone Shortcut
-  -> POST Base64 image + note + idempotency_key
-  -> FastAPI (/api/record in main.py)
-  -> Gemini 3.1 Flash-Lite
-  -> PostgreSQL (accounts + transactions)
+* `domain/balances.py` and `services/balance_service.py` provide one native signed
+  observation path. Manual multi-account Save is atomic; zero is valid. Currency,
+  account lifetime, future dates, same-time/date-only conflicts, current head and
+  account versions are checked under the household lock. Correction voids the old
+  record and inserts a replacement; void/reopen/closure guards preserve history.
+  A later nonzero observation cannot silently replace a closed account's zero.
+* `/balance-updates`, `/accounts/{id}/snapshots`, `/snapshots/{id}/correct|void`
+  replace the old reconciliation-based snapshot route. Account reads now include
+  their latest active observation. No balance operation writes spending or ledger
+  adjustments. Snapshot and statement-line history is household scoped.
+* `/reports/wealth` returns latest observations, known/null-complete totals,
+  positive-asset risk buckets, missing/old observations and FX coverage. Current
+  stale cached FX remains explicitly dated; historical stale/future FX is excluded.
+  `/reports/wealth-history` carries forward observations at balance/lifetime events,
+  including gaps before initialization; historical risk allocation is not asserted.
+  Explicit FX refresh also prepares current wealth quotes without changing balances.
+* `/balance-captures` uses typed Gemini extraction outside DB connections, existing
+  durable receipts, conservative account/scope/debt/date gates, total evidence and
+  explicit whole-row corrections/exclusions. Credit monthly bills do not become
+  total debt. Browser/device confirmation rules are retained. Amounts and selected
+  rows commit together. Sanitized row choices survive for history; raw images do not.
+* `/accounts/{id}/statement-imports` accepts a bounded PDF and memory-only password,
+  claims household/account/document identity, parses outside financial locks and
+  always creates one preview. New-key repeated files return the canonical request.
+  Temporary original PDFs are removed on success/failure. Limits: 20 MiB, 50 pages,
+  1,000 lines and 120-second parse deadline; model transport records coverage signals.
+* Statement evidence is immutable in `statement_lines`; edits live in the draft.
+  Import supports expenses/fees, explicit unlinked refunds, nonspending skips,
+  explicit duplicate links/separate purchases, provider IDs and schedule periods.
+  Missing business dates never use posting dates. Wrong/uncertain account identity
+  and partial coverage need explicit confirmation. Per-line `confirm_facts` prevents
+  editing one UI page from confirming unseen low-confidence rows on another page.
+* Statement Save rechecks duplicates and target versions under the shared lock;
+  financial rows, optional balance, line outcomes, audit and receipt are atomic.
+  Existing same-time/value observations can be explicitly reused. Source/date
+  provenance stays `statement`, including first creation through a due period.
+* Dashboard Wealth now offers honest totals, native dated balances, manual bulk
+  updates, screenshot review, snapshot history/correction/void, and current FX retry.
+  Statement import replaces the old reconciliation destination. One paginated
+  preview supports line decisions and optional closing balance. Review also exposes
+  balance/statement drafts. Unknown upload outcomes preserve the key for recovery
+  or cancellation. S1 Settings and S2 spending remain available.
 
-Streamlit Dashboard (app.py)
-  -> Directly connects to PostgreSQL (psycopg2)
-  -> Directly updates balances and writes reconciliation adjustments
-```
+Narrow shared extensions: capture receipt reservation accepts a kind/operation
+(defaults unchanged); ingestion dispatches typed balance/statement drafts; schedule
+binding accepts statement provenance/item identity (Shortcut defaults unchanged).
+The accepted 16-table baseline and migration files have **not changed**.
 
-Key legacy characteristics:
-- Two-table schema (`accounts`, `transactions`) where `accounts.current_balance` is mutable scalar truth.
-- Hard-coded Python `Literal` for accounts and categories.
-- Overloaded `adjustment` transaction type (used for both manual balance calibration and investment gains).
-- Installments prematurely generate $N$ future transactions and alter global balances.
-- Database isolation via `TABLE_SUFFIX` and startup-time `database.init_db()` DDL.
-- Legacy tests in `test_idempotency.py` assume a remote database environment.
+## Current continuation — S4 investment interval inputs and Review
 
----
+The user explicitly removed the five-hour quota monitoring requirement on
+2026-09-12. Continue normal development and sync completed checkpoints; do not
+poll usage or stop at the old 10% threshold. All older quota notes are historical.
 
-## 3. Target Architecture Summary
+Parent `bbf43bc` passed all jobs in GitHub run 34705080205. This continuation begins
+S4 implementation while retaining the separate outstanding S3 acceptance gates.
+It does **not** claim S3 or S4 formal acceptance.
 
-The target system is a greenfield architectural design documented under `docs/architecture/`:
+Implemented:
 
-```text
-iPhone Shortcut / Dashboard UI
-        ↓ REST (/api/v1/* with Bearer token)
-FastAPI Backend (app/)
-  ├── api/           (REST routes, validation, serialization)
-  ├── services/      (Orchestration, Gemini service, Statement parsing)
-  ├── domain/        (Deterministic ledger rules, Decimal math, scoring)
-  └── repositories/  (PostgreSQL persistence, row-level locks)
-        ↓
-PostgreSQL Database
-  ├── Identity & Config : households, users, devices, accounts, categories, account_aliases
-  ├── Idempotency       : ingestion_requests (device-scoped request lifecycle)
-  ├── Durable Ledger    : transactions, transaction_links, audit_events (append-only)
-  ├── Projections       : account_state (rebuildable derived cache, initialized_at baseline)
-  ├── Authoritative Obs : account_snapshots, credit_card_snapshots
-  ├── Derived Analytics : investment_pnl_periods (calculated P&L between valuation baselines)
-  ├── Installments      : installment_plans, installment_periods (scheduled vs billed)
-  └── Reconciliation    : reconciliation_batches, statement_lines, reconciliation_candidates
-```
+* New `investment_gains` domain/service/routes use the existing simplified
+  `investment_period_inputs` table. PUT requires both nonnegative native flow
+  totals, pair IDs and an explicit expected version (null only for creation).
+  Active consecutive observations are rechecked under the shared household lock.
+  Edit, void and reactivation keep one pair identity, audit and durable receipts.
+* Native-currency reports derive zero-flow estimates without creating inputs or
+  transactions, expose confirmed/estimated/mixed subtotals, first-observation
+  unavailability, actual time precision, date-range gaps and excluded crossing
+  intervals. Gains are never prorated. Optional reporting-currency translation
+  is not implemented; no FX or cross-currency aggregate is fabricated.
+* Corrected/split/voided observation pairs discard old assertions from reports.
+  A later split that is itself voided cannot resurrect an older confirmation:
+  immutable household-locked audit order determines whether explicit reconfirmation
+  is needed. Historical inputs and their audit remain available.
+* GET /review adds the paginated investment section and derived unusual-change
+  count. Threshold comparison includes exactly +/-20%, negative openings and
+  zero-to-nonzero changes. Browser-only household threshold edits are versioned
+  and audited. Confirmed zero flows clear review; withdrawal restores estimates.
+* Wealth and Review show investment forms with an explicit whole-interval checkbox,
+  recoverable command retries, void/history and date-range coverage. Settings
+  exposes the threshold. The old investment menu now delegates to this same view
+  and no longer submits legacy valuation/ledger writes.
 
----
+Verification: local Python 3.10.21 **248 backend unit tests and 86 Dashboard tests**
+pass. Eleven new PostgreSQL integration cases cover lifecycle/replay, pair changes,
+restoration, concurrent inputs, split-versus-confirm, rollback, authorization,
+settings/history and native range coverage. GitHub run
+[34706096878](https://github.com/xuesishen9587-del/VibeLedger/actions/runs/34706096878)
+on `ef59863` **passed all jobs**, including PostgreSQL Integration and Migration &
+Concurrency. This supplies the real-DB gate for the investment slice; PostgreSQL
+remains unavailable locally. Applied migrations and S1/S2 financial write behavior
+are unchanged. This subsequent handoff commit changes documentation only.
 
-## 4. Authoritative Documentation Hierarchy
+Remaining S4 parent-stage obligations: four-page navigation consolidation,
+Supabase Auth login/refresh/logout and pinned JWKS validation (SEC-02), full
+household UI acceptance (UI-01), and independent review. Existing legacy backend
+investment/report routes remain until S5 replacement/removal coverage. No live
+model calls, operator provisioning, staging or production deployment occurred.
 
-All future development must follow this strict reading and authority order:
+## Latest continuation — GitHub sync restored and wealth display
 
-1. [`TARGET_DOMAIN_MODEL.md`](./TARGET_DOMAIN_MODEL.md) — **Approved business & domain source of truth**
-2. [`docs/architecture/PHYSICAL_SCHEMA.md`](./docs/architecture/PHYSICAL_SCHEMA.md) — **Target PostgreSQL persistence contract**
-3. [`docs/architecture/API_CONTRACT.md`](./docs/architecture/API_CONTRACT.md) — **Target external REST API contract**
-4. [`docs/architecture/RECONCILIATION_ENGINE.md`](./docs/architecture/RECONCILIATION_ENGINE.md) — **Target reconciliation & matching engine contract**
-5. [`docs/architecture/IMPLEMENTATION_PLAN.md`](./docs/architecture/IMPLEMENTATION_PLAN.md) — **Implementation roadmap & phase sequencing**
-6. [`docs/architecture/TEST_PLAN.md`](./docs/architecture/TEST_PLAN.md) — **Verification contract & test matrix**
-7. [`PROJECT_CONTEXT.md`](./PROJECT_CONTEXT.md) — **This handoff document**
-8. [`docs/legacy/*`](./docs/legacy/README.md) — **Historical reference only**
+The reconfigured GitHub connection successfully published the previously local
+`60327ae` checkpoint as `ac7494a` (identical Git tree, new commit metadata). Target
+branch `experiment/astra-simplified` was updated without force. GitHub run
+[34704864541](https://github.com/xuesishen9587-del/VibeLedger/actions/runs/34704864541)
+passed Dashboard, Unit, PostgreSQL Integration, Migration & Concurrency and Backend
+CI. This includes the new account-scoped snapshot lookup regression. Earlier App
+installation / HTTP 403 notes below are historical; actual writing now succeeds.
 
----
+The next Dashboard change exposes per-account missing/old balance status and
+configured balance scope. Accounts over 90 days old receive a named warning while
+their balances remain included. Positive credit balances are labelled as surplus
+and unclassified positive assets, including when their FX conversion is missing.
+Missing observations remain null and zero stays visible. Three display regressions
+cover 30/31/90/91-day flags, missing versus zero, debt versus surplus with missing
+FX, and the rendered warning without changing totals. No backend or migration
+behavior changes. S3 live household/model and independent acceptance remain open;
+this UI continuation does not claim S3 completion or begin deployment.
 
-## 5. Locked Major Product Decisions
+Local Python 3.10.21 Dashboard discovery: **82 tests passed**. The three new display
+tests also passed independently. Backend behavior is unchanged; the full CI on the
+new continuation commit remains the remote verification gate.
 
-1. **No Legacy Data Migration**: Old production data will NOT be migrated. The target system starts with a fresh schema at `ledger_start_date` initialized with explicit opening balances (`account_state.initialized_at`).
-2. **Statement is Optional Evidence**: Statement PDF upload is an optional high-accuracy tool, NOT a mandatory monthly closing ritual. An account can remain calibrated purely via periodic balance Snapshots.
-3. **Draft Safety & Confirmation**: High-confidence Shortcut expenses auto-commit; low-confidence inputs enter `needs_confirmation` (`ingestion_requests`) and create NO transaction or balance mutation until user approval. Reconciliation ambiguities enter `needs_review` on the batch.
-4. **Idempotency Ownership**: Client `idempotency_key` is owned at the `ingestion_requests` level per device, not directly on `transactions`.
-5. **Foreign Credit Card Estimation**: Shortcut captures foreign card purchases with reference FX (`account_leg_status = 'estimated'`) and updates `account_state` estimated debt. Statement reconciliation replaces it with authoritative settlement, applies the exact delta to `account_state`, freezes historical reporting FX, and audits the transition. Cross-currency transfers strictly require both real legs and never use estimated FX.
-6. **Fee Reporting**: `fee` is a distinct `transaction_type` requiring an expense category. Household expense reporting includes ordinary expense + fee - applicable refunds.
-7. **Refund & Void Semantics**: Refunds are independent transactions linked via `refund_of`, never deletions of original expenses. Voiding / soft delete (`status = 'voided'` $\iff$ `deleted_at IS NOT NULL` + `delete_reason`) atomically reverses `account_state` projections exactly once and preserves audit trails.
-8. **Installment Schedules**: Purchasing an installment plan creates schedule records only; only the current billed period becomes an expense upon Statement arrival (`recognize_installment`). No future transactions exist in advance.
-9. **Reconciliation Thresholds**: Unexplained residuals on ordinary accounts $\le 200\text{ CNY}$ may auto-generate `reconciliation_adjustment`; residuals $>200\text{ CNY}$ trigger `needs_review`. Investment accounts NEVER use the $200\text{ CNY}$ threshold.
-10. **Investment Valuation**: Market gains/losses (`investment_pnl_periods`) update net worth and investment analytics, but are strictly excluded from household `cash_income`. Pending reconciliation calculations remain in candidate payload until atomic commit.
-11. **Historical Correction Flow**: Statement-confirmed transactions can only be corrected through an explicit two-step preview/commit API with optimistic concurrency control (`row_version`), updating `account_state` deltas and writing append-only audit events without altering raw Statement evidence.
-12. **Document Privacy**: Statement PDFs are deleted immediately upon successful parsing (max 24h retention on failure); PDF passwords are kept in memory only and never persisted.
-13. **Backend Exclusivity**: Dashboard is a pure UI client consuming Backend REST APIs; it never holds direct database credentials or executes accounting business logic.
-14. **Account Semantics & Risk Allocation**: `account_type` is strictly `cash`, `savings`, `credit`, `investment`. No `institution` entity or column is maintained; single institutions are modeled as multiple independent accounts. `asset_class`, `liquidity_level`, and account hierarchies are prohibited. `Account.risk_level` is nullable user metadata; credit accounts MUST have `risk_level = NULL` and are strictly excluded from risk distribution. Product v1 defines exactly 14 canonical active Expense categories whose names are immutable (`CANONICAL_EXPENSE_CATEGORY_IMMUTABLE`); `Category.description` carries semantic classification rules (e.g. `Child` priority semantics); category `priority` column is strictly prohibited. Income categories remain customizable.
-15. **Multi-Account Asset Capture**: `POST /api/v1/asset-captures` is a dedicated Product v1 business intent for extracting balances across multiple accounts from a single banking/investment screenshot. Eligible account types are strictly `cash`, `savings`, `investment`; `credit` accounts MUST NOT be passed to Gemini candidates and any mapping to credit is rejected with `ASSET_ACCOUNT_TYPE_INVALID`. Displayed credit-card liabilities/balances in screenshots are ignored and do not participate in asset totals. Gemini extraction uses static Pydantic schemas without dynamic dicts or `additionalProperties`. Displayed aggregate totals are cross-check only and NEVER create a snapshot (exact quantized comparison; `ASSET_TOTAL_MISMATCH` on non-zero discrepancy). One Asset Capture produces 1 `ingestion_request` (`needs_confirmation` on ambiguity) + 0..N account-scoped `reconciliation_batches` (`needs_review`). Dashboard edits draft via `PATCH /draft` (`observations: [{account_id, observed_balance, currency}]`) and confirms via bodyless `POST /confirm` (no request body required; empty object `{}` tolerated; replaying stored Asset Capture response on repeated calls). Persistence locks affected `account_state` rows in ascending UUID order and atomically writes snapshots, adjustments, and investment P&L in a single DB transaction (ALL OR NOTHING).
+## Previous continuation — statement balance reuse and recovery
 
----
+The user pushed `30aff50`. Both GitHub runs 34691621535 and 34691619925
+**passed**, including PostgreSQL Integration, Migration & Concurrency, Unit,
+Dashboard and the aggregate Backend CI job. This closes the two previously
+reported CI defects; the older failure/permission notes below are historical.
+S3 still needs independent review and real household/model acceptance.
 
-## 6. Current Next Steps
+This continuation:
 
-1. **Phase 12.5 (Account / Asset Model & Multi-Account Asset Capture)**:
-   - 12.5A: Architecture re-freeze and documentation (Current).
-   - 12.5B: Schema migration (`0010_asset_model_freeze.sql`: `risk_level`, `description`, `asset_capture` request_kind, and `DROP COLUMN institution` with backend deployment sequencing).
-   - 12.5C: Backend domain, repositories, and APIs (`Account` risk_level, `Category` description, `POST /api/v1/asset-captures`, static Gemini transport, polymorphic `PATCH /draft` & bodyless `POST /confirm`, dedicated single-account snapshot endpoint cleanup).
-   - 12.5D: Dashboard UI (Risk distribution chart/table, category descriptions, asset capture review & draft correction).
-   - 12.5E: Dedicated iOS Asset Capture Shortcut.
-   - 12.5F: Automated test matrix and staging acceptance.
-2. **Phase 13 (Production Fresh Cutover)**: Deploy target backend and database to production, establish real opening balances, provision production devices, switch daily Shortcut, and archive legacy systems. **Strictly blocked until Phase 12.5 passes.**
+* Removes the first-200 observation limit in statement balance reuse. Observations
+  load in bounded pages of 50; selected IDs outside loaded pages are restored via
+  an optional `snapshot_id` filter on the existing account-scoped history endpoint.
+* Preserves the saved reuse selection when the form renders. A voided/unavailable
+  observation is shown explicitly rather than silently switching to a new record.
+  Server-side exact value/date/currency and current-head guards remain authoritative.
+* Restores saved counts and balance results after an unknown-outcome command retry,
+  by-key recovery, or cancellation that discovers the operation already committed.
+  Terminal results clear only the completed statement's cached target choices.
+* Adds an integration regression for account-scoped ID lookup, missing accounts,
+  voided evidence exclusion and explicit historical access. Adds five Dashboard
+  controller/AppTest cases for pagination, restored/unavailable selections and
+  idempotent retry results.
+
+Local Python 3.10.21 verification: **240 backend unit tests and 79 Dashboard tests
+passed**. The new integration regression awaits CI on this continuation commit;
+PostgreSQL remains unavailable locally. No migration/S1/S2 logic or model prompt
+was changed, and no staging/production deployment is included.
+
+Sync attempt after the user's plugin reconfiguration still failed: creating the
+Git tree returned HTTP 403 `Resource not accessible by integration`. Installation
+inspection lists only the GitHub App installation under `tianyili-outlook`; this
+repository is owned by `xuesishen9587-del`. Repository metadata reports push access
+for the connected account, but that does not establish App installation access
+on the repository owner's account. Restore the App authorization covering this
+repository under its owner, then push this checkpoint and inspect CI. Ordinary
+Git also lacks credentials in this host. A local commit/recovery bundle preserves
+the completed work; no successful push of this continuation is claimed.
+
+## 2026-09-12 CI follow-up
+
+The user pushed `9f9a4b4`. GitHub run
+[34685754221](https://github.com/xuesishen9587-del/VibeLedger/actions/runs/34685754221)
+(and the parallel run 34685753184) ran on that exact commit:
+
+* Unit, Dashboard, Migration & Concurrency jobs passed.
+* PostgreSQL Integration ran 170 tests: one failure and one error. The aggregate
+  Backend CI check failed because of that job.
+* `test_correction_void_history_and_closure_guard`: Python 3.10 rejects a UTC `Z`
+  suffix emitted by Pydantic's JSON timestamp serialization. `instant` now converts
+  a terminal `Z` to `+00:00` before parsing, preserving timezone validation.
+* `test_voided_provider_evidence_cannot_auto_link_or_be_recreated`: statement
+  preparation popped `actual_page_count` from the parser's dictionary. Reusing the
+  same extraction then raised KeyError. Preparation now reads that field without
+  mutating the caller's data and validates a separate mapping.
+
+Local verification uses **Python 3.10.21**, matching CI, with explicit test-only
+configuration and a loopback DSN. Added four unit regressions for Pydantic timestamp
+round-trip, equivalent UTC/offset timestamps, rejection of naive/malformed dates,
+and repeated preparation preserving page evidence and partial-coverage detection.
+Running those regressions against the previous functions reproduced one failure
+and two errors; with the fixes, **240 backend unit tests and 74 Dashboard tests
+pass**. No migration, financial guard, or CI assertion was removed or weakened.
+
+The two original real-DB tests remain the final regression checks. PostgreSQL is
+still unavailable in this host; do not claim the corrected full integration suite
+has passed until CI runs on the new commit. Command-line Git still has no push
+credentials, and a fresh connected GitHub tree-write attempt returned HTTP 403.
+The current follow-up must be pushed and CI rechecked; S3 acceptance,
+live Gemini and household verification remain outstanding.
+
+## Earlier 2026-09-12 continuation checkpoint (9f9a4b4)
+
+At the time of the earlier checkpoint, **GitHub push was blocked** (the user has
+now pushed it, as recorded above): command-line Git has no write credentials; the connected GitHub Git-tree
+write returned `403 Resource not accessible by integration`, including with workflow
+changes excluded. Do not assume remote sync or CI execution. A local commit and
+recoverable Git bundle are prepared with this handoff; no deployment occurred.
+
+Implemented:
+
+* Statement imports reject voided transaction targets, including automatic
+  provider-ID matching. Evidence remains reserved after voiding; explicit skip is
+  available without recreating spending. Added DB regressions for voided provider
+  evidence, explicit voided links, a target changed after preview, cancellation
+  while PDF parsing is blocked, and conflicting same-provider rows rolling back.
+* Balance totals referring to absent extracted components require explicit review.
+  Uncertain total scope cannot become informational merely because a row was
+  excluded. Known incomplete totals and explicit exclusions remain distinguishable.
+  Tests preserve exact equality and the explicit display-rounding boundary.
+* Wealth history now includes FX quote changes, historical quote expiry and
+  observation staleness boundaries, even without a new balance observation.
+  A new Dashboard date-range step chart separates complete and known-partial
+  amounts, retains gaps and zero values, and exposes dated coverage in a table.
+* Statement transaction targets support date/exact-merchant filtering and bounded
+  50-record pagination beyond the old first-200 limit. Schedule targets paginate
+  too. Existing selections survive search/page changes, unavailable targets are
+  visible, and refresh is explicit. Save passes the selected target's version.
+* Corrected a Python 3.10-incompatible nested f-string in statement preview.
+* The existing complete CI workflow is configured to run on this experiment branch.
+  It will only execute after a successful push; no deployment workflow was added.
+
+Verification in the Linux continuation environment (Python 3.12.14):
+
+| Check | Result |
+|---|---|
+| Backend unit discovery | **236 passed** (5 new review-guard tests) |
+| Dashboard discovery | **74 passed** (7 new controller/figure/AppTest cases) |
+| Integration / migration / concurrency | **Not run here**; no local PostgreSQL/Docker; installation unavailable |
+| New real-DB regressions | 6 added; **unverified**, not included in any new pass count |
+| Whitespace / compile checks | Passed on local Python 3.12 |
+| S1/S2 and applied migrations | No migration or accepted-stage runtime edits |
+| Live model / real household UI / independent review | Not performed; remain acceptance gates |
+
+Environment changes are confined to local test dependencies. No inherited `.env`
+was used for final testing; `ENVIRONMENT=test`, a loopback-only disposable DSN and
+an explicit `vibeledger_test_*` schema were provided. No database was contacted by
+the unit/UI suites. Test logs stay outside Git because baseline tests print fixture
+JWTs. PowerShell and the prior Windows Python path do not exist in this Linux host.
+
+Five-hour account usage is unavailable: the runtime Codex rate-limit read returned
+401 Unauthorized. No percentage or exhaustion time is inferred. Restore repository
+write access, push this reviewed checkpoint, and inspect all required CI jobs before
+expanding S3 or claiming database acceptance. If CI finds a regression, fix it without
+reopening accepted S1/S2 except where the regression actually requires it.
+
+## Prior-session local verification
+
+Disposable Docker PostgreSQL 17 on loopback port 55432; no remote financial database.
+
+| Suite | Result |
+|---|---|
+| Backend unit discovery | 231 passed |
+| Backend integration discovery | 164 passed (21 new S3 cases) |
+| Migration discovery | 5 passed |
+| Concurrency discovery | 9 passed; S3 concurrency also covered in integration |
+| Dashboard discovery | 67 passed (2 new S3 AppTest cases) |
+
+New S3 tests cover zero/partial wealth, stale versus missing FX, atomic rollback,
+concurrent heads, backdates, corrections/closure protection, debt and total evidence,
+unknown-row exclusion, changed configuration, statement duplicate identities,
+concurrent imports, refund/skip decisions, balance-only imports, explicit observation
+reuse, statement-to-schedule identity and unseen-page review protection. PDF unit
+tests exercise encryption/password failures, page/byte limits, and temporary cleanup.
+Models are faked in DB tests; local passing tests are not live model acceptance.
+
+Use `ai-ledger-backend/venv_backend/Scripts/python.exe`, including for Dashboard.
+Set ENVIRONMENT=test, DATABASE_URL to the local harness DSN, and DB_SCHEMA explicitly.
+Run backend `scripts/run_integration_tests.py`; unittest discovery directories are
+`tests/unit`, `tests/migration`, `tests/concurrency`, and Dashboard `tests`.
+Do not run legacy root scripts against inherited .env credentials. Raw test logs
+can contain fixture tokens; they were removed and must not be committed.
+
+## Remaining S3 work and acceptance
+
+1. Independent review and adversarial expansion of the new balance/statement paths.
+   In particular, review total/rounding scope, duplicate provider contradictions,
+   voided evidence, target-edit versus import races, and cancellation during PDF
+   parsing. Reuse the canonical BAL/WEALTH/STMT acceptance matrix, not old test counts.
+2. Live Gemini and real household balance screenshots/statements, encrypted PDFs,
+   long statements, partial/scanned documents and measured timeouts. Local temporary
+   cleanup is tested; hosted-resource/latency limits and prompt behavior need staging
+   evidence. No new live model request or deployment was made in this session.
+3. Finish UI acceptance/polish: the continuation adds the wealth-history chart and
+   paged transaction/schedule target selection, with unit/AppTest checks. Real
+   household chart interpretation, review clearing/retries, large target lists and
+   draft navigation still need acceptance. Snapshot-reuse selection now paginates
+   and restores saved choices; see the current continuation above. Line editing is paged in groups
+   of 25; unsaved form edits must be saved before changing pages/search criteria.
+4. Validate document completeness messaging and account-scope overrides with users.
+   Typed completeness signals cannot prove the model extracted every real row.
+   The known missing-currency -> INVALID_AMOUNT UX issue remains non-blocking and
+   unchanged in spending; new signed-balance validation distinguishes currency.
+5. S4 investment input/estimated-gain UI, complete four-page navigation and consumer
+   login remain future work. S5 removes remaining legacy report/investment/audit
+   routes/pages and wires/deploys daily scheduler authentication. The application
+   is not yet the completed simplified production release.
+
+No new product decision blocks development. Product authority remains unchanged:
+spending and balances are independent; absent investment flows imply estimated
+zero-flow gains (S4); statements never recreate reconciliation or infer flows.
+
+## Operating constraints
+
+Use PowerShell 7 (`pwsh.exe`) and UTF-8. Preserve accepted migrations/S1/S2 unless a
+real regression is found. The user
+removed quota monitoring and the 10% stopping rule on 2026-09-12. Continue normal
+development, verification, commits and GitHub synchronization.

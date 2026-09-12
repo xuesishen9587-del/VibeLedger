@@ -1,11 +1,17 @@
+from datetime import date
 from typing import Optional, Dict, Any, List
 from uuid import UUID, uuid4
-from fastapi import APIRouter, Depends, Query, status
-from pydantic import BaseModel, Field
+import psycopg2
+from fastapi import APIRouter, Depends, Query, status, HTTPException
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field, ConfigDict
 
-from app.api.deps import get_db_connection, get_authenticated_actor
+from app.api.deps import get_db_connection, get_authenticated_actor, require_idempotency_key, get_auth_context
+from app.auth.context import AuthContext
+import app.services.account_commands as account_commands
+import app.services.alias_commands as alias_commands
 from app.db import transaction
-from app.domain.money import validate_currency_code, quantize_money
+from app.domain.money import validate_currency_code
 from app.domain.transactions import (
     AccountResourceNotFoundError,
     AliasResourceNotFoundError,
@@ -19,32 +25,67 @@ from app.domain.transactions import (
 )
 import app.repositories.accounts as accounts_repo
 import app.repositories.audit as audit_repo
+from app.repositories.simplified_schema import acquire_household_finance_lock
 
 router = APIRouter(prefix="/api/v1/accounts", tags=["Accounts"])
 
 class CreateAccountRequest(BaseModel):
-    name: str = Field(..., min_length=1, max_length=100, description="Account name")
-    institution: Optional[str] = Field(None, max_length=100, description="Financial institution")
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(..., min_length=1, max_length=120, description="Account name")
+    balance_scope: str = Field(..., min_length=1, max_length=120, description="Balance scope (descriptive free text)")
     account_type: str = Field(..., pattern="^(cash|savings|credit|investment)$", description="Account type")
     currency: str = Field(..., min_length=3, max_length=3, description="3-letter uppercase currency code")
     owner_user_id: Optional[UUID] = Field(None, description="Owning user ID (must belong to household)")
-    linked_cash_account_id: Optional[UUID] = Field(None, description="Linked cash account ID")
-    billing_day: Optional[int] = Field(None, ge=1, le=31, description="Billing day (credit accounts only)")
-    due_day: Optional[int] = Field(None, ge=1, le=31, description="Due day (credit accounts only)")
+    risk_level: Optional[str] = Field(None, pattern="^(very_low|low|medium|high)$", description="Risk level (not allowed on credit)")
+    opened_on: Optional[date] = Field(None, description="Opening business date")
+    statement_import_enabled: bool = Field(False, description="Whether statement import is enabled")
 
 class PatchAccountRequest(BaseModel):
-    name: Optional[str] = Field(None, min_length=1, max_length=100)
-    institution: Optional[str] = Field(None, max_length=100)
+    model_config = ConfigDict(extra="forbid")
+
+    name: Optional[str] = Field(None, min_length=1, max_length=120)
+    balance_scope: Optional[str] = Field(None, min_length=1, max_length=120)
+    risk_level: Optional[str] = Field(None, pattern="^(very_low|low|medium|high)$")
     owner_user_id: Optional[UUID] = None
-    linked_cash_account_id: Optional[UUID] = None
-    billing_day: Optional[int] = Field(None, ge=1, le=31)
-    due_day: Optional[int] = Field(None, ge=1, le=31)
+    opened_on: Optional[date] = None
+    statement_import_enabled: Optional[bool] = None
     account_type: Optional[str] = Field(None, pattern="^(cash|savings|credit|investment)$")
     currency: Optional[str] = Field(None, min_length=3, max_length=3)
-    row_version: int = Field(..., ge=0, description="Optimistic concurrency control version")
+    expected_version: int = Field(..., ge=0, description="Optimistic concurrency control version")
+    reason: Optional[str] = None
+
+class CloseAccountRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_version: int = Field(..., ge=0)
+    closed_on: date = Field(..., description="Effective closing date")
+    closing_snapshot_id: UUID = Field(..., description="Snapshot proving zero balance")
+    reason: Optional[str] = None
+
+class ReopenAccountRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_version: int = Field(..., ge=0)
+    reason: Optional[str] = None
+
+class CancelAccountRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_version: int = Field(..., ge=0)
+    reason: Optional[str] = None
 
 class CreateAliasRequest(BaseModel):
-    alias: str = Field(..., min_length=1, max_length=100, description="Alias text")
+    model_config = ConfigDict(extra="forbid")
+
+    alias: str = Field(..., min_length=1, max_length=120, description="Alias text")
+
+class PatchAliasRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_version: int = Field(..., ge=0)
+    alias: Optional[str] = Field(None, min_length=1, max_length=120)
+    status: Optional[str] = Field(None, pattern="^(active|inactive)$")
 
 def _get_audit_actor_info(actor: Dict[str, Any]) -> tuple[str, Optional[UUID], Optional[UUID]]:
     auth_mode = actor.get("auth_mode")
@@ -61,37 +102,33 @@ def _get_audit_actor_info(actor: Dict[str, Any]) -> tuple[str, Optional[UUID], O
 
 def _format_account(acc: Dict[str, Any]) -> Dict[str, Any]:
     curr = acc["currency"]
-    bal = acc.get("ledger_balance", 0)
-    last_snap = acc.get("last_authoritative_snapshot_at")
-    
     return {
         "id": str(acc["id"]),
+        "household_id": str(acc["household_id"]) if acc.get("household_id") else None,
         "name": acc["name"],
-        "institution": acc.get("institution"),
+        "balance_scope": acc.get("balance_scope", "liability" if acc["account_type"] == "credit" else "asset"),
         "account_type": acc["account_type"],
         "currency": curr,
         "owner_user_id": str(acc["owner_user_id"]) if acc.get("owner_user_id") else None,
-        "linked_cash_account_id": str(acc["linked_cash_account_id"]) if acc.get("linked_cash_account_id") else None,
-        "billing_day": acc.get("billing_day"),
-        "due_day": acc.get("due_day"),
+        "risk_level": acc.get("risk_level"),
+        "opened_on": acc["opened_on"].isoformat() if hasattr(acc.get("opened_on"), "isoformat") else (str(acc["opened_on"]) if acc.get("opened_on") else None),
+        "closed_on": acc["closed_on"].isoformat() if hasattr(acc.get("closed_on"), "isoformat") else (str(acc["closed_on"]) if acc.get("closed_on") else None),
         "status": acc["status"],
+        "statement_import_enabled": acc.get("statement_import_enabled", False),
         "row_version": acc.get("row_version", 0),
-        "state": {
-            "ledger_balance": f"{quantize_money(bal, curr):.2f}",
-            "last_authoritative_snapshot_at": last_snap.isoformat() if last_snap else None
-        }
+        "latest_snapshot": acc.get("latest_snapshot"),
     }
 
 @router.get("", summary="List Household Accounts")
 def list_accounts(
-    status: Optional[str] = Query(None, pattern="^(active|inactive)$"),
+    status: Optional[str] = Query(None, pattern="^(active|closed|cancelled)$"),
     account_type: Optional[str] = Query(None, pattern="^(cash|savings|credit|investment)$"),
     owner_user_id: Optional[UUID] = Query(None),
     device: Dict[str, Any] = Depends(get_authenticated_actor),
     conn: Any = Depends(get_db_connection)
 ) -> Dict[str, Any]:
     """
-    Lists accounts belonging to the authenticated household with current state projections.
+    Lists accounts belonging to the authenticated household.
     """
     accounts = accounts_repo.list_accounts(
         conn=conn,
@@ -100,263 +137,124 @@ def list_accounts(
         account_type=account_type,
         owner_user_id=owner_user_id
     )
-    return {"items": [_format_account(a) for a in accounts]}
+    from app.services.balance_service import latest, output
+    return {"items": [_format_account({**a, "latest_snapshot": output(latest(conn, device["household_id"], a["id"]))}) for a in accounts], "next_cursor": None}
 
-@router.post("", status_code=status.HTTP_201_CREATED, summary="Create Account")
-def create_account(
-    payload: CreateAccountRequest,
+@router.get("/{account_id}", summary="Get Account Details")
+def get_account(
+    account_id: UUID,
     device: Dict[str, Any] = Depends(get_authenticated_actor),
     conn: Any = Depends(get_db_connection)
 ) -> Dict[str, Any]:
     """
-    Creates a new account in the authenticated household with an initial account_state row.
+    Retrieves detail of an account in the authenticated household.
     """
-    currency = validate_currency_code(payload.currency)
     household_id = device["household_id"]
+    acc = accounts_repo.get_account(conn, account_id, household_id)
+    if not acc:
+        raise AccountResourceNotFoundError(account_id)
+    from app.services.balance_service import latest, output
+    return _format_account({**acc, "latest_snapshot": output(latest(conn, household_id, account_id))})
 
-    if payload.account_type != "credit":
-        if payload.billing_day is not None or payload.due_day is not None:
-            raise LinkedAccountInvalidError("Billing day and due day are only allowed on credit accounts.")
-
-    if payload.owner_user_id is not None:
-        if not accounts_repo.check_user_in_household(conn, payload.owner_user_id, household_id):
-            raise UserNotInHouseholdError(payload.owner_user_id)
-
-    if payload.linked_cash_account_id is not None:
-        linked_acc = accounts_repo.get_account(conn, payload.linked_cash_account_id)
-        if not linked_acc or linked_acc["household_id"] != household_id or linked_acc["account_type"] != "cash" or linked_acc["status"] != "active":
-            raise LinkedAccountInvalidError("Linked cash account must be an active cash account in the same household.")
-
-    if accounts_repo.check_account_name_exists(conn, household_id, payload.name):
-        raise AccountNameConflictError(payload.name)
-
-    account_id = uuid4()
-
-    with transaction(conn):
-        accounts_repo.create_account(
-            conn=conn,
-            account_id=account_id,
-            household_id=household_id,
-            name=payload.name.strip(),
-            account_type=payload.account_type,
-            currency=currency,
-            institution=payload.institution.strip() if payload.institution else None,
-            owner_user_id=payload.owner_user_id,
-            linked_cash_account_id=payload.linked_cash_account_id,
-            billing_day=payload.billing_day,
-            due_day=payload.due_day,
-            status='active'
-        )
-        actor_type, actor_user_id, actor_device_id = _get_audit_actor_info(device)
-        audit_repo.insert_audit_event(
-            conn=conn,
-            household_id=household_id,
-            actor_type=actor_type,
-            entity_type="account",
-            entity_id=account_id,
-            action="create",
-            actor_user_id=actor_user_id,
-            actor_device_id=actor_device_id,
-            after_data={
-                "name": payload.name.strip(),
-                "institution": payload.institution.strip() if payload.institution else None,
-                "account_type": payload.account_type,
-                "currency": currency,
-                "owner_user_id": str(payload.owner_user_id) if payload.owner_user_id else None,
-                "linked_cash_account_id": str(payload.linked_cash_account_id) if payload.linked_cash_account_id else None,
-                "billing_day": payload.billing_day,
-                "due_day": payload.due_day,
-                "status": "active"
-            }
-        )
-
-    acc = accounts_repo.get_account_with_state(conn, account_id, household_id)
-    return _format_account(acc)
+@router.post("", status_code=status.HTTP_201_CREATED, summary="Create Account")
+def create_account(
+    payload: CreateAccountRequest,
+    idempotency_key: str = Depends(require_idempotency_key),
+    auth_context: AuthContext = Depends(get_auth_context),
+    conn: Any = Depends(get_db_connection)
+) -> JSONResponse:
+    """
+    Creates a new account in the authenticated household as a short durable command.
+    Spending and balance observations are independent; does not create transactions or snapshots.
+    """
+    res, status_code = account_commands.create_account_command(
+        conn=conn,
+        auth_context=auth_context,
+        idempotency_key=idempotency_key,
+        payload=payload
+    )
+    return JSONResponse(status_code=status_code, content=res)
 
 @router.patch("/{account_id}", summary="Update Account Metadata")
 def patch_account(
     account_id: UUID,
     payload: PatchAccountRequest,
-    device: Dict[str, Any] = Depends(get_authenticated_actor),
+    idempotency_key: str = Depends(require_idempotency_key),
+    auth_context: AuthContext = Depends(get_auth_context),
     conn: Any = Depends(get_db_connection)
-) -> Dict[str, Any]:
+) -> JSONResponse:
     """
-    Updates mutable metadata on an account using row_version optimistic concurrency control.
+    Updates mutable metadata on an account using row_version optimistic concurrency control as a short durable command.
     """
-    household_id = device["household_id"]
-    existing = accounts_repo.get_account_with_state(conn, account_id, household_id)
-    if not existing:
-        raise AccountResourceNotFoundError(account_id)
+    res, status_code = account_commands.patch_account_command(
+        conn=conn,
+        auth_context=auth_context,
+        idempotency_key=idempotency_key,
+        account_id=account_id,
+        payload=payload
+    )
+    return JSONResponse(status_code=status_code, content=res)
 
-    if existing["row_version"] != payload.row_version:
-        raise RowVersionConflictError()
-
-    fields_set = payload.model_fields_set
-
-    # 1. Determine complete resulting state
-    if "name" in fields_set:
-        if payload.name is None or not payload.name.strip():
-            raise LinkedAccountInvalidError("Account name cannot be empty.")
-        new_name = payload.name.strip()
-    else:
-        new_name = existing["name"]
-
-    if "institution" in fields_set:
-        new_inst = payload.institution.strip() if (payload.institution is not None and isinstance(payload.institution, str)) else None
-    else:
-        new_inst = existing.get("institution")
-
-    if "owner_user_id" in fields_set:
-        new_owner = payload.owner_user_id
-    else:
-        new_owner = existing.get("owner_user_id")
-
-    if "linked_cash_account_id" in fields_set:
-        new_linked = payload.linked_cash_account_id
-    else:
-        new_linked = existing.get("linked_cash_account_id")
-
-    if "billing_day" in fields_set:
-        new_billing = payload.billing_day
-    else:
-        new_billing = existing.get("billing_day")
-
-    if "due_day" in fields_set:
-        new_due = payload.due_day
-    else:
-        new_due = existing.get("due_day")
-
-    if "account_type" in fields_set and payload.account_type is not None:
-        new_type = payload.account_type
-    else:
-        new_type = existing["account_type"]
-
-    if "currency" in fields_set and payload.currency is not None:
-        new_currency = validate_currency_code(payload.currency)
-    else:
-        new_currency = existing["currency"]
-
-    # 2. Validate complete resulting state
-    if new_currency != existing["currency"]:
-        if accounts_repo.has_financial_history(conn, account_id):
-            raise CurrencyImmutableError()
-
-    if new_type != existing["account_type"]:
-        if accounts_repo.has_financial_history(conn, account_id):
-            raise AccountTypeImmutableError()
-
-    if new_type != "credit":
-        if new_billing is not None or new_due is not None:
-            raise LinkedAccountInvalidError("Billing day and due day are only allowed on credit accounts.")
-
-    if new_name.lower() != existing["name"].lower():
-        if accounts_repo.check_account_name_exists(conn, household_id, new_name, exclude_account_id=account_id):
-            raise AccountNameConflictError(new_name)
-
-    if new_owner is not None and new_owner != existing.get("owner_user_id"):
-        if not accounts_repo.check_user_in_household(conn, new_owner, household_id):
-            raise UserNotInHouseholdError(new_owner)
-
-    if new_linked is not None:
-        if new_linked == account_id:
-            raise LinkedAccountInvalidError("An account cannot link to itself.")
-        linked_acc = accounts_repo.get_account(conn, new_linked)
-        if not linked_acc or linked_acc["household_id"] != household_id or linked_acc["account_type"] != "cash" or linked_acc["status"] != "active":
-            raise LinkedAccountInvalidError("Linked cash account must be an active cash account in the same household.")
-
-    with transaction(conn):
-        updated = accounts_repo.update_account(
-            conn=conn,
-            account_id=account_id,
-            name=new_name,
-            institution=new_inst,
-            owner_user_id=new_owner,
-            linked_cash_account_id=new_linked,
-            billing_day=new_billing,
-            due_day=new_due,
-            account_type=new_type,
-            currency=new_currency,
-            expected_row_version=payload.row_version
-        )
-        if not updated:
-            raise RowVersionConflictError()
-
-        before_data = {
-            "name": existing["name"],
-            "institution": existing.get("institution"),
-            "account_type": existing["account_type"],
-            "currency": existing["currency"],
-            "owner_user_id": str(existing["owner_user_id"]) if existing.get("owner_user_id") else None,
-            "linked_cash_account_id": str(existing["linked_cash_account_id"]) if existing.get("linked_cash_account_id") else None,
-            "billing_day": existing.get("billing_day"),
-            "due_day": existing.get("due_day"),
-            "status": existing["status"]
-        }
-        after_data = {
-            "name": updated["name"],
-            "institution": updated.get("institution"),
-            "account_type": updated["account_type"],
-            "currency": updated["currency"],
-            "owner_user_id": str(updated["owner_user_id"]) if updated.get("owner_user_id") else None,
-            "linked_cash_account_id": str(updated["linked_cash_account_id"]) if updated.get("linked_cash_account_id") else None,
-            "billing_day": updated.get("billing_day"),
-            "due_day": updated.get("due_day"),
-            "status": updated["status"]
-        }
-
-        actor_type, actor_user_id, actor_device_id = _get_audit_actor_info(device)
-        audit_repo.insert_audit_event(
-            conn=conn,
-            household_id=household_id,
-            actor_type=actor_type,
-            entity_type="account",
-            entity_id=account_id,
-            action="update",
-            actor_user_id=actor_user_id,
-            actor_device_id=actor_device_id,
-            before_data=before_data,
-            after_data=after_data
-        )
-
-    acc = accounts_repo.get_account_with_state(conn, account_id, household_id)
-    return _format_account(acc)
-
-
-@router.post("/{account_id}/deactivate", summary="Deactivate Account")
-def deactivate_account(
+@router.post("/{account_id}/close", summary="Close Account")
+def close_account(
     account_id: UUID,
-    device: Dict[str, Any] = Depends(get_authenticated_actor),
+    payload: CloseAccountRequest,
+    idempotency_key: str = Depends(require_idempotency_key),
+    auth_context: AuthContext = Depends(get_auth_context),
     conn: Any = Depends(get_db_connection)
-) -> Dict[str, Any]:
+) -> JSONResponse:
     """
-    Soft-deactivates an account. Historical transactions and snapshots remain completely preserved.
+    Closes an active account as a short durable command. Requires expected_version, closing_snapshot_id (explicit zero balance), and closed_on.
     """
-    household_id = device["household_id"]
-    existing = accounts_repo.get_account_with_state(conn, account_id, household_id)
-    if not existing:
-        raise AccountResourceNotFoundError(account_id)
+    res, status_code = account_commands.close_account_command(
+        conn=conn,
+        auth_context=auth_context,
+        idempotency_key=idempotency_key,
+        account_id=account_id,
+        payload=payload
+    )
+    return JSONResponse(status_code=status_code, content=res)
 
-    with transaction(conn):
-        deactivated = accounts_repo.deactivate_account(conn, account_id)
-        if not deactivated:
-            raise AccountResourceNotFoundError(account_id)
+@router.post("/{account_id}/reopen", summary="Reopen Account")
+def reopen_account(
+    account_id: UUID,
+    payload: ReopenAccountRequest,
+    idempotency_key: str = Depends(require_idempotency_key),
+    auth_context: AuthContext = Depends(get_auth_context),
+    conn: Any = Depends(get_db_connection)
+) -> JSONResponse:
+    """
+    Reopens a closed account as a short durable command, clearing closed_on.
+    """
+    res, status_code = account_commands.reopen_account_command(
+        conn=conn,
+        auth_context=auth_context,
+        idempotency_key=idempotency_key,
+        account_id=account_id,
+        payload=payload
+    )
+    return JSONResponse(status_code=status_code, content=res)
 
-        actor_type, actor_user_id, actor_device_id = _get_audit_actor_info(device)
-        audit_repo.insert_audit_event(
-            conn=conn,
-            household_id=household_id,
-            actor_type=actor_type,
-            entity_type="account",
-            entity_id=account_id,
-            action="soft_delete",
-            actor_user_id=actor_user_id,
-            actor_device_id=actor_device_id,
-            before_data={"status": existing["status"]},
-            after_data={"status": "inactive"}
-        )
+@router.post("/{account_id}/cancel", summary="Cancel Account")
+def cancel_account(
+    account_id: UUID,
+    payload: CancelAccountRequest,
+    idempotency_key: str = Depends(require_idempotency_key),
+    auth_context: AuthContext = Depends(get_auth_context),
+    conn: Any = Depends(get_db_connection)
+) -> JSONResponse:
+    """
+    Cancels an unused account with no financial references as a short durable command.
+    """
+    res, status_code = account_commands.cancel_account_command(
+        conn=conn,
+        auth_context=auth_context,
+        idempotency_key=idempotency_key,
+        account_id=account_id,
+        payload=payload
+    )
+    return JSONResponse(status_code=status_code, content=res)
 
-    acc = accounts_repo.get_account_with_state(conn, account_id, household_id)
-    return _format_account(acc)
 
 # --- Aliases ---
 
@@ -367,113 +265,66 @@ def list_account_aliases(
     conn: Any = Depends(get_db_connection)
 ) -> Dict[str, Any]:
     household_id = device["household_id"]
-    existing = accounts_repo.get_account(conn, account_id)
-    if not existing or existing["household_id"] != household_id:
+    existing = accounts_repo.get_account(conn, account_id, household_id)
+    if not existing:
         raise AccountResourceNotFoundError(account_id)
 
-    aliases = accounts_repo.list_account_aliases(conn, account_id)
+    aliases = accounts_repo.list_account_aliases(conn, account_id, household_id=household_id)
     return {
-
         "items": [
             {
                 "id": str(a["id"]),
+                "household_id": str(a["household_id"]),
                 "account_id": str(a["account_id"]),
                 "alias": a["alias_text"],
-                "created_at": a["created_at"].isoformat()
+                "status": a.get("status", "active"),
+                "row_version": a.get("row_version", 0),
+                "created_at": a["created_at"].isoformat() if hasattr(a.get("created_at"), "isoformat") else str(a.get("created_at")),
+                "updated_at": a["updated_at"].isoformat() if hasattr(a.get("updated_at"), "isoformat") else str(a.get("updated_at"))
             }
             for a in aliases
-        ]
+        ],
+        "next_cursor": None
     }
 
 @router.post("/{account_id}/aliases", status_code=status.HTTP_201_CREATED, summary="Create Account Alias")
 def create_account_alias(
     account_id: UUID,
     payload: CreateAliasRequest,
-    device: Dict[str, Any] = Depends(get_authenticated_actor),
+    idempotency_key: str = Depends(require_idempotency_key),
+    auth_context: AuthContext = Depends(get_auth_context),
     conn: Any = Depends(get_db_connection)
-) -> Dict[str, Any]:
-    household_id = device["household_id"]
-    existing = accounts_repo.get_account(conn, account_id)
-    if not existing or existing["household_id"] != household_id:
-        raise AccountResourceNotFoundError(account_id)
+) -> JSONResponse:
+    """
+    Creates a new alias for an account as a short durable command.
+    """
+    res, status_code = alias_commands.create_alias_command(
+        conn=conn,
+        auth_context=auth_context,
+        idempotency_key=idempotency_key,
+        account_id=account_id,
+        payload=payload
+    )
+    return JSONResponse(status_code=status_code, content=res)
 
-    raw_alias = payload.alias.strip()
-    normalized = raw_alias.lower()
-
-    if accounts_repo.check_account_alias_exists(conn, account_id, normalized):
-        raise AccountAliasConflictError(raw_alias)
-
-    alias_id = uuid4()
-    with transaction(conn):
-        accounts_repo.create_account_alias(
-            conn=conn,
-            alias_id=alias_id,
-            account_id=account_id,
-            alias_text=raw_alias,
-            normalized_alias=normalized,
-            status='active'
-        )
-        actor_type, actor_user_id, actor_device_id = _get_audit_actor_info(device)
-        audit_repo.insert_audit_event(
-            conn=conn,
-            household_id=household_id,
-            actor_type=actor_type,
-            entity_type="account_alias",
-            entity_id=alias_id,
-            action="create",
-            actor_user_id=actor_user_id,
-            actor_device_id=actor_device_id,
-            after_data={"account_id": str(account_id), "alias": raw_alias}
-        )
-
-    alias_obj = accounts_repo.get_account_alias(conn, alias_id, account_id)
-    return {
-        "id": str(alias_obj["id"]),
-        "account_id": str(alias_obj["account_id"]),
-        "alias": alias_obj["alias_text"],
-        "created_at": alias_obj["created_at"].isoformat()
-    }
-
-@router.delete("/{account_id}/aliases/{alias_id}", summary="Soft-Delete Account Alias")
-def delete_account_alias(
+@router.patch("/{account_id}/aliases/{alias_id}", summary="Update Account Alias")
+def patch_account_alias(
     account_id: UUID,
     alias_id: UUID,
-    device: Dict[str, Any] = Depends(get_authenticated_actor),
+    payload: PatchAliasRequest,
+    idempotency_key: str = Depends(require_idempotency_key),
+    auth_context: AuthContext = Depends(get_auth_context),
     conn: Any = Depends(get_db_connection)
-) -> Dict[str, Any]:
-    household_id = device["household_id"]
-    existing = accounts_repo.get_account(conn, account_id)
-    if not existing or existing["household_id"] != household_id:
-        raise AccountResourceNotFoundError(account_id)
-
-    alias = accounts_repo.get_account_alias(conn, alias_id, account_id)
-    if not alias or alias["status"] != "active" or alias["deleted_at"] is not None:
-        raise AliasResourceNotFoundError(alias_id)
-
-    with transaction(conn):
-        deactivated = accounts_repo.deactivate_account_alias(conn, alias_id, account_id)
-        if not deactivated:
-            raise AliasResourceNotFoundError(alias_id)
-
-        actor_type, actor_user_id, actor_device_id = _get_audit_actor_info(device)
-        audit_repo.insert_audit_event(
-            conn=conn,
-            household_id=household_id,
-            actor_type=actor_type,
-            entity_type="account_alias",
-            entity_id=alias_id,
-            action="soft_delete",
-            actor_user_id=actor_user_id,
-            actor_device_id=actor_device_id,
-            before_data={"status": "active"},
-            after_data={"status": "inactive"}
-        )
-
-
-    return {
-        "status": "deactivated",
-        "id": str(alias_id),
-        "account_id": str(account_id)
-    }
-
-
+) -> JSONResponse:
+    """
+    Updates an existing account alias as a short durable command.
+    """
+    res, status_code = alias_commands.patch_alias_command(
+        conn=conn,
+        auth_context=auth_context,
+        idempotency_key=idempotency_key,
+        account_id=account_id,
+        alias_id=alias_id,
+        payload=payload
+    )
+    return JSONResponse(status_code=status_code, content=res)

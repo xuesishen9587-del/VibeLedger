@@ -37,7 +37,7 @@ class TestMigrations(unittest.TestCase):
                 conn.close()
 
     def test_run_migrations_success(self):
-        # 1. Run migrations first time
+        # 1. Run migrations first time (defaults to simplified lineage)
         runner.run_migrations(self.test_schema)
         
         # Verify schema table creation and checksum recording
@@ -46,13 +46,12 @@ class TestMigrations(unittest.TestCase):
             with conn.cursor() as cur:
                 cur.execute("SELECT migration_name, checksum_sha256 FROM schema_migrations ORDER BY migration_name;")
                 rows = cur.fetchall()
-                self.assertEqual(len(rows), 9)
-                self.assertTrue(rows[0][0].startswith("0001_"))
-                self.assertTrue(rows[8][0].startswith("0009_"))
+                self.assertEqual(len(rows), 1)
+                self.assertEqual(rows[0][0], "0001_simplified.sql")
                 for filename, checksum in rows:
                     self.assertEqual(len(checksum), 64) # SHA256 hex string length
                 
-                # Check that main tables are present
+                # Check that 16 application tables + schema_migrations are present
                 cur.execute("""
                     SELECT table_name 
                     FROM information_schema.tables 
@@ -61,12 +60,11 @@ class TestMigrations(unittest.TestCase):
                 tables = {row[0] for row in cur.fetchall()}
                 expected_tables = {
                     "households", "users", "household_members", "devices",
-                    "accounts", "account_state", "account_aliases", "categories",
-                    "ingestion_requests", "transactions", "transaction_links",
-                    "account_snapshots", "credit_card_snapshots", "investment_pnl_periods",
-                    "installment_plans", "installment_periods",
-                    "reconciliation_batches", "statement_lines", "reconciliation_candidates",
-                    "audit_events", "schema_migrations"
+                    "accounts", "account_aliases", "categories",
+                    "ingestion_requests", "transactions", "account_snapshots",
+                    "investment_period_inputs", "fx_quotes", "audit_events",
+                    "spending_schedules", "schedule_occurrences", "statement_lines",
+                    "schema_migrations"
                 }
                 for t in expected_tables:
                     self.assertIn(t, tables, f"Expected table '{t}' missing from schema.")
@@ -80,7 +78,22 @@ class TestMigrations(unittest.TestCase):
         try:
             with conn.cursor() as cur:
                 cur.execute("SELECT COUNT(*) FROM schema_migrations;")
-                self.assertEqual(cur.fetchone()[0], 9)
+                self.assertEqual(cur.fetchone()[0], 1)
+        finally:
+            conn.close()
+
+    def test_run_legacy_migrations_isolated(self):
+        # Verify legacy migrations 0001..0009 apply cleanly when lineage is explicitly legacy
+        runner.run_migrations(self.test_schema, lineage=runner.LINEAGE_LEGACY)
+
+        conn = get_connection(self.test_schema)
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT migration_name, checksum_sha256 FROM schema_migrations ORDER BY migration_name;")
+                rows = cur.fetchall()
+                self.assertEqual(len(rows), 9)
+                self.assertTrue(rows[0][0].startswith("0001_"))
+                self.assertTrue(rows[8][0].startswith("0009_"))
         finally:
             conn.close()
 
@@ -96,7 +109,7 @@ class TestMigrations(unittest.TestCase):
                     """
                     UPDATE schema_migrations 
                     SET checksum_sha256 = 'tampered_fake_checksum_000000000000000000000000000000000000000000' 
-                    WHERE migration_name = '0002_identity_accounts.sql';
+                    WHERE migration_name = '0001_simplified.sql';
                     """
                 )
             conn.commit()
@@ -107,7 +120,7 @@ class TestMigrations(unittest.TestCase):
         with self.assertRaises(runner.MigrationChecksumMismatch) as ctx:
             runner.run_migrations(self.test_schema)
         self.assertIn("Drift detected", str(ctx.exception))
-        self.assertIn("0002_identity_accounts.sql", str(ctx.exception))
+        self.assertIn("0001_simplified.sql", str(ctx.exception))
 
     def test_extension_discovery_and_non_destruction(self):
         # 1. Extensions discovery check

@@ -1,54 +1,45 @@
-from typing import Optional, Dict, Any
 from datetime import datetime
+from typing import Optional
 from fastapi import APIRouter, Depends
-from pydantic import BaseModel, Field, field_validator
-
-from app.api.deps import get_db_connection, get_authenticated_device
-from app.db import transaction
-import app.services.expense_service as expense_service
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field, ConfigDict, field_validator
+from app.api.deps import get_db_connection, require_device_auth
+from app.api.routes.transactions import get_fx_provider
+from app.domain.capture_images import MAX_ENCODED
+from app.services import expense_capture, capture_receipts
 from app.services.gemini_service import GeminiService
-from app.services.reference_fx_service import ReferenceFxService
 
-router = APIRouter(prefix="/api/v1/expenses", tags=["Expenses"])
+router = APIRouter(prefix="/api/v1/expenses", tags=["Expense capture"])
+
+def get_capture_model():
+    return GeminiService()
 
 class ImagePayload(BaseModel):
-    mime_type: str = Field("image/jpeg", description="MIME type of the screenshot")
-    base64: str = Field(..., min_length=1, description="Base64-encoded image data")
+    model_config = ConfigDict(extra="forbid")
+    mime_type: str = "image/jpeg"
+    base64: str = Field(min_length=1, max_length=MAX_ENCODED)
 
 class CreateExpenseRequest(BaseModel):
-    idempotency_key: str = Field(..., min_length=8, max_length=200, description="Client-generated unique idempotency key")
-    captured_at: datetime = Field(..., description="Client capture timestamp with timezone")
-    client_version: Optional[str] = Field(None, description="Client app/shortcut version")
-    image: ImagePayload = Field(..., description="Screenshot image object")
-    note: Optional[str] = Field(None, description="Optional user note")
+    model_config = ConfigDict(extra="forbid")
+    idempotency_key: str = Field(min_length=8, max_length=200)
+    captured_at: datetime
+    client_version: Optional[str] = Field(None, max_length=120)
+    image: ImagePayload
+    note: Optional[str] = Field(None, max_length=2000)
 
     @field_validator("captured_at")
     @classmethod
-    def validate_timezone_aware(cls, v: datetime) -> datetime:
-        if v.tzinfo is None:
-            raise ValueError("captured_at must be a timezone-aware timestamp (e.g. ISO 8601 with offset).")
-        return v
+    def timezone_required(cls, value):
+        if value.tzinfo is None:
+            raise ValueError("Capture timestamp requires a timezone.")
+        return value
 
-@router.post("", summary="Idempotent Expense Ingestion")
-def create_expense(
-    payload: CreateExpenseRequest,
-    device: Dict[str, Any] = Depends(get_authenticated_device),
-    conn: Any = Depends(get_db_connection)
-) -> Dict[str, Any]:
-    """
-    Ingests an expense receipt screenshot via iPhone Shortcut.
-    Processes idempotency, runs expense-only AI extraction, deterministic validation,
-    and commits one-off expense, foreign-card estimated expense, or installment plan.
-    """
-    gemini_svc = getattr(router, "_gemini_service", None) or GeminiService()
-    fx_svc = getattr(router, "_reference_fx_service", None) or ReferenceFxService()
+def capture_response(result):
+    payload, status = result
+    return JSONResponse(payload, status_code=status, headers={"Retry-After": "2"} if status == 202 else None)
 
-    with transaction(conn):
-        result = expense_service.process_expense_request(
-            conn=conn,
-            device=device,
-            payload=payload.model_dump(),
-            gemini_service=gemini_svc,
-            reference_fx_service=fx_svc
-        )
-        return result
+@router.post("")
+def create_expense(payload: CreateExpenseRequest, actor=Depends(require_device_auth),
+                   conn=Depends(get_db_connection), model=Depends(get_capture_model), provider=Depends(get_fx_provider)):
+    factory = capture_receipts.connection_factory(conn)
+    return capture_response(expense_capture.process(factory, actor, payload.model_dump(), model, provider))

@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "flow_id": "08_expense_by_key_replay",
+  "description": "Recovery and replay by idempotency key when client has pending-key.txt from previous interrupted session.",
+  "request": {
+    "method": "GET",
+    "path": "/api/v1/ingestion-requests/by-key/8b9e6f1a-5c2d-4e3a-9f1b-7a8c9d0e1f2a",
+    "headers": {
+      "Authorization": "Bearer vbl_dev_sample_token_sanitized"
+    },
+    "body": null
+  },
+  "response": {
+    "http_status": 200,
+    "headers": {
+      "Content-Type": "application/json"
+    },
+    "body": {
+      "status": "committed",
+      "request_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+      "transaction_id": "c7a8b9d0-1234-4567-89ab-cdef01234567",
+      "payment_mode": "one_off",
+      "display_summary": "¥28.50 · 瑞幸咖啡\n招商银行储蓄卡 · 餐饮美食\n2026-09-06"
+    }
+  },
+  "shortcut_consumed_fields": [
+    "status",
+    "request_id",
+    "transaction_id",
+    "payment_mode",
+    "display_summary"
+  ]
+}

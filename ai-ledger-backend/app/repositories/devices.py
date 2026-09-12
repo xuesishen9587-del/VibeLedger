@@ -16,7 +16,7 @@ def get_device_by_id(conn, device_id: UUID) -> Optional[Dict[str, Any]]:
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT id, user_id, device_name, platform, status, client_version, created_at, last_seen_at, revoked_at
+            SELECT id, household_id, user_id, name, platform, status, client_version, created_at, last_seen_at, revoked_at
             FROM devices
             WHERE id = %s;
             """,
@@ -27,14 +27,17 @@ def get_device_by_id(conn, device_id: UUID) -> Optional[Dict[str, Any]]:
             return None
         return {
             "device_id": row[0],
-            "user_id": row[1],
-            "device_name": row[2],
-            "platform": row[3],
-            "status": row[4],
-            "client_version": row[5],
-            "created_at": row[6],
-            "last_seen_at": row[7],
-            "revoked_at": row[8],
+            "id": row[0],
+            "household_id": row[1],
+            "user_id": row[2],
+            "device_name": row[3],
+            "name": row[3],
+            "platform": row[4],
+            "status": row[5],
+            "client_version": row[6],
+            "created_at": row[7],
+            "last_seen_at": row[8],
+            "revoked_at": row[9],
         }
 
 def get_device_by_token_hash(conn, token_hash: bytes) -> Optional[Dict[str, Any]]:
@@ -44,25 +47,28 @@ def get_device_by_token_hash(conn, token_hash: bytes) -> Optional[Dict[str, Any]
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT id, user_id, device_name, platform, status, client_version, created_at, last_seen_at, revoked_at
+            SELECT id, household_id, user_id, name, platform, status, client_version, created_at, last_seen_at, revoked_at
             FROM devices
             WHERE token_hash = %s;
             """,
-            (token_hash,)
+            (psycopg2.Binary(token_hash),)
         )
         row = cur.fetchone()
         if not row:
             return None
         return {
             "device_id": row[0],
-            "user_id": row[1],
-            "device_name": row[2],
-            "platform": row[3],
-            "status": row[4],
-            "client_version": row[5],
-            "created_at": row[6],
-            "last_seen_at": row[7],
-            "revoked_at": row[8],
+            "id": row[0],
+            "household_id": row[1],
+            "user_id": row[2],
+            "device_name": row[3],
+            "name": row[3],
+            "platform": row[4],
+            "status": row[5],
+            "client_version": row[6],
+            "created_at": row[7],
+            "last_seen_at": row[8],
+            "revoked_at": row[9],
         }
 
 def get_active_device_by_token_hash(conn, token_hash: bytes) -> Optional[Dict[str, Any]]:
@@ -72,13 +78,13 @@ def get_active_device_by_token_hash(conn, token_hash: bytes) -> Optional[Dict[st
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT d.id AS device_id, d.user_id, d.device_name, d.platform, d.status, d.client_version,
-                   u.display_name AS user_name, u.default_currency,
-                   hm.household_id, hm.role AS household_role, d.last_seen_at
+            SELECT d.id AS device_id, d.household_id, d.user_id, d.name AS device_name, d.platform, d.status, d.client_version,
+                   u.display_name AS user_name,
+                   hm.role AS household_role, d.last_seen_at
             FROM devices d
             JOIN users u ON u.id = d.user_id
-            JOIN household_members hm ON hm.user_id = u.id
-            JOIN households h ON h.id = hm.household_id
+            JOIN household_members hm ON hm.household_id = d.household_id AND hm.user_id = u.id
+            JOIN households h ON h.id = d.household_id
             WHERE d.token_hash = %s
               AND d.status = 'active'
               AND d.revoked_at IS NULL
@@ -86,23 +92,24 @@ def get_active_device_by_token_hash(conn, token_hash: bytes) -> Optional[Dict[st
               AND h.status = 'active'
             LIMIT 1;
             """,
-            (token_hash,)
+            (psycopg2.Binary(token_hash),)
         )
         row = cur.fetchone()
         if not row:
             return None
         return {
             "device_id": row[0],
-            "user_id": row[1],
-            "device_name": row[2],
-            "platform": row[3],
-            "status": row[4],
-            "client_version": row[5],
-            "user_name": row[6],
-            "default_currency": row[7],
-            "household_id": row[8],
-            "household_role": row[9],
-            "last_seen_at": row[10],
+            "id": row[0],
+            "household_id": row[1],
+            "user_id": row[2],
+            "device_name": row[3],
+            "name": row[3],
+            "platform": row[4],
+            "status": row[5],
+            "client_version": row[6],
+            "user_name": row[7],
+            "household_role": row[8],
+            "last_seen_at": row[9],
         }
 
 def list_devices_for_user(conn, user_id: UUID) -> List[Dict[str, Any]]:
@@ -113,7 +120,7 @@ def list_devices_for_user(conn, user_id: UUID) -> List[Dict[str, Any]]:
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT id, user_id, device_name, platform, status, client_version, created_at, last_seen_at, revoked_at
+            SELECT id, household_id, user_id, name, platform, status, client_version, created_at, last_seen_at, revoked_at
             FROM devices
             WHERE user_id = %s
             ORDER BY created_at DESC;
@@ -124,14 +131,17 @@ def list_devices_for_user(conn, user_id: UUID) -> List[Dict[str, Any]]:
         return [
             {
                 "device_id": r[0],
-                "user_id": r[1],
-                "device_name": r[2],
-                "platform": r[3],
-                "status": r[4],
-                "client_version": r[5],
-                "created_at": r[6],
-                "last_seen_at": r[7],
-                "revoked_at": r[8],
+                "id": r[0],
+                "household_id": r[1],
+                "user_id": r[2],
+                "device_name": r[3],
+                "name": r[3],
+                "platform": r[4],
+                "status": r[5],
+                "client_version": r[6],
+                "created_at": r[7],
+                "last_seen_at": r[8],
+                "revoked_at": r[9],
             }
             for r in rows
         ]
@@ -142,6 +152,7 @@ def create_device_with_token(
     device_name: str,
     platform: str,
     client_version: Optional[str] = None,
+    household_id: Optional[UUID] = None,
     max_attempts: int = 3,
 ) -> Tuple[Dict[str, Any], str]:
     """
@@ -149,6 +160,13 @@ def create_device_with_token(
     persists the device record with bounded collision retry, and returns the device record and raw secret token.
     The raw token is returned ONLY ONCE upon creation.
     """
+    if household_id is None:
+        from app.repositories import household_members as repo_members
+        memberships = repo_members.list_active_household_memberships_for_user(conn, user_id)
+        if not memberships:
+            raise AuthError("User has no active household membership")
+        household_id = memberships[0]["household_id"]
+
     for attempt in range(max_attempts):
         raw_token = secrets.token_urlsafe(32)
         token_hash = hashlib.sha256(raw_token.encode("utf-8")).digest()
@@ -161,24 +179,27 @@ def create_device_with_token(
                 cur.execute(
                     """
                     INSERT INTO devices (
-                        id, user_id, device_name, platform, token_hash, status, client_version, created_at
-                    ) VALUES (%s, %s, %s, %s, %s, 'active', %s, now())
-                    RETURNING id, user_id, device_name, platform, status, client_version, created_at, last_seen_at, revoked_at;
+                        id, household_id, user_id, name, platform, token_hash, status, client_version, created_at
+                    ) VALUES (%s, %s, %s, %s, %s, %s, 'active', %s, now())
+                    RETURNING id, household_id, user_id, name, platform, status, client_version, created_at, last_seen_at, revoked_at;
                     """,
-                    (device_id, user_id, device_name, platform, token_hash, client_version)
+                    (device_id, household_id, user_id, device_name, platform, psycopg2.Binary(token_hash), client_version)
                 )
                 row = cur.fetchone()
                 cur.execute(f"RELEASE SAVEPOINT {savepoint_name};")
                 device_dict = {
                     "device_id": row[0],
-                    "user_id": row[1],
-                    "device_name": row[2],
-                    "platform": row[3],
-                    "status": row[4],
-                    "client_version": row[5],
-                    "created_at": row[6],
-                    "last_seen_at": row[7],
-                    "revoked_at": row[8],
+                    "id": row[0],
+                    "household_id": row[1],
+                    "user_id": row[2],
+                    "device_name": row[3],
+                    "name": row[3],
+                    "platform": row[4],
+                    "status": row[5],
+                    "client_version": row[6],
+                    "created_at": row[7],
+                    "last_seen_at": row[8],
+                    "revoked_at": row[9],
                 }
                 return device_dict, raw_token
             except psycopg2.IntegrityError as exc:
@@ -197,9 +218,9 @@ def create_device_with_token(
 
     raise AuthError("Failed to provision device due to repeated credential collisions.")
 
-def revoke_device(conn, device_id: UUID, user_id: Optional[UUID] = None) -> Optional[Dict[str, Any]]:
+def revoke_device(conn, device_id: UUID, user_id: Optional[UUID] = None, household_id: Optional[UUID] = None) -> Optional[Dict[str, Any]]:
     """
-    Atomically revokes a device by ID. If user_id is provided, enforces that the device belongs to that user.
+    Atomically revokes a device by ID. If user_id/household_id is provided, enforces that the device belongs to that scope.
     """
     query = """
         UPDATE devices
@@ -210,8 +231,11 @@ def revoke_device(conn, device_id: UUID, user_id: Optional[UUID] = None) -> Opti
     if user_id is not None:
         query += " AND user_id = %s"
         params.append(user_id)
+    if household_id is not None:
+        query += " AND household_id = %s"
+        params.append(household_id)
 
-    query += " RETURNING id, user_id, device_name, platform, status, client_version, created_at, last_seen_at, revoked_at;"
+    query += " RETURNING id, household_id, user_id, name, platform, status, client_version, created_at, last_seen_at, revoked_at;"
 
     with conn.cursor() as cur:
         cur.execute(query, tuple(params))
@@ -220,14 +244,17 @@ def revoke_device(conn, device_id: UUID, user_id: Optional[UUID] = None) -> Opti
             return None
         return {
             "device_id": row[0],
-            "user_id": row[1],
-            "device_name": row[2],
-            "platform": row[3],
-            "status": row[4],
-            "client_version": row[5],
-            "created_at": row[6],
-            "last_seen_at": row[7],
-            "revoked_at": row[8],
+            "id": row[0],
+            "household_id": row[1],
+            "user_id": row[2],
+            "device_name": row[3],
+            "name": row[3],
+            "platform": row[4],
+            "status": row[5],
+            "client_version": row[6],
+            "created_at": row[7],
+            "last_seen_at": row[8],
+            "revoked_at": row[9],
         }
 
 def update_device_last_seen(conn, device_id: UUID) -> None:
@@ -266,16 +293,25 @@ def create_device(
     platform: str = "ios_shortcuts",
     status: str = "active",
     client_version: Optional[str] = None,
+    household_id: Optional[UUID] = None,
 ) -> None:
     """
     Inserts a device record (used during test provisioning).
     """
+    if household_id is None:
+        from app.repositories import household_members as repo_members
+        memberships = repo_members.list_active_household_memberships_for_user(conn, user_id)
+        if memberships:
+            household_id = memberships[0]["household_id"]
+        else:
+            raise AuthError("User has no active household membership")
+
     with conn.cursor() as cur:
         cur.execute(
             """
             INSERT INTO devices (
-                id, user_id, device_name, platform, token_hash, status, client_version, created_at
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, now());
+                id, household_id, user_id, name, platform, token_hash, status, client_version, created_at
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, now());
             """,
-            (device_id, user_id, device_name, platform, token_hash, status, client_version)
+            (device_id, household_id, user_id, device_name, platform, psycopg2.Binary(token_hash), status, client_version)
         )

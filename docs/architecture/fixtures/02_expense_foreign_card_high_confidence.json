@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "flow_id": "02_expense_foreign_card_high_confidence",
+  "description": "High-confidence foreign currency purchase on a multi-currency or USD credit card, committed with reference reporting FX.",
+  "request": {
+    "method": "POST",
+    "path": "/api/v1/expenses",
+    "headers": {
+      "Authorization": "Bearer vbl_dev_sample_token_sanitized",
+      "Content-Type": "application/json"
+    },
+    "body": {
+      "idempotency_key": "9c0a7e2b-6d3e-4f4b-0a2c-8b9d0e1f2a3b",
+      "captured_at": "2026-09-06T14:10:00+08:00",
+      "client_version": "expense-shortcut-v2",
+      "image": {
+        "mime_type": "image/jpeg",
+        "base64": "/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////wgALCAABAAEBAREA/8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABPxA="
+      },
+      "note": "ChatGPT Plus Subscription"
+    }
+  },
+  "response": {
+    "http_status": 200,
+    "headers": {
+      "Content-Type": "application/json"
+    },
+    "body": {
+      "status": "committed",
+      "request_id": "4ab96075-6828-4673-c40d-3da74077b0b7",
+      "transaction_id": "d8b9c0e1-2345-4678-90bc-def012345678",
+      "payment_mode": "one_off",
+      "original_amount": "20.00",
+      "original_currency": "USD",
+      "from_amount": "144.00",
+      "from_currency": "CNY",
+      "account_leg_status": "estimated",
+      "display_summary": "20.00 USD (est. ¥144.00) · OpenAI\n招商银行全币种信用卡 · 教育培训\n2026-09-06"
+    }
+  },
+  "shortcut_consumed_fields": [
+    "status",
+    "request_id",
+    "transaction_id",
+    "payment_mode",
+    "original_amount",
+    "original_currency",
+    "display_summary"
+  ]
+}

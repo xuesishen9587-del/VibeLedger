@@ -123,6 +123,13 @@ def validate_safety() -> None:
     if not schema or schema in FORBIDDEN_TARGET_SCHEMAS:
         raise PermissionError(f"Safety violation: Execution schema cannot be empty or a shared/system schema ('{schema}').")
 
+    if current_settings.ENVIRONMENT == "test":
+        db_url = getattr(current_settings, "DATABASE_URL", None)
+        if db_url and isinstance(db_url, str):
+            db_url_lower = db_url.lower()
+            if "supabase.co" in db_url_lower or "supabase.com" in db_url_lower:
+                raise PermissionError("Safety violation: Remote Supabase database cannot be used when ENVIRONMENT='test'.")
+
 def validate_schema(schema: str) -> None:
     """
     Verifies that the provided schema identifier is safe and explicitly not a shared or system schema.
@@ -136,10 +143,18 @@ def validate_schema(schema: str) -> None:
 def is_safe_for_testing() -> bool:
     """
     Returns True if we are in a safe 'test' environment to allow destructive test schema operations.
+    Requires ENVIRONMENT == 'test' and DATABASE_URL not pointing to remote Supabase endpoints.
     """
     try:
         current_settings = get_settings()
-        return current_settings.ENVIRONMENT == "test"
+        if current_settings.ENVIRONMENT != "test":
+            return False
+        db_url = getattr(current_settings, "DATABASE_URL", None)
+        if db_url and isinstance(db_url, str):
+            db_url_lower = db_url.lower()
+            if "supabase.co" in db_url_lower or "supabase.com" in db_url_lower:
+                return False
+        return True
     except Exception:
         return False
 

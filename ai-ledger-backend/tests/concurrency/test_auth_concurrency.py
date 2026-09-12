@@ -45,7 +45,6 @@ class TestAuthConcurrency(BaseDbTestCase):
             household_id=self.household_id,
             name="Concurrency Household",
             reporting_currency="CNY",
-            ledger_start_date=date(2026, 1, 1),
             status="active"
         )
         self.user_id = uuid4()
@@ -77,7 +76,8 @@ class TestAuthConcurrency(BaseDbTestCase):
             device_name="Concurrency Device",
             token_hash=token_hash,
             platform="ios_shortcuts",
-            status="active"
+            status="active",
+            household_id=self.household_id
         )
         self.conn.commit()
 
@@ -85,7 +85,8 @@ class TestAuthConcurrency(BaseDbTestCase):
         num_workers = 8
 
         def _provision(i):
-            return self.client.post(
+            client = TestClient(self.app)
+            return client.post(
                 "/api/v1/devices",
                 headers={"Authorization": f"Bearer {self.jwt_token}"},
                 json={"device_name": f"Concurrent Device {i}", "platform": "ios"}
@@ -109,7 +110,8 @@ class TestAuthConcurrency(BaseDbTestCase):
         num_requests = 16
 
         def _auth():
-            return self.client.get(
+            client = TestClient(self.app)
+            return client.get(
                 "/api/v1/accounts",
                 headers={"Authorization": f"Bearer {self.raw_device_token}"}
             )
@@ -135,13 +137,17 @@ class TestAuthConcurrency(BaseDbTestCase):
         # 2. Revoke in one call
         revoke_res = self.client.post(
             f"/api/v1/devices/{dev_id}/revoke",
-            headers={"Authorization": f"Bearer {self.jwt_token}"}
+            headers={
+                "Authorization": f"Bearer {self.jwt_token}",
+                "Idempotency-Key": f"key-concur-revoke-{uuid4().hex}",
+            }
         )
         self.assertEqual(revoke_res.status_code, 200)
 
         # 3. Multiple concurrent authentications using the revoked token must all fail 401
         def _attempt_auth():
-            return self.client.get(
+            client = TestClient(self.app)
+            return client.get(
                 "/api/v1/accounts",
                 headers={"Authorization": f"Bearer {token}"}
             )

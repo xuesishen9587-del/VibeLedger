@@ -136,7 +136,8 @@ class TestDeviceManagementApiDb(BaseDbTestCase):
         events = audit_repo.list_audit_events_for_entity(
             self.conn,
             entity_type="device",
-            entity_id=device_info["device_id"]
+            entity_id=device_info["device_id"],
+            household_id=self.household_id
         )
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0]["action"], "create")
@@ -147,7 +148,7 @@ class TestDeviceManagementApiDb(BaseDbTestCase):
         res1 = self.client.post(
             "/api/v1/devices",
             headers={"Authorization": f"Bearer {self.jwt_user1}"},
-            json={"device_name": "User 1 iPad", "platform": "ipad_os"}
+            json={"device_name": "User 1 iPad", "platform": "ios"}
         )
         self.assertEqual(res1.status_code, 201)
         dev1_id = res1.json()["device"]["device_id"]
@@ -156,7 +157,7 @@ class TestDeviceManagementApiDb(BaseDbTestCase):
         res2 = self.client.post(
             "/api/v1/devices",
             headers={"Authorization": f"Bearer {self.jwt_user2}"},
-            json={"device_name": "User 2 Watch", "platform": "watch_os"}
+            json={"device_name": "User 2 Watch", "platform": "other"}
         )
         self.assertEqual(res2.status_code, 201)
         dev2_id = res2.json()["device"]["device_id"]
@@ -208,7 +209,10 @@ class TestDeviceManagementApiDb(BaseDbTestCase):
         # 2. Revoke device
         revoke_res = self.client.post(
             f"/api/v1/devices/{device_id}/revoke",
-            headers={"Authorization": f"Bearer {self.jwt_user1}"}
+            headers={
+                "Authorization": f"Bearer {self.jwt_user1}",
+                "Idempotency-Key": f"key-revoke-{uuid4().hex}",
+            }
         )
         self.assertEqual(revoke_res.status_code, 200)
         revoked_info = revoke_res.json()["device"]
@@ -225,10 +229,11 @@ class TestDeviceManagementApiDb(BaseDbTestCase):
         events = audit_repo.list_audit_events_for_entity(
             self.conn,
             entity_type="device",
-            entity_id=device_id
+            entity_id=device_id,
+            household_id=self.household_id
         )
         actions = [e["action"] for e in events]
-        self.assertIn("soft_delete", actions)
+        self.assertIn("update", actions)
 
     def test_revoke_cross_user_device_returns_404(self):
         # User 1 creates a device
@@ -242,7 +247,10 @@ class TestDeviceManagementApiDb(BaseDbTestCase):
         # User 2 attempts to revoke User 1's device -> must return 404 (isolation)
         res_revoke = self.client.post(
             f"/api/v1/devices/{device_id}/revoke",
-            headers={"Authorization": f"Bearer {self.jwt_user2}"}
+            headers={
+                "Authorization": f"Bearer {self.jwt_user2}",
+                "Idempotency-Key": f"key-cross-{uuid4().hex}",
+            }
         )
         self.assertEqual(res_revoke.status_code, 404)
         self.assertEqual(res_revoke.json()["error"]["code"], "DEVICE_NOT_FOUND")
@@ -251,7 +259,10 @@ class TestDeviceManagementApiDb(BaseDbTestCase):
         random_id = uuid4()
         res = self.client.post(
             f"/api/v1/devices/{random_id}/revoke",
-            headers={"Authorization": f"Bearer {self.jwt_user1}"}
+            headers={
+                "Authorization": f"Bearer {self.jwt_user1}",
+                "Idempotency-Key": f"key-nonexistent-{uuid4().hex}",
+            }
         )
         self.assertEqual(res.status_code, 404)
         self.assertEqual(res.json()["error"]["code"], "DEVICE_NOT_FOUND")

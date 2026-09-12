@@ -647,7 +647,7 @@ class TestLedgerServiceDb(BaseDbTestCase):
         active_refunds = tx_repo.get_active_refunds_for_expense(self.conn, exp_tx["id"])
         self.assertEqual(len(active_refunds), 0)
 
-        audits = audit_repo.list_audit_events_for_entity(self.conn, "transaction", ref_tx["id"])
+        audits = audit_repo.list_audit_events_for_entity(self.conn, "transaction", ref_tx["id"], household_id=self.household_id)
         self.assertEqual(len(audits), 2)
         actions = [a["action"] for a in audits]
         self.assertIn("create", actions)
@@ -720,7 +720,7 @@ class TestLedgerServiceDb(BaseDbTestCase):
         self.assertEqual(db_tx["status"], "voided")
         self.assertEqual(db_tx["delete_reason"], "Accidental double swipe")
 
-        audits = audit_repo.list_audit_events_for_entity(self.conn, "transaction", tx["id"])
+        audits = audit_repo.list_audit_events_for_entity(self.conn, "transaction", tx["id"], household_id=self.household_id)
         self.assertEqual(len(audits), 2)
         actions = [a["action"] for a in audits]
         self.assertIn("create", actions)

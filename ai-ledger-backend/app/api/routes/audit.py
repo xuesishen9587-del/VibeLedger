@@ -42,17 +42,19 @@ def list_audit_events_endpoint(
             "id": event["id"],
             "household_id": str(event["household_id"]),
             "actor_type": event["actor_type"],
-            "actor_user_id": str(event["actor_user_id"]) if event["actor_user_id"] else None,
-            "actor_device_id": str(event["actor_device_id"]) if event["actor_device_id"] else None,
-            "request_id": str(event["request_id"]) if event["request_id"] else None,
-            "reconciliation_batch_id": str(event["reconciliation_batch_id"]) if event["reconciliation_batch_id"] else None,
+            "actor_user_id": str(event["actor_user_id"]) if event.get("actor_user_id") else None,
+            "actor_device_id": str(event["actor_device_id"]) if event.get("actor_device_id") else None,
+            "source_request_id": str(event.get("source_request_id") or event.get("request_id")) if (event.get("source_request_id") or event.get("request_id")) else None,
+            "request_id": str(event.get("source_request_id") or event.get("request_id")) if (event.get("source_request_id") or event.get("request_id")) else None,
+            "reconciliation_batch_id": str(event.get("reconciliation_batch_id")) if event.get("reconciliation_batch_id") else None,
             "entity_type": event["entity_type"],
             "entity_id": str(event["entity_id"]),
             "action": event["action"],
-            "before_data": event["before_data"],
-            "after_data": event["after_data"],
-            "metadata": event["metadata"],
-            "created_at": event["created_at"].isoformat() if event["created_at"] else None
+            "before_data": event.get("before_data"),
+            "after_data": event.get("after_data"),
+            "reason": event.get("reason"),
+            "metadata": event.get("metadata") or ({"reason": event.get("reason")} if event.get("reason") else {}),
+            "created_at": event["created_at"].isoformat() if event.get("created_at") else None
         })
 
     return {

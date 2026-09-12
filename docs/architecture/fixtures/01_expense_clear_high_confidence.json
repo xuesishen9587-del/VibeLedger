@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "flow_id": "01_expense_clear_high_confidence",
+  "description": "Standard high-confidence one-off expense recorded via iPhone Shortcut in a single backend request without preflights.",
+  "request": {
+    "method": "POST",
+    "path": "/api/v1/expenses",
+    "headers": {
+      "Authorization": "Bearer vbl_dev_sample_token_sanitized",
+      "Content-Type": "application/json"
+    },
+    "body": {
+      "idempotency_key": "8b9e6f1a-5c2d-4e3a-9f1b-7a8c9d0e1f2a",
+      "captured_at": "2026-09-06T12:30:00+08:00",
+      "client_version": "expense-shortcut-v2",
+      "image": {
+        "mime_type": "image/jpeg",
+        "base64": "/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////wgALCAABAAEBAREA/8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABPxA="
+      },
+      "note": null
+    }
+  },
+  "response": {
+    "http_status": 200,
+    "headers": {
+      "Content-Type": "application/json"
+    },
+    "body": {
+      "status": "committed",
+      "request_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+      "transaction_id": "c7a8b9d0-1234-4567-89ab-cdef01234567",
+      "payment_mode": "one_off",
+      "display_summary": "¥28.50 · 瑞幸咖啡\n招商银行储蓄卡 · 餐饮美食\n2026-09-06"
+    }
+  },
+  "shortcut_consumed_fields": [
+    "status",
+    "request_id",
+    "transaction_id",
+    "payment_mode",
+    "display_summary"
+  ]
+}

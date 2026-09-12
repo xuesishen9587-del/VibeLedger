@@ -8,7 +8,20 @@ from psycopg2 import sql
 from app.config import get_settings, validate_safety, validate_schema
 from app.db import get_connection, transaction
 
-MIGRATIONS_DIR = os.path.dirname(os.path.abspath(__file__))
+MIGRATIONS_ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
+MIGRATIONS_DIR = MIGRATIONS_ROOT_DIR
+MIGRATIONS_SIMPLIFIED_DIR = os.path.join(MIGRATIONS_ROOT_DIR, "simplified")
+MIGRATIONS_LEGACY_DIR = MIGRATIONS_ROOT_DIR
+
+LINEAGE_SIMPLIFIED = "simplified"
+LINEAGE_LEGACY = "legacy"
+DEFAULT_LINEAGE = LINEAGE_SIMPLIFIED
+
+LEGACY_MIGRATION_FILES = [
+    f for f in os.listdir(MIGRATIONS_LEGACY_DIR)
+    if f.endswith(".sql") and re.match(r"^\d{4}_.*\.sql$", f)
+]
+
 REQUIRED_EXTENSIONS = {"pgcrypto", "pg_trgm", "citext"}
 
 class MigrationChecksumMismatch(Exception):
@@ -19,14 +32,30 @@ class ExtensionBootstrapError(Exception):
     """Raised when a required PostgreSQL extension is missing and cannot be installed."""
     pass
 
-def get_migration_files() -> List[str]:
+class LegacyMigrationLineageDetectedError(Exception):
+    """Raised when running simplified lineage on a schema containing legacy migrations."""
+    pass
+
+def get_migration_dir(lineage: str = LINEAGE_SIMPLIFIED, migrations_dir: Optional[str] = None) -> str:
+    if migrations_dir:
+        return migrations_dir
+    if lineage == LINEAGE_SIMPLIFIED:
+        return MIGRATIONS_SIMPLIFIED_DIR
+    elif lineage == LINEAGE_LEGACY:
+        return MIGRATIONS_LEGACY_DIR
+    else:
+        raise ValueError(f"Unknown migration lineage: '{lineage}'. Supported: '{LINEAGE_SIMPLIFIED}', '{LINEAGE_LEGACY}'.")
+
+def get_migration_files(lineage: str = LINEAGE_SIMPLIFIED, migrations_dir: Optional[str] = None) -> List[str]:
     """
-    Returns a sorted list of migration SQL files in the migrations directory.
+    Returns a sorted list of migration SQL files in the migration directory for the selected lineage.
     """
+    target_dir = get_migration_dir(lineage=lineage, migrations_dir=migrations_dir)
     files = []
-    for f in os.listdir(MIGRATIONS_DIR):
-        if f.endswith(".sql") and re.match(r"^\d{4}_.*\.sql$", f):
-            files.append(f)
+    if os.path.exists(target_dir):
+        for f in os.listdir(target_dir):
+            if f.endswith(".sql") and re.match(r"^\d{4}_.*\.sql$", f):
+                files.append(f)
     return sorted(files)
 
 def ensure_extensions(conn) -> Dict[str, str]:
@@ -111,10 +140,64 @@ def ensure_extensions(conn) -> Dict[str, str]:
 
         return installed
 
-def run_migrations(schema: Optional[str] = None) -> None:
+def verify_schema_lineage(conn, lineage: str = LINEAGE_SIMPLIFIED, migrations_dir: Optional[str] = None) -> tuple[bool, str]:
+    """
+    Verifies that the target schema has applied the required migrations for the specified lineage.
+    If lineage is 'simplified', strictly rejects any schema that contains legacy migration files,
+    returning (False, "incompatible_schema_lineage").
+    Returns (True, "ok") if all required migrations match and checksums are verified.
+    Returns (False, "schema_not_ready") if migrations are missing or checksums mismatch.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT EXISTS (
+                SELECT 1 FROM information_schema.tables
+                WHERE table_schema = current_schema() AND table_name = 'schema_migrations'
+            );
+            """
+        )
+        has_migrations = cur.fetchone()[0]
+        if not has_migrations:
+            return False, "schema_not_ready"
+
+        cur.execute("SELECT migration_name, checksum_sha256 FROM schema_migrations;")
+        applied_migrations = {row[0]: row[1] for row in cur.fetchall()}
+
+        if lineage == LINEAGE_SIMPLIFIED:
+            for legacy_f in LEGACY_MIGRATION_FILES:
+                if legacy_f in applied_migrations:
+                    return False, "incompatible_schema_lineage"
+
+        target_dir = get_migration_dir(lineage=lineage, migrations_dir=migrations_dir)
+        expected_files = get_migration_files(lineage=lineage, migrations_dir=target_dir)
+
+        if not expected_files:
+            return False, "schema_not_ready"
+
+        for filename in expected_files:
+            if filename not in applied_migrations:
+                return False, "schema_not_ready"
+            filepath = os.path.join(target_dir, filename)
+            try:
+                with open(filepath, "rb") as f:
+                    file_checksum = hashlib.sha256(f.read()).hexdigest()
+            except Exception:
+                return False, "schema_not_ready"
+
+            if applied_migrations[filename] != file_checksum:
+                return False, "schema_not_ready"
+
+    return True, "ok"
+
+def run_migrations(
+    schema: Optional[str] = None,
+    lineage: str = LINEAGE_SIMPLIFIED,
+    migrations_dir: Optional[str] = None
+) -> None:
     """
     Runs all pending target database migrations sequentially within the specified schema.
-    Enforces migration checksum validation and extension schema portability.
+    Enforces migration checksum validation, strict lineage separation, and extension schema portability.
     Includes transient connection dropout retries for remote pooler stability.
     """
     validate_safety()
@@ -124,7 +207,8 @@ def run_migrations(schema: Optional[str] = None) -> None:
         schema = settings.DB_SCHEMA
         
     validate_schema(schema)
-    print(f"LOG: Starting database migrations for schema: {schema}")
+    target_dir = get_migration_dir(lineage=lineage, migrations_dir=migrations_dir)
+    print(f"LOG: Starting database migrations for schema: {schema} (lineage: {lineage}, dir: {target_dir})")
 
     for attempt in range(1, 4):
         conn = None
@@ -154,11 +238,20 @@ def run_migrations(schema: Optional[str] = None) -> None:
             with conn.cursor() as cur:
                 cur.execute("SELECT migration_name, checksum_sha256 FROM schema_migrations;")
                 applied_migrations = {row[0]: row[1] for row in cur.fetchall()}
+
+            # 5. Strict lineage check: if running simplified lineage, reject any legacy migrations in schema
+            if lineage == LINEAGE_SIMPLIFIED:
+                legacy_present = [f for f in LEGACY_MIGRATION_FILES if f in applied_migrations]
+                if legacy_present:
+                    raise LegacyMigrationLineageDetectedError(
+                        f"Legacy migration lineage detected in schema '{schema}': {legacy_present}. "
+                        "Astra-simplified runtime requires a fresh database schema and rejects legacy migration lineage."
+                    )
                 
-            # 5. Process migration files sequentially
-            migration_files = get_migration_files()
+            # 6. Process migration files sequentially
+            migration_files = get_migration_files(lineage=lineage, migrations_dir=target_dir)
             for filename in migration_files:
-                filepath = os.path.join(MIGRATIONS_DIR, filename)
+                filepath = os.path.join(target_dir, filename)
                 with open(filepath, "rb") as f:
                     raw_bytes = f.read()
                     

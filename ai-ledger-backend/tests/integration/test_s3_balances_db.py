@@ -121,3 +121,21 @@ class TestS3BalancesDb(BaseDbTestCase):
         historical=self.client.get("/api/v1/reports/wealth",params={"as_of":"2026-02-03"}).json()
         self.assertIsNone(historical["net_worth"])
         self.assertEqual(historical["coverage"]["missing_fx_currencies"],["USD"])
+
+    def test_history_includes_fx_changes_expiry_and_stale_observation_boundaries(self):
+        usd=schema.create_account(self.conn,self.hh,"USD","dollars","cash","USD",opened_on=date(2026,1,1))
+        self.conn.commit()
+        self.assertEqual(self.save(self.observation(),self.observation("10.00",usd)).status_code,201)
+        with self.conn.cursor() as cur:
+            cur.execute("INSERT INTO fx_quotes(from_currency,to_currency,rate_as_of,rate,source) VALUES "
+                "('USD','CNY','2026-01-30',7.2,'fixture'),('USD','CNY','2026-02-03',7.3,'fixture')")
+        self.conn.commit()
+        response=self.client.get("/api/v1/reports/wealth-history",params={"from":"2026-02-02","to":"2026-03-10"})
+        self.assertEqual(response.status_code,200,response.text)
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        points={datetime.fromisoformat(p["as_of"]).astimezone(ZoneInfo("Asia/Singapore")).date():p for p in response.json()["points"]}
+        self.assertEqual(points[date(2026,2,3)]["net_worth"],"173.00")
+        self.assertIsNone(points[date(2026,2,11)]["net_worth"])
+        self.assertEqual(points[date(2026,2,11)]["coverage"]["missing_fx_currencies"],["USD"])
+        self.assertEqual(len(points[date(2026,3,5)]["coverage"]["stale_account_ids"]),2)

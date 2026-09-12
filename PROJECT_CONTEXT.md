@@ -1,6 +1,6 @@
 # VibeLedger project handoff
 
-Updated: **2026-09-11**.
+Updated: **2026-09-12**.
 
 ## Authority and accepted baseline
 
@@ -15,8 +15,8 @@ these stages without a genuine regression. This supersedes the prior handoff's
 pending S2 acceptance notes. S2 code is committed through `298499c`, including
 Dashboard full-price-expense conversion to installment schedules.
 
-This S3 session began on `experiment/astra-simplified` at `298499c` with a clean
-working tree. Current S3 changes are **local and uncommitted**, not pushed or deployed.
+The original S3 implementation was committed and pushed as `4a06657` after the
+2026-09-11 handoff. The 2026-09-12 continuation starts from that clean branch head.
 No S3 independent review, live model acceptance or formal acceptance is claimed.
 
 ## Current stage: S3 — Balances, wealth, risk and statement import
@@ -71,7 +71,62 @@ Narrow shared extensions: capture receipt reservation accepts a kind/operation
 binding accepts statement provenance/item identity (Shortcut defaults unchanged).
 The accepted 16-table baseline and migration files have **not changed**.
 
-## Local verification
+## 2026-09-12 continuation checkpoint
+
+This checkpoint is locally implemented and tested as noted below. **GitHub push is
+blocked**: command-line Git has no write credentials; the connected GitHub Git-tree
+write returned `403 Resource not accessible by integration`, including with workflow
+changes excluded. Do not assume remote sync or CI execution. A local commit and
+recoverable Git bundle are prepared with this handoff; no deployment occurred.
+
+Implemented:
+
+* Statement imports reject voided transaction targets, including automatic
+  provider-ID matching. Evidence remains reserved after voiding; explicit skip is
+  available without recreating spending. Added DB regressions for voided provider
+  evidence, explicit voided links, a target changed after preview, cancellation
+  while PDF parsing is blocked, and conflicting same-provider rows rolling back.
+* Balance totals referring to absent extracted components require explicit review.
+  Uncertain total scope cannot become informational merely because a row was
+  excluded. Known incomplete totals and explicit exclusions remain distinguishable.
+  Tests preserve exact equality and the explicit display-rounding boundary.
+* Wealth history now includes FX quote changes, historical quote expiry and
+  observation staleness boundaries, even without a new balance observation.
+  A new Dashboard date-range step chart separates complete and known-partial
+  amounts, retains gaps and zero values, and exposes dated coverage in a table.
+* Statement transaction targets support date/exact-merchant filtering and bounded
+  50-record pagination beyond the old first-200 limit. Schedule targets paginate
+  too. Existing selections survive search/page changes, unavailable targets are
+  visible, and refresh is explicit. Save passes the selected target's version.
+* Corrected a Python 3.10-incompatible nested f-string in statement preview.
+* The existing complete CI workflow is configured to run on this experiment branch.
+  It will only execute after a successful push; no deployment workflow was added.
+
+Verification in the Linux continuation environment (Python 3.12.14):
+
+| Check | Result |
+|---|---|
+| Backend unit discovery | **236 passed** (5 new review-guard tests) |
+| Dashboard discovery | **74 passed** (7 new controller/figure/AppTest cases) |
+| Integration / migration / concurrency | **Not run here**; no local PostgreSQL/Docker; installation unavailable |
+| New real-DB regressions | 6 added; **unverified**, not included in any new pass count |
+| Whitespace / compile checks | Passed on local Python 3.12 |
+| S1/S2 and applied migrations | No migration or accepted-stage runtime edits |
+| Live model / real household UI / independent review | Not performed; remain acceptance gates |
+
+Environment changes are confined to local test dependencies. No inherited `.env`
+was used for final testing; `ENVIRONMENT=test`, a loopback-only disposable DSN and
+an explicit `vibeledger_test_*` schema were provided. No database was contacted by
+the unit/UI suites. Test logs stay outside Git because baseline tests print fixture
+JWTs. PowerShell and the prior Windows Python path do not exist in this Linux host.
+
+Five-hour account usage is unavailable: the runtime Codex rate-limit read returned
+401 Unauthorized. No percentage or exhaustion time is inferred. Restore repository
+write access, push this reviewed checkpoint, and inspect all required CI jobs before
+expanding S3 or claiming database acceptance. If CI finds a regression, fix it without
+reopening accepted S1/S2 except where the regression actually requires it.
+
+## Prior-session local verification
 
 Disposable Docker PostgreSQL 17 on loopback port 55432; no remote financial database.
 
@@ -108,11 +163,12 @@ can contain fixture tokens; they were removed and must not be committed.
    long statements, partial/scanned documents and measured timeouts. Local temporary
    cleanup is tested; hosted-resource/latency limits and prompt behavior need staging
    evidence. No new live model request or deployment was made in this session.
-3. Finish UI acceptance/polish: wealth history has a backend step-series API but no
-   dedicated chart yet. Statement linking currently offers the first 200 transactions
-   and schedules; full target-search coverage is pending. Statement line editing is
-   paged in groups of 25, and draft lists paginate. Review clearing/retries need
-   household interaction tests beyond the two initial AppTests.
+3. Finish UI acceptance/polish: the continuation adds the wealth-history chart and
+   paged transaction/schedule target selection, with unit/AppTest checks. Real
+   household chart interpretation, review clearing/retries, large target lists and
+   draft navigation still need acceptance. Snapshot-reuse selection in a statement
+   remains limited to its first 200 observations. Line editing is paged in groups
+   of 25; unsaved form edits must be saved before changing pages/search criteria.
 4. Validate document completeness messaging and account-scope overrides with users.
    Typed completeness signals cannot prove the model extracted every real row.
    The known missing-currency -> INVALID_AMOUNT UX issue remains non-blocking and

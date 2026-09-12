@@ -5,6 +5,52 @@ from uuid import uuid4
 import streamlit as st
 from api_client import ApiError
 from spending_controller import SpendingActions
+from statement_targets import TargetBrowser
+
+
+def target_choices(client, identity, visible):
+    state=st.session_state.setdefault("statement_targets_"+identity,{})
+    transactions=TargetBrowser(state.setdefault("transactions",{}),client,"/api/v1/transactions")
+    plans=TargetBrowser(state.setdefault("plans",{}),client,"/api/v1/spending-schedules")
+    with st.expander("查找要关联的支出和月度计划"):
+        st.caption("按实际交易日期和完整商户名称筛选；加载更多可查看后续记录。翻页或搜索前请先保存下方预览修正。")
+        with st.form("stmt_target_search_"+identity):
+            start=st.date_input("查找起始日期",value=None,key="stmt_find_start_"+identity)
+            end=st.date_input("查找截止日期",value=None,key="stmt_find_end_"+identity)
+            merchant=st.text_input("完整商户名称（可留空）",key="stmt_find_merchant_"+identity)
+            if st.form_submit_button("查找支出或退款"):
+                if start and end and start>end:
+                    st.error("起始日期不能晚于截止日期。")
+                else:
+                    transactions.load({"from":str(start) if start else None,"to":str(end) if end else None,"merchant":merchant})
+        if "items" not in transactions.state:
+            transactions.load()
+        if "items" not in plans.state:
+            plans.load()
+        st.caption(f"已加载 {len(transactions.state['items'])} 条交易、{len(plans.state['items'])} 个月度计划。")
+        if transactions.state.get("next_cursor") and st.button("加载更多交易",key="stmt_more_transactions_"+identity):
+            transactions.load(transactions.state.get("filters"),more=True)
+        if plans.state.get("next_cursor") and st.button("加载更多月度计划",key="stmt_more_plans_"+identity):
+            plans.load(more=True)
+        if st.button("刷新关联目标",key="stmt_refresh_targets_"+identity):
+            transactions.load(transactions.state.get("filters"))
+            plans.load()
+    transaction_ids=[]
+    plan_ids=[]
+    for row in visible:
+        prefix=identity+row["row_id"]
+        transaction_ids.extend([row.get("transaction_id"),st.session_state.get(prefix+"target")])
+        plan_ids.extend([row.get("schedule_id"),st.session_state.get(prefix+"schedule")])
+    targets,missing_transactions=transactions.choices(transaction_ids)
+    plan_map,missing_plans=plans.choices(plan_ids)
+    if missing_transactions or missing_plans:
+        st.warning("部分原关联记录已不可用，请重新选择关联目标或跳过该行。")
+    # Keep a visible tombstone for a saved selection; never silently clear its ID.
+    for key in missing_transactions:
+        targets[key]={"id":key,"occurred_on":"记录不可用","merchant":key,"original_amount":"","original_currency":"","row_version":None}
+    for key in missing_plans:
+        plan_map[key]={"id":key,"name":"记录不可用 · "+key,"row_version":None}
+    return targets,plan_map
 
 
 def render(client,review_only=False):
@@ -85,13 +131,7 @@ def render(client,review_only=False):
             line_page=st.number_input("账单明细页",min_value=1,max_value=max(1,(len(draft["lines"])+24)//25),value=1,key="stmt_line_page_"+identity)
             visible=draft["lines"][(line_page-1)*25:line_page*25]
             shown={r["row_id"] for r in visible}
-            transactions=client.request("GET","/api/v1/transactions",params={"limit":200})["items"]
-            targets={r["id"]:r for r in transactions}
-            for r in visible:
-                if r.get("transaction_id") and r["transaction_id"] not in targets:
-                    targets[r["transaction_id"]]=client.request("GET","/api/v1/transactions/"+r["transaction_id"])
-            plans=client.request("GET","/api/v1/spending-schedules",params={"limit":200})["items"]
-            plan_map={r["id"]:r for r in plans}
+            targets,plan_map=target_choices(client,identity,visible)
             with st.form("statement_"+identity):
                 start=st.date_input("账单起始日期",date.fromisoformat(draft["period_start"]) if draft["period_start"] else None,key="stmt_start_"+identity)
                 end=st.date_input("账单截止日期",date.fromisoformat(draft["period_end"]) if draft["period_end"] else None,key="stmt_end_"+identity)
@@ -102,7 +142,7 @@ def render(client,review_only=False):
                     prefix=identity+row["row_id"]
                     st.write(f"第 {row['row_no']} 行 · {row.get('merchant') or ''}")
                     if row.get("duplicate_ids"):
-                        st.caption(f"发现 {len(row["duplicate_ids"])} 条可能重复的记录，请核对后选择。")
+                        st.caption(f"发现 {len(row['duplicate_ids'])} 条可能重复的记录，请核对后选择。")
                     action=st.selectbox("处理方式",["create","link_existing","skip","use_schedule_period"],
                         index=["create","link_existing","skip","use_schedule_period"].index(row["action"]),
                         format_func=lambda a:{"create":"创建独立支出／退款","link_existing":"关联已有记录","skip":"跳过","use_schedule_period":"关联分期期间"}[a],key=prefix+"action")

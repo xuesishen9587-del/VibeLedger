@@ -58,3 +58,44 @@ render(Client(),review_only=True)
         app=AppTest.from_string(script).run()
         self.assertEqual(len(app.exception),0)
         self.assertTrue(any(w.value=="Review partial coverage" for w in app.warning))
+
+    def test_statement_can_save_a_target_loaded_from_a_later_page(self):
+        script='''
+import streamlit as st
+from statement_page import render
+class Client:
+    def request(self,method,path,**kw):
+        if method=="PATCH":
+            st.session_state["edited_statement"]=kw["json_data"]
+            return {"status":"needs_confirmation"}
+        assert method=="GET"
+        if path.endswith("/accounts"):
+            return {"items":[]}
+        if path.endswith("/categories"):
+            return {"items":[{"id":"other","name":"Other","category_type":"expense"}]}
+        if path.endswith("/transactions"):
+            later=kw["params"].get("cursor")=="next"
+            return {"items":[{"id":"older" if later else "recent","occurred_on":"2026-02-03","merchant":"Cafe",
+                "original_amount":"12.00","original_currency":"CNY","row_version":7 if later else 0}],"next_cursor":None if later else "next"}
+        if path.endswith("/spending-schedules"):
+            return {"items":[],"next_cursor":None}
+        if path.endswith("/ingestion-requests"):
+            return {"next_cursor":None,"items":[{"request_id":"draft","row_version":2,"warnings":[],"draft":{
+                "account_id":"account","period_start":"2026-02-01","period_end":"2026-02-28","acknowledge_partial":False,"confirm_account_identity":False,
+                "lines":[{"row_id":"line","row_no":1,"action":"create","occurred_on":"2026-02-03","merchant":"Cafe",
+                    "original_amount":"12.00","original_currency":"CNY","transaction_type":"expense","category_id":"other"}],"balance":None}}]}
+        raise AssertionError(path)
+render(Client(),review_only=True)
+'''
+        app=AppTest.from_string(script).run()
+        self.assertEqual(len(app.exception),0)
+        next(b for b in app.button if b.label=="加载更多交易").click().run()
+        self.assertEqual(len(app.exception),0)
+        next(s for s in app.selectbox if s.label=="处理方式").select("link_existing")
+        next(s for s in app.selectbox if s.label=="关联已记录支出或退款").select("older")
+        next(b for b in app.button if b.label=="保存账单预览修正").click().run()
+        self.assertEqual(len(app.exception),0)
+        row=app.session_state["edited_statement"]["lines"][0]
+        self.assertEqual(row["action"],"link_existing")
+        self.assertEqual(row["transaction_id"],"older")
+        self.assertEqual(row["expected_transaction_version"],7)

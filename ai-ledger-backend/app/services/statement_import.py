@@ -81,7 +81,7 @@ def prepare(conn,actor,row,data,account,categories,head):
             "provider_transaction_id":extracted["provider_transaction_id"],"reason":"Not spending: "+extracted["kind"] if excluded else None,
             "requires_review":any(extracted["confidence"][k]<.85 for k in ("amount","currency","date","intent")),"duplicate_ids":[]}
         targets=provider_matches(conn,actor.household_id,account["id"],line["provider_transaction_id"])
-        if len(targets)==1 and not excluded:
+        if len(targets)==1 and targets[0]["status"]=="committed" and not excluded:
             try:
                 agrees=identity_agrees(line,targets[0])
             except HTTPException:
@@ -137,6 +137,8 @@ def validate(conn,actor,receipt,proposed,confirming=False):
                 if not line.get("transaction_id") or line.get("expected_transaction_version") is None:
                     fail("IMPORT_CHANGED","Select the target expense and its current version.",409)
                 target=spending.require_record(conn,actor.household_id,line["transaction_id"],line["expected_transaction_version"])
+                if target["status"]!="committed":
+                    fail("IMPORT_CHANGED","This transaction was voided. Skip the statement line or review the original record.",409)
                 if target["transaction_type"] not in ("expense","refund"):
                     fail("INVALID_STATEMENT_LINK","Select an expense or refund.")
                 if prior and {str(t["id"]) for t in prior}!={str(target["id"])}:

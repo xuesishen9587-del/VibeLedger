@@ -8,7 +8,8 @@ The FastAPI backend, PostgreSQL data layer and Streamlit REST Dashboard already
 exist. Staging runtime and the real iPhone Expense Shortcut have passed acceptance,
 as reported in the household handoff. Production fresh cutover has not happened.
 
-The **simplified architecture revised on 2026-09-06 is not yet implemented**.
+The **simplified architecture revised on 2026-09-06 is being implemented: S1/S2
+are accepted and S3 remains in progress**.
 It keeps the working one-request expense experience and replaces projected account
 balances and general reconciliation with dated balance observations. Spending and
 wealth are independent. Monthly spending schedules and selected-account statement

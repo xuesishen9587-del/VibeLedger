@@ -114,5 +114,19 @@ def history(conn, household_id, start, end):
                 point = datetime.combine(day, time.min, tz)
                 if point<=upper:
                     events.add(point)
+    # Historical conversion can change without a new balance observation. Include
+    # quote publication/expiry and observation-age boundaries so chart segments
+    # cannot imply complete or fresh data across a known coverage change.
+    quotes = repo.rows(conn, "SELECT DISTINCT rate_as_of FROM fx_quotes WHERE to_currency=%s "
+        "AND from_currency IN (SELECT currency FROM accounts WHERE household_id=%s AND status<>'cancelled') "
+        "AND rate_as_of BETWEEN %s AND %s", (household["reporting_currency"], household_id, start-timedelta(days=7), end))
+    boundaries = [day for quote in quotes for day in (quote["rate_as_of"],quote["rate_as_of"]+timedelta(days=8))]
+    observations = repo.rows(conn, "SELECT as_of FROM account_snapshots WHERE household_id=%s AND status='active' "
+        "AND as_of BETWEEN %s AND %s", (household_id, lower-timedelta(days=31), upper))
+    boundaries.extend(row["as_of"].astimezone(tz).date()+timedelta(days=31) for row in observations)
+    for day in boundaries:
+        point = datetime.combine(day, time.min, tz)
+        if lower<=point<=upper:
+            events.add(point)
     return {"from": str(start), "to": str(end), "basis": "last_reported_observations",
             "points": [report(conn, household_id, t.isoformat(), historical_risk=True) for t in sorted(events)]}

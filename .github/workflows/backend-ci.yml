@@ -2,7 +2,7 @@ name: Backend CI
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, experiment/astra-simplified ]
   pull_request:
     branches: [ main ]
   workflow_dispatch:

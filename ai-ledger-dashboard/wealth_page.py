@@ -6,6 +6,7 @@ from uuid import uuid4
 import streamlit as st
 from spending_controller import SpendingActions
 from time_utils import format_iso_timestamp, get_dashboard_today
+from wealth_history_view import render as render_wealth_history
 
 
 def render(client):
@@ -51,6 +52,7 @@ def render(client):
         st.session_state["_wealth_fx_day"]=str(get_dashboard_today())
         if save("wealth_fx","/api/v1/reports/refresh-fx",{}):
             st.rerun()
+    render_wealth_history(client)
     accounts=client.request("GET","/api/v1/accounts",params={"status":"active"})["items"]
     if accounts:
         names={a["id"]:a for a in accounts}

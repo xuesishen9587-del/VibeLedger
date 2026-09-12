@@ -1,6 +1,7 @@
 from uuid import uuid4
 from unittest.mock import Mock, patch
 from concurrent.futures import ThreadPoolExecutor
+from threading import Event
 from tests.support.db_helper import BaseDbTestCase
 from tests.integration import test_s3_balances_db as setup
 from app.api.routes.statements import get_statement_parser
@@ -161,3 +162,74 @@ class TestS3StatementDb(BaseDbTestCase):
         self.assertEqual(response.status_code,200,response.text)
         self.assertTrue(response.json()["draft"]["lines"][0]["requires_review"])
         self.assertEqual(self.confirm(response.json()).json()["status"],"needs_confirmation")
+
+    def test_voided_provider_evidence_cannot_auto_link_or_be_recreated(self):
+        extraction=self.extraction([self.line(provider_transaction_id="voided-bank-id")])
+        original=self.confirm(self.upload(extraction).json()).json()["lines"][0]["transaction_id"]
+        response=self.client.post(f"/api/v1/transactions/{original}/void",
+            json={"expected_version":0,"delete_reason":"Not a household expense"},
+            headers={"Idempotency-Key":str(uuid4())})
+        self.assertEqual(response.status_code,200,response.text)
+        draft=self.upload(extraction).json()
+        self.assertEqual(draft["draft"]["lines"][0]["action"],"create")
+        self.assertIn("IMPORT_CHANGED",{w["code"] for w in draft["warnings"]})
+        self.assertEqual(self.confirm(draft).json()["status"],"needs_confirmation")
+        self.assertEqual(repo.rows(self.conn,"SELECT count(*) n FROM transactions")[0]["n"],1)
+
+    def test_explicit_link_to_voided_target_is_blocked_but_skip_is_allowed(self):
+        original=self.confirm(self.upload().json()).json()["lines"][0]["transaction_id"]
+        self.client.post(f"/api/v1/transactions/{original}/void",
+            json={"expected_version":0,"delete_reason":"Excluded"},headers={"Idempotency-Key":str(uuid4())})
+        draft=self.upload().json()
+        row_id=draft["draft"]["lines"][0]["row_id"]
+        edited=self.edit(draft,[{"row_id":row_id,"action":"link_existing","transaction_id":original,"expected_transaction_version":1}])
+        blocked=self.confirm(edited).json()
+        self.assertEqual(blocked["status"],"needs_confirmation")
+        self.assertIn("IMPORT_CHANGED",{w["code"] for w in blocked["warnings"]})
+        skipped=self.edit(blocked,[{"row_id":row_id,"action":"skip","reason":"Original deliberately voided"}])
+        result=self.confirm(skipped).json()
+        self.assertEqual(result["counts"],{"create":0,"link":0,"skip":1})
+        self.assertEqual(repo.rows(self.conn,"SELECT count(*) n FROM transactions WHERE status='committed'")[0]["n"],0)
+
+    def test_changed_or_voided_link_target_blocks_the_whole_import(self):
+        original=self.confirm(self.upload(self.extraction([self.line(provider_transaction_id="edited-bank-id")])).json()).json()["lines"][0]["transaction_id"]
+        draft=self.upload(self.extraction([self.line(merchant="New purchase"),self.line(provider_transaction_id="edited-bank-id")])).json()
+        response=self.client.patch(f"/api/v1/transactions/{original}",
+            json={"expected_version":0,"original_amount":"13.00"},headers={"Idempotency-Key":str(uuid4())})
+        self.assertEqual(response.status_code,200,response.text)
+        blocked=self.confirm(draft).json()
+        self.assertEqual(blocked["status"],"needs_confirmation")
+        self.assertIn("ROW_VERSION_CONFLICT",{w["code"] for w in blocked["warnings"]})
+        self.assertEqual(repo.rows(self.conn,"SELECT count(*) n FROM transactions")[0]["n"],1)
+        self.assertEqual(repo.rows(self.conn,"SELECT count(*) n FROM statement_lines WHERE request_id=%s AND final_action IS NOT NULL",(draft["request_id"],))[0]["n"],0)
+
+    def test_cancel_during_pdf_parse_prevents_evidence_and_financial_writes(self):
+        parsing,release=Event(),Event()
+        def parse(*args):
+            parsing.set()
+            if not release.wait(10):
+                raise AssertionError("Cancellation test did not release parser")
+            return self.extraction()
+        self.parser.parse.side_effect=parse
+        key=str(uuid4())
+        with ThreadPoolExecutor(1) as pool:
+            pending=pool.submit(self.upload,key=key)
+            try:
+                self.assertTrue(parsing.wait(10))
+                cancelled=self.client.post(f"/api/v1/ingestion-requests/by-key/{key}/cancel")
+                self.assertEqual(cancelled.status_code,200,cancelled.text)
+                self.assertEqual(cancelled.json()["status"],"rejected")
+            finally:
+                release.set()
+            self.assertEqual(pending.result(timeout=10).json(),cancelled.json())
+        for table in ("statement_lines","transactions","account_snapshots"):
+            self.assertEqual(repo.rows(self.conn,f"SELECT count(*) n FROM {table}")[0]["n"],0)
+
+    def test_conflicting_provider_rows_rollback_earlier_rows(self):
+        draft=self.upload(self.extraction([self.line(provider_transaction_id="shared-id"),
+            self.line(provider_transaction_id="shared-id",amount="15.00")])).json()
+        blocked=self.confirm(draft).json()
+        self.assertEqual(blocked["status"],"needs_confirmation")
+        self.assertIn("IMPORT_CHANGED",{w["code"] for w in blocked["warnings"]})
+        self.assertEqual(repo.rows(self.conn,"SELECT count(*) n FROM transactions")[0]["n"],0)
+        self.assertEqual(repo.rows(self.conn,"SELECT count(*) n FROM statement_lines WHERE final_action IS NOT NULL")[0]["n"],0)

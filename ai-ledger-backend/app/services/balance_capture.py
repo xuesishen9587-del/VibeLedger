@@ -97,14 +97,20 @@ def validate(conn, actor, proposed):
             if error.get("code")=="BALANCE_CHANGED":
                 row.update(balances.head_fields(conn,actor.household_id,row["account_id"]))
     lookup={r["row_id"]:r for r in selected}
+    all_row_ids={r["row_id"] for r in draft["rows"]}
     for total in draft["totals"]:
         covered=total["covered_row_ids"]
-        if total["scope"]=="incomplete" or not set(covered)<=lookup.keys():
+        if total["scope"]=="incomplete":
             warnings.append({"code":"TOTAL_NOT_COMPARABLE","message":"The total does not cover exactly the selected known rows."})
             continue
         try:
             if total["scope"]!="complete" or not covered or len(set(covered))!=len(covered):
                 raise ValueError()
+            if not set(covered)<=all_row_ids:
+                raise ValueError()
+            if not set(covered)<=lookup.keys():
+                warnings.append({"code":"TOTAL_NOT_COMPARABLE","message":"The total includes explicitly excluded rows."})
+                continue
             components=[lookup[key] for key in covered]
             if any(r["currency"]!=total["currency"] for r in components):
                 raise ValueError()

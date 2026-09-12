@@ -59,8 +59,8 @@ def validate_balance(conn,actor,balance):
 
 
 def prepare(conn,actor,row,data,account,categories,head):
-    page_count=data.pop("actual_page_count")
-    extraction=StatementExtraction.model_validate(data).model_dump(mode="json")
+    page_count=data["actual_page_count"]
+    extraction=StatementExtraction.model_validate({k:v for k,v in data.items() if k!="actual_page_count"}).model_dump(mode="json")
     selected=match(extraction["account_hint"],[account])
     identity_ok=bool(selected and extraction["account_currency"]==account["currency"] and extraction["account_confidence"]>=.85)
     partial=not extraction["complete"] or set(extraction["processed_pages"])!=set(range(1,page_count+1)) or extraction["expected_line_count"]!=len(extraction["lines"])

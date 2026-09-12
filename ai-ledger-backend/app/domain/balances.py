@@ -23,6 +23,10 @@ def signed_money(value, currency):
 
 def instant(value):
     try:
+        # Pydantic serializes UTC datetimes with Z; Python 3.10's
+        # fromisoformat accepts the equivalent explicit offset, but not Z.
+        if isinstance(value, str) and value.endswith("Z"):
+            value = value[:-1] + "+00:00"
         value = datetime.fromisoformat(value) if isinstance(value, str) else value
         if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
             raise ValueError()

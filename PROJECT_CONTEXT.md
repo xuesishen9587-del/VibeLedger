@@ -71,10 +71,42 @@ Narrow shared extensions: capture receipt reservation accepts a kind/operation
 binding accepts statement provenance/item identity (Shortcut defaults unchanged).
 The accepted 16-table baseline and migration files have **not changed**.
 
-## 2026-09-12 continuation checkpoint
+## 2026-09-12 CI follow-up
 
-This checkpoint is locally implemented and tested as noted below. **GitHub push is
-blocked**: command-line Git has no write credentials; the connected GitHub Git-tree
+The user pushed `9f9a4b4`. GitHub run
+[34685754221](https://github.com/xuesishen9587-del/VibeLedger/actions/runs/34685754221)
+(and the parallel run 34685753184) ran on that exact commit:
+
+* Unit, Dashboard, Migration & Concurrency jobs passed.
+* PostgreSQL Integration ran 170 tests: one failure and one error. The aggregate
+  Backend CI check failed because of that job.
+* `test_correction_void_history_and_closure_guard`: Python 3.10 rejects a UTC `Z`
+  suffix emitted by Pydantic's JSON timestamp serialization. `instant` now converts
+  a terminal `Z` to `+00:00` before parsing, preserving timezone validation.
+* `test_voided_provider_evidence_cannot_auto_link_or_be_recreated`: statement
+  preparation popped `actual_page_count` from the parser's dictionary. Reusing the
+  same extraction then raised KeyError. Preparation now reads that field without
+  mutating the caller's data and validates a separate mapping.
+
+Local verification uses **Python 3.10.21**, matching CI, with explicit test-only
+configuration and a loopback DSN. Added four unit regressions for Pydantic timestamp
+round-trip, equivalent UTC/offset timestamps, rejection of naive/malformed dates,
+and repeated preparation preserving page evidence and partial-coverage detection.
+Running those regressions against the previous functions reproduced one failure
+and two errors; with the fixes, **240 backend unit tests and 74 Dashboard tests
+pass**. No migration, financial guard, or CI assertion was removed or weakened.
+
+The two original real-DB tests remain the final regression checks. PostgreSQL is
+still unavailable in this host; do not claim the corrected full integration suite
+has passed until CI runs on the new commit. Command-line Git still has no push
+credentials, and a fresh connected GitHub tree-write attempt returned HTTP 403.
+The current follow-up must be pushed and CI rechecked; S3 acceptance,
+live Gemini and household verification remain outstanding.
+
+## Earlier 2026-09-12 continuation checkpoint (9f9a4b4)
+
+At the time of the earlier checkpoint, **GitHub push was blocked** (the user has
+now pushed it, as recorded above): command-line Git has no write credentials; the connected GitHub Git-tree
 write returned `403 Resource not accessible by integration`, including with workflow
 changes excluded. Do not assume remote sync or CI execution. A local commit and
 recoverable Git bundle are prepared with this handoff; no deployment occurred.

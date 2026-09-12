@@ -594,7 +594,7 @@ No multi-household selection or generic entity endpoint is added.
 | GET, POST /transactions | member | Filters date/type/account/category/merchant, missing_account, category_uncertain, needs_metadata_review; manual entry fields below |
 | GET, PATCH /transactions/{id} | member | Detail; expected_version + editable fields + optional reason |
 | POST /transactions/{id}/void | member | expected_version, delete_reason |
-| GET /accounts/{id}/snapshots | member | Dated history including optional voided records |
+| GET /accounts/{id}/snapshots | member | Dated history with cursor/limit, optional voided records and optional snapshot_id lookup; all filters remain account/household scoped |
 | POST /balance-updates | member | Manual selected observations, atomically saved |
 | POST /snapshots/{id}/correct | member | expected_version, expected_latest_snapshot_id, expected_account_version, replacement balance/currency/as_of/time_basis, reason |
 | POST /snapshots/{id}/void | member | expected_version, expected_latest_snapshot_id, expected_account_version, reason |

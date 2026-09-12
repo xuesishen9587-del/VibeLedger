@@ -3,8 +3,9 @@ from api_client import ApiError
 
 
 class TargetBrowser:
-    def __init__(self, state, client, path):
+    def __init__(self, state, client, path, *, lookup_parameter=None):
         self.state, self.client, self.path = state, client, path
+        self.lookup_parameter = lookup_parameter
 
     def load(self, filters=None, *, more=False):
         filters = {k: v for k, v in (filters or {}).items() if v is not None and v != ""}
@@ -27,7 +28,14 @@ class TargetBrowser:
             if identity in result:
                 continue
             try:
-                result[identity] = self.client.request("GET", self.path + "/" + identity)
+                if self.lookup_parameter:
+                    page = self.client.request("GET", self.path, params={self.lookup_parameter:identity,"limit":1})
+                    if page["items"]:
+                        result[identity] = page["items"][0]
+                    else:
+                        missing.append(identity)
+                else:
+                    result[identity] = self.client.request("GET", self.path + "/" + identity)
             except ApiError as exc:
                 if exc.status_code != 404:
                     raise

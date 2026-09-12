@@ -5,6 +5,16 @@ from statement_targets import TargetBrowser
 
 
 class StatementTargetsTest(unittest.TestCase):
+    def test_snapshot_lookup_uses_scoped_collection_and_reports_missing_target(self):
+        client=Mock()
+        client.request.side_effect=[{"items":[{"id":"older"}]},{"items":[]}]
+        browser=TargetBrowser({"items":{}},client,"/api/v1/accounts/account/snapshots",lookup_parameter="snapshot_id")
+        choices,missing=browser.choices(["older","voided"])
+        self.assertEqual(choices,{"older":{"id":"older"}})
+        self.assertEqual(missing,["voided"])
+        self.assertEqual(client.request.call_args_list[0].args,("GET","/api/v1/accounts/account/snapshots"))
+        self.assertEqual(client.request.call_args_list[0].kwargs["params"],{"snapshot_id":"older","limit":1})
+
     def test_later_pages_are_reachable_and_old_choices_are_retained(self):
         client=Mock()
         client.request.side_effect=[

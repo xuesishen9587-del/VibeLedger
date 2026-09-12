@@ -8,6 +8,40 @@ from spending_controller import SpendingActions
 from statement_targets import TargetBrowser
 
 
+def remember_result(result):
+    if result.get("status")=="committed" and "counts" in result:
+        st.session_state["statement_last_result"]=result
+    if result.get("status") in ("committed","rejected","failed") and result.get("request_id"):
+        identity=result["request_id"]
+        st.session_state.pop("statement_targets_"+identity,None)
+        st.session_state.pop("statement_snapshot_targets_"+identity,None)
+
+
+def snapshot_choices(client,identity,draft):
+    balance=draft.get("balance")
+    if not balance:
+        return {}
+    state=st.session_state.setdefault("statement_snapshot_targets_"+identity,{})
+    browser=TargetBrowser(state,client,f"/api/v1/accounts/{draft['account_id']}/snapshots",lookup_parameter="snapshot_id")
+    with st.expander("查找要复用的余额观察"):
+        st.caption("复用仅限同一账户、币种、观察时间和金额完全相同的已有余额。加载更多或刷新前请先保存下方预览修正。")
+        if "items" not in state:
+            browser.load()
+        if state.get("next_cursor") and st.button("加载更多余额观察",key="stmt_more_snapshots_"+identity):
+            browser.load(more=True)
+        if st.button("刷新余额观察",key="stmt_refresh_snapshots_"+identity):
+            browser.load()
+        st.caption(f"已加载 {len(state['items'])} 条余额观察。")
+    selected=[balance.get("reuse_snapshot_id"),st.session_state.get("stmt_balance_reuse_"+identity)]
+    choices,missing=browser.choices(selected)
+    for key in missing:
+        # Preserve the saved ID visibly; confirming cannot silently create a replacement.
+        choices[key]={"id":key,"as_of":"记录已作废或不可用","balance":key,"currency":""}
+    if missing:
+        st.warning("原复用余额已作废或不可用，请重新选择，或明确取消复用。")
+    return choices
+
+
 def target_choices(client, identity, visible):
     state=st.session_state.setdefault("statement_targets_"+identity,{})
     transactions=TargetBrowser(state.setdefault("transactions",{}),client,"/api/v1/transactions")
@@ -62,7 +96,7 @@ def render(client,review_only=False):
         st.warning("上次保存结果尚未确定。")
         if st.button("重试账单保存",key="stmt_retry_"+slot):
             try:
-                actions.retry(slot)
+                remember_result(actions.retry(slot))
                 st.rerun()
             except Exception as exc:
                 st.error(str(exc))
@@ -82,6 +116,7 @@ def render(client,review_only=False):
                 if st.button("查询上传结果"):
                     try:
                         result=client.request("GET","/api/v1/ingestion-requests/by-key/"+pending["key"])
+                        remember_result(result)
                         st.info(result["display_summary"])
                         if result["status"]!="processing":
                             st.session_state.pop("statement_upload_pending",None)
@@ -90,6 +125,7 @@ def render(client,review_only=False):
                 if st.button("取消尚未确定的上传"):
                     try:
                         result=client.request("POST","/api/v1/ingestion-requests/by-key/"+pending["key"]+"/cancel")
+                        remember_result(result)
                         st.info(result["display_summary"])
                         st.session_state.pop("statement_upload_pending",None)
                     except Exception as exc:
@@ -106,6 +142,7 @@ def render(client,review_only=False):
                         result=client.request("POST",f"/api/v1/accounts/{account_id}/statement-imports",
                             files={"file":("statement.pdf",content,"application/pdf")},data={"password":password} if password else {},
                             headers={"Idempotency-Key":command["key"]},timeout=125)
+                        remember_result(result)
                         if result["status"]!="processing":
                             st.session_state.pop("statement_upload_pending",None)
                         st.info(result["display_summary"])
@@ -132,6 +169,7 @@ def render(client,review_only=False):
             visible=draft["lines"][(line_page-1)*25:line_page*25]
             shown={r["row_id"] for r in visible}
             targets,plan_map=target_choices(client,identity,visible)
+            choices=snapshot_choices(client,identity,draft)
             with st.form("statement_"+identity):
                 start=st.date_input("账单起始日期",date.fromisoformat(draft["period_start"]) if draft["period_start"] else None,key="stmt_start_"+identity)
                 end=st.date_input("账单截止日期",date.fromisoformat(draft["period_end"]) if draft["period_end"] else None,key="stmt_end_"+identity)
@@ -177,9 +215,8 @@ def render(client,review_only=False):
                     selected=st.checkbox("同时保存此余额",balance["selected"],key="stmt_balance_selected_"+identity)
                     value=st.text_input("期末带符号余额（欠款为负）",balance.get("balance") or "",key="stmt_balance_value_"+identity)
                     stamp=st.text_input("余额实际观察时间",balance.get("as_of") or "",key="stmt_balance_time_"+identity)
-                    observations=client.request("GET",f"/api/v1/accounts/{draft['account_id']}/snapshots",params={"limit":200})["items"]
-                    choices={r["id"]:r for r in observations}
                     reuse=st.selectbox("复用已记录余额（须日期金额相同）",[None,*choices],
+                        index=[None,*choices].index(balance.get("reuse_snapshot_id")) if balance.get("reuse_snapshot_id") in choices else 0,
                         format_func=lambda k:"新增观察" if k is None else f"{choices[k]['as_of']} · {choices[k]['balance']} {choices[k]['currency']}",key="stmt_balance_reuse_"+identity)
                     account=account_map.get(draft["account_id"],{})
                     selected_balance={"row_id":balance["row_id"],"selected":selected,"account_id":draft["account_id"],
@@ -199,8 +236,7 @@ def render(client,review_only=False):
                 if st.button(label,key="stmt_"+action+identity):
                     try:
                         result=actions.execute("stmt_"+action+identity,"POST",base+"/"+action,{"expected_version":item["row_version"]})
-                        if result["status"]=="committed":
-                            st.session_state["statement_last_result"]=result
+                        remember_result(result)
                         st.rerun()
                     except Exception as exc:
                         st.error(str(exc))

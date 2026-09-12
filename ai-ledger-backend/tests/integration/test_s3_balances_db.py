@@ -9,6 +9,27 @@ from app.repositories import simplified_schema as schema, spending as repo
 
 
 class TestS3BalancesDb(BaseDbTestCase):
+    def test_snapshot_lookup_is_account_scoped_and_omits_voided_evidence(self):
+        original=self.save(self.observation()).json()["snapshots"][0]
+        path=f"/api/v1/accounts/{self.account['id']}/snapshots"
+        found=self.client.get(path,params={"snapshot_id":original["id"],"limit":1})
+        self.assertEqual(found.status_code,200,found.text)
+        self.assertEqual([r["id"] for r in found.json()["items"]],[original["id"]])
+        self.assertIsNone(found.json()["next_cursor"])
+        other=schema.create_account(self.conn,self.hh,"Separate","separate cash","cash","CNY",opened_on=date(2026,1,1))
+        self.conn.commit()
+        wrong=self.client.get(f"/api/v1/accounts/{other['id']}/snapshots",params={"snapshot_id":original["id"]})
+        self.assertEqual(wrong.json()["items"],[])
+        missing=self.client.get(f"/api/v1/accounts/{uuid4()}/snapshots",params={"snapshot_id":original["id"]})
+        self.assertEqual(missing.status_code,404)
+        voided=self.client.post(f"/api/v1/snapshots/{original['id']}/void",json={"expected_version":0,
+            "expected_latest_snapshot_id":original["id"],"expected_account_version":0,"reason":"Wrong observation"},
+            headers={"Idempotency-Key":str(uuid4())})
+        self.assertEqual(voided.status_code,200,voided.text)
+        self.assertEqual(self.client.get(path,params={"snapshot_id":original["id"]}).json()["items"],[])
+        history=self.client.get(path,params={"snapshot_id":original["id"],"include_voided":True})
+        self.assertEqual(history.json()["items"][0]["status"],"voided")
+
     def seed_test_data(self):
         setup.TestS2SpendingDb.seed_test_data(self)
         self.account = schema.create_account(self.conn, self.hh, "Wallet", "wallet only", "cash", "CNY", risk_level="very_low", opened_on=date(2026,1,1))

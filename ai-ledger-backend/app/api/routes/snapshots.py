@@ -15,11 +15,13 @@ def save(payload: BalanceUpdate, actor=Depends(get_auth_context), conn=Depends(g
 
 @router.get("/accounts/{account_id}/snapshots")
 def snapshots(account_id: UUID, include_voided: bool = False, cursor: UUID | None = None,
+              snapshot_id: UUID | None = None,
               limit: int = Query(50, ge=1, le=200), actor=Depends(get_auth_context), conn=Depends(get_db_connection)):
     heads = service.head_fields(conn, actor.household_id, account_id)
     rows = repo.rows(conn, "SELECT * FROM account_snapshots WHERE household_id=%s AND account_id=%s "
-        "AND (%s OR status='active') AND (%s::uuid IS NULL OR id>%s) ORDER BY id LIMIT %s",
-        (actor.household_id, account_id, include_voided, cursor, cursor, limit+1))
+        "AND (%s OR status='active') AND (%s::uuid IS NULL OR id>%s) "
+        "AND (%s::uuid IS NULL OR id=%s) ORDER BY id LIMIT %s",
+        (actor.household_id, account_id, include_voided, cursor, cursor, snapshot_id, snapshot_id, limit+1))
     return {**heads, "items": [service.output(r) for r in rows[:limit]],
             "next_cursor": str(rows[limit-1]["id"]) if len(rows)>limit else None}
 

@@ -71,6 +71,45 @@ Narrow shared extensions: capture receipt reservation accepts a kind/operation
 binding accepts statement provenance/item identity (Shortcut defaults unchanged).
 The accepted 16-table baseline and migration files have **not changed**.
 
+## Current continuation — statement balance reuse and recovery
+
+The user pushed `30aff50`. Both GitHub runs 34691621535 and 34691619925
+**passed**, including PostgreSQL Integration, Migration & Concurrency, Unit,
+Dashboard and the aggregate Backend CI job. This closes the two previously
+reported CI defects; the older failure/permission notes below are historical.
+S3 still needs independent review and real household/model acceptance.
+
+This continuation:
+
+* Removes the first-200 observation limit in statement balance reuse. Observations
+  load in bounded pages of 50; selected IDs outside loaded pages are restored via
+  an optional `snapshot_id` filter on the existing account-scoped history endpoint.
+* Preserves the saved reuse selection when the form renders. A voided/unavailable
+  observation is shown explicitly rather than silently switching to a new record.
+  Server-side exact value/date/currency and current-head guards remain authoritative.
+* Restores saved counts and balance results after an unknown-outcome command retry,
+  by-key recovery, or cancellation that discovers the operation already committed.
+  Terminal results clear only the completed statement's cached target choices.
+* Adds an integration regression for account-scoped ID lookup, missing accounts,
+  voided evidence exclusion and explicit historical access. Adds five Dashboard
+  controller/AppTest cases for pagination, restored/unavailable selections and
+  idempotent retry results.
+
+Local Python 3.10.21 verification: **240 backend unit tests and 79 Dashboard tests
+passed**. The new integration regression awaits CI on this continuation commit;
+PostgreSQL remains unavailable locally. No migration/S1/S2 logic or model prompt
+was changed, and no staging/production deployment is included.
+
+Sync attempt after the user's plugin reconfiguration still failed: creating the
+Git tree returned HTTP 403 `Resource not accessible by integration`. Installation
+inspection lists only the GitHub App installation under `tianyili-outlook`; this
+repository is owned by `xuesishen9587-del`. Repository metadata reports push access
+for the connected account, but that does not establish App installation access
+on the repository owner's account. Restore the App authorization covering this
+repository under its owner, then push this checkpoint and inspect CI. Ordinary
+Git also lacks credentials in this host. A local commit/recovery bundle preserves
+the completed work; no successful push of this continuation is claimed.
+
 ## 2026-09-12 CI follow-up
 
 The user pushed `9f9a4b4`. GitHub run
@@ -198,8 +237,8 @@ can contain fixture tokens; they were removed and must not be committed.
 3. Finish UI acceptance/polish: the continuation adds the wealth-history chart and
    paged transaction/schedule target selection, with unit/AppTest checks. Real
    household chart interpretation, review clearing/retries, large target lists and
-   draft navigation still need acceptance. Snapshot-reuse selection in a statement
-   remains limited to its first 200 observations. Line editing is paged in groups
+   draft navigation still need acceptance. Snapshot-reuse selection now paginates
+   and restores saved choices; see the current continuation above. Line editing is paged in groups
    of 25; unsaved form edits must be saved before changing pages/search criteria.
 4. Validate document completeness messaging and account-scope overrides with users.
    Typed completeness signals cannot prove the model extracted every real row.

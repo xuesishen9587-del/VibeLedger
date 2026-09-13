@@ -104,8 +104,12 @@ rotation, cache expiry, unknown-key throttling, invalid key sets and production
 configuration. Thirteen new Dashboard cases cover login, refresh, cross-session
 isolation, logout, password clearing, navigation and preserved settings retries.
 Three new PostgreSQL cases exercise real JWT validation plus provisioned/unknown/
-disabled users and invalid claims; they await CI because PostgreSQL is unavailable
-locally. No migrations or database credentials were changed.
+disabled users and invalid claims. GitHub run
+[34732210699](https://github.com/xuesishen9587-del/VibeLedger/actions/runs/34732210699)
+on `a080c86` passed every job, including all **185 PostgreSQL integration tests**,
+Migration & Concurrency, Unit and Dashboard. PostgreSQL remains unavailable locally.
+No migrations or database credentials were changed. This follow-up records CI in
+documentation only; hosted acceptance remains outstanding.
 
 Before hosted use, follow [Supabase login setup](docs/deployment/SUPABASE_AUTH_SETUP.md).
 The operator must verify actual asymmetric key mode, configure the same project in

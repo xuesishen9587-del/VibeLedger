@@ -70,7 +70,7 @@ class Settings(BaseSettings):
     )
     AUTH_JWKS_URL: Optional[str] = Field(
         None,
-        description="Optional JWKS URL for external identity provider (disabled/mocked in tests)."
+        description="Pinned HTTPS JWKS URL matching AUTH_ISSUER; asymmetric verification uses bounded public-key caching."
     )
 
     # Use SettingsConfigDict for Pydantic v2 Settings configuration

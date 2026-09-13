@@ -811,8 +811,11 @@ module-global authenticated Supabase/API client. A disconnected/new session may
 require login again. Use Supabase publishable configuration, not a service-role key.
 Backend pins the configured project's issuer, audience and asymmetric algorithms,
 verifies against its JWKS, and refreshes keys with bounded caching on unknown kid.
-The current AUTH_JWKS_URL setting alone is not an implemented verifier. Retain
-injected/static verifiers only for tests and explicit isolated staging.
+The implemented verifier uses the configured HTTPS issuer plus
+`/.well-known/jwks.json`, a five-minute key cache and bounded 30-second unknown-key/
+outage refresh. Production requires JWKS and rejects static/HMAC fallback. Retain
+injected/static verifiers only for tests and explicit isolated staging. See
+[project setup and hosted checks](../deployment/SUPABASE_AUTH_SETUP.md).
 
 Supabase provides [password sign-in](https://supabase.com/docs/guides/auth/passwords)
 and [asymmetric JWT signing keys](https://supabase.com/docs/guides/auth/signing-keys);

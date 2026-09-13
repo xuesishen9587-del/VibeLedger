@@ -1,6 +1,6 @@
 # VibeLedger project handoff
 
-Updated: **2026-09-12**.
+Updated: **2026-09-13**.
 
 ## Authority and accepted baseline
 
@@ -71,7 +71,51 @@ Narrow shared extensions: capture receipt reservation accepts a kind/operation
 binding accepts statement provenance/item identity (Shortcut defaults unchanged).
 The accepted 16-table baseline and migration files have **not changed**.
 
-## Current continuation — S4 investment interval inputs and Review
+## Current continuation — four-page Dashboard and consumer authentication
+
+Parent `4e8459f` is synced and both GitHub runs 34706265139 and 34706264249 passed.
+This 2026-09-13 continuation implements the remaining S4 navigation/authentication
+code while preserving outstanding S3/S4 independent and hosted acceptance gates.
+
+* Dashboard now has Wealth, Spending, Review and Settings. Investment flows remain
+  in Wealth and Review; statement import is a Spending section. Legacy cash-flow,
+  separate investment and Audit-center destinations are removed from normal UI.
+* The accepted account/category settings code is extracted into settings_page.py.
+  Settings refresh now preserves unknown-outcome command keys. Account/category
+  history and device creation/revocation are available in Settings. A new device
+  credential is displayed only in its creation response for Shortcut provisioning.
+* Email/password grants go directly to the configured Supabase Auth project using
+  the existing HTTP client dependency. Only a publishable project key is accepted;
+  backend membership is checked before a financial session is established. No
+  registration or custom backend password endpoint is added.
+* Access/refresh tokens and clients are isolated per Streamlit session. Password
+  widgets clear after submission. Expiry refresh preserves unknown-outcome commands
+  on transient failure; same-user reauthentication restores them, while account
+  switching/logout clears old data. Local-scope signout does not log out other
+  devices; remote failure still clears this local session and is reported safely.
+* Backend JWKS verification pins issuer/audience/asymmetric algorithms and the
+  HTTPS project key URL, uses a five-minute public-key cache and 30-second bounds
+  for unknown-key/outage refresh. Production has no static/HMAC fallback. Existing
+  verified-subject membership, disabled-user and device rules remain authoritative.
+
+Local Python 3.10.21 verification: **255 backend unit tests and 99 Dashboard tests
+passed**. Seven new cryptographic unit cases cover claims, signature, ES256/RS256
+rotation, cache expiry, unknown-key throttling, invalid key sets and production
+configuration. Thirteen new Dashboard cases cover login, refresh, cross-session
+isolation, logout, password clearing, navigation and preserved settings retries.
+Three new PostgreSQL cases exercise real JWT validation plus provisioned/unknown/
+disabled users and invalid claims; they await CI because PostgreSQL is unavailable
+locally. No migrations or database credentials were changed.
+
+Before hosted use, follow [Supabase login setup](docs/deployment/SUPABASE_AUTH_SETUP.md).
+The operator must verify actual asymmetric key mode, configure the same project in
+both services, provision/map the two users and disable public signup. None of those
+remote changes or a deployment was performed here. Consequently SEC-02/UI-01 and
+S3/S4 formal acceptance remain pending. S5 legacy backend removal, scheduler/runtime
+packaging and staging/production cutover remain separate future work.
+
+## Previous continuation — S4 investment interval inputs and Review
+
 
 The user explicitly removed the five-hour quota monitoring requirement on
 2026-09-12. Continue normal development and sync completed checkpoints; do not

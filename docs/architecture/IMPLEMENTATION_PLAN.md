@@ -176,8 +176,11 @@ independent of whether all household spending has been captured.
 
 Implementation checkpoint **2026-09-12**: investment interval inputs, derived
 native gains and unusual-change Review plus Dashboard forms are implemented.
-S4 is **in progress**: investment slice CI passed on `ef59863`; four-page consolidation,
-consumer authentication/JWKS, independent and household acceptance remain open.
+S4 is **in progress**: investment slice CI passed on `ef59863`. The 2026-09-13
+continuation implements four-page navigation and session login/refresh/logout with
+pinned JWKS verification. Its new real-DB cases await CI; actual Supabase project
+configuration, hosted two-user/key-rotation and independent/household acceptance
+remain open. See the consumer authentication setup document before hosted use.
 S3 live/independent acceptance remains outstanding separately. See the current
 handoff for exact verification evidence; a passing slice is not S4 acceptance.
 

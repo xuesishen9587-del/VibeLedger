@@ -1,6 +1,26 @@
 # VibeLedger project handoff
 
-Updated: **2026-09-13**.
+Updated: **2026-09-14**.
+
+## Deployment Readiness checkpoint — 2026-09-14
+
+Bounded continuation from `9ef170ca8d9383834e7f64184743108c22b2d902` on
+`experiment/astra-simplified`: complete Dashboard container packaging, Python 3.13
+for backend/Dashboard images and CI, and a required container smoke job. See
+[Deployment Readiness](docs/deployment/DEPLOYMENT_READINESS.md) for verification
+commands and isolated hosted acceptance prerequisites. S1/S2 remain accepted;
+S3/S4 are substantially implemented with real-device/hosted acceptance pending.
+No S5 work or hosted deployment is included.
+
+Local verification passed on Python **3.13.15** in the built images: **255 backend
+unit, 185 PostgreSQL integration, 5 migration, 9 concurrency and 99 Dashboard tests**
+(553 total). Both image builds and the combined container smoke check passed,
+including migrated database readiness, Streamlit health, runtime imports and real
+packaged entry-point execution. No Python 3.13 dependency incompatibility was found.
+The backend readiness response intentionally reports Gemini unavailable/degraded
+because this disposable check uses no live model credential. Exact commit and CI
+run evidence is reported with the pushed checkpoint; these local results do not
+claim hosted or live-model acceptance.
 
 ## Authority and accepted baseline
 

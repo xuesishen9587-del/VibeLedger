@@ -13,6 +13,216 @@ MAX_BYTES=20*1024*1024
 PARSER_VERSION="simplified-statement-v1"
 
 
+_STATEMENT_TRANSPORT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "account_hint": {
+            "type": ["string", "null"],
+        },
+        "account_currency": {
+            "type": ["string", "null"],
+        },
+        "account_confidence": {
+            "type": "number",
+        },
+        "period_start": {
+            "type": ["string", "null"],
+        },
+        "period_end": {
+            "type": ["string", "null"],
+        },
+        "lines": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "occurred_on": {
+                        "type": ["string", "null"],
+                    },
+                    "posted_on": {
+                        "type": ["string", "null"],
+                    },
+                    "amount": {
+                        "type": ["string", "null"],
+                    },
+                    "currency": {
+                        "type": ["string", "null"],
+                    },
+                    "merchant": {
+                        "type": ["string", "null"],
+                    },
+                    "kind": {
+                        "type": "string",
+                        "enum": [
+                            "expense",
+                            "refund",
+                            "fee",
+                            "transfer",
+                            "repayment",
+                            "income",
+                            "opening_balance",
+                            "investment_trade",
+                            "unknown",
+                        ],
+                    },
+                    "provider_transaction_id": {
+                        "type": ["string", "null"],
+                    },
+                    "category": {
+                        "type": ["string", "null"],
+                    },
+                    "confidence": {
+                        "type": "object",
+                        "properties": {
+                            "amount": {"type": "number"},
+                            "currency": {"type": "number"},
+                            "date": {"type": "number"},
+                            "intent": {"type": "number"},
+                            "category": {"type": "number"},
+                        },
+                        "required": [
+                            "amount",
+                            "currency",
+                            "date",
+                            "intent",
+                            "category",
+                        ],
+                    },
+                },
+                "required": [
+                    "occurred_on",
+                    "posted_on",
+                    "amount",
+                    "currency",
+                    "merchant",
+                    "kind",
+                    "provider_transaction_id",
+                    "category",
+                    "confidence",
+                ],
+            },
+        },
+        "closing_balance": {
+            "anyOf": [
+                {
+                    "type": "object",
+                    "properties": {
+                        "row_id": {
+                            "type": "string",
+                        },
+                        "label": {
+                            "type": "string",
+                        },
+                        "account": {
+                            "type": ["string", "null"],
+                        },
+                        "amount": {
+                            "type": ["string", "null"],
+                        },
+                        "currency": {
+                            "type": ["string", "null"],
+                        },
+                        "meaning": {
+                            "type": "string",
+                            "enum": [
+                                "asset",
+                                "debt",
+                                "overpayment",
+                                "total",
+                                "unsupported",
+                            ],
+                        },
+                        "debt_scope": {
+                            "type": "string",
+                            "enum": [
+                                "total_debt",
+                                "outstanding_principal",
+                                "monthly_bill",
+                                "unknown",
+                            ],
+                        },
+                        "as_of": {
+                            "type": ["string", "null"],
+                        },
+                        "current_screen": {
+                            "type": "boolean",
+                        },
+                        "display_unit": {
+                            "type": "string",
+                        },
+                        "approximate": {
+                            "type": "boolean",
+                        },
+                        "overlap_uncertain": {
+                            "type": "boolean",
+                        },
+                        "confidence": {
+                            "type": "object",
+                            "properties": {
+                                "amount": {"type": "number"},
+                                "currency": {"type": "number"},
+                                "account": {"type": "number"},
+                                "scope": {"type": "number"},
+                                "date": {"type": "number"},
+                            },
+                            "required": [
+                                "amount",
+                                "currency",
+                                "account",
+                                "scope",
+                                "date",
+                            ],
+                        },
+                    },
+                    "required": [
+                        "row_id",
+                        "label",
+                        "account",
+                        "amount",
+                        "currency",
+                        "meaning",
+                        "debt_scope",
+                        "as_of",
+                        "current_screen",
+                        "display_unit",
+                        "approximate",
+                        "overlap_uncertain",
+                        "confidence",
+                    ],
+                },
+                {
+                    "type": "null",
+                },
+            ],
+        },
+        "processed_pages": {
+            "type": "array",
+            "items": {
+                "type": "integer",
+            },
+        },
+        "expected_line_count": {
+            "type": "integer",
+        },
+        "complete": {
+            "type": "boolean",
+        },
+    },
+    "required": [
+        "account_hint",
+        "account_currency",
+        "account_confidence",
+        "period_start",
+        "period_end",
+        "lines",
+        "closing_balance",
+        "processed_pages",
+        "expected_line_count",
+        "complete",
+    ],
+}
+
+
 class StatementDocumentParser:
     def parse(self,content,password,account,categories):
         started=time.monotonic()
@@ -69,7 +279,7 @@ account scope. A credit monthly bill is not total debt. Never infer capital flow
         context={"account":{k:account.get(k) for k in ("id","name","currency","account_type","balance_scope","aliases")},
                  "categories":[{k:c.get(k) for k in ("name","description")} for c in categories]}
         with genai.Client(api_key=os.environ.get("GEMINI_API_KEY"),http_options=types.HttpOptions(timeout=timeout*1000,retry_options=types.HttpRetryOptions(attempts=1))) as client:
-            response=client.models.generate_content(model=os.environ.get("GEMINI_MODEL","gemini-2.5-flash"),
+            response=client.models.generate_content(model=os.environ.get("GEMINI_MODEL","gemini-3.5-flash-lite"),
                 contents=[types.Part.from_bytes(data=document,mime_type="application/pdf"),json.dumps(context,default=str)],
-                config=types.GenerateContentConfig(system_instruction=instruction,response_mime_type="application/json",response_schema=StatementExtraction,temperature=0.1))
+                config=types.GenerateContentConfig(system_instruction=instruction,response_mime_type="application/json",response_json_schema=_STATEMENT_TRANSPORT_SCHEMA,temperature=0.1))
             return StatementExtraction.model_validate_json(response.text)

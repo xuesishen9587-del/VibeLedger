@@ -93,7 +93,7 @@ function StatementUpload() {
       <div className="upload-icon">
         <FileUp size={28} />
       </div>
-      <h2>一份账单，轻松记好一个月。</h2>
+      <h2>上传 PDF 账单</h2>
       <p>上传 PDF，先看识别结果，再一次确认导入。</p>
       {!pending && <ErrorBox error={error} />}
       {pending ? (
@@ -624,7 +624,7 @@ export function StatementWorkspace({
     onReceipt(r);
     if (r.status === "committed") {
       sessionStorage.removeItem(storageKey);
-      notify("整份账单已保存");
+      notify("账单已导入");
       refresh();
     }
   };
@@ -1053,8 +1053,7 @@ export function StatementPage({ identity }: { identity?: string }) {
   return (
     <>
       <Heading
-        eyebrow="A MONTH, ALL TOGETHER"
-        title={identity ? "一起核对这份账单" : "导入账单"}
+        title={identity ? "核对账单" : "导入账单"}
         actions={
           identity ? (
             <Button onClick={() => navigate("/statement")}>
@@ -1065,8 +1064,8 @@ export function StatementPage({ identity }: { identity?: string }) {
         }
       >
         {identity
-          ? "扫一眼日常消费，把注意力留给需要检查的几笔。"
-          : "少一点重复输入，多一点自己的时间。"}
+          ? "核对标出的疑问，确认后导入整份账单。"
+          : "上传 PDF，核对后批量导入交易。"}
       </Heading>
       {!identity ? (
         <>
@@ -1120,7 +1119,7 @@ export function StatementPage({ identity }: { identity?: string }) {
           <Check size={36} />
           <h2>
             {receipt.status === "committed"
-              ? "这份账单，记好了。"
+              ? "账单已导入"
               : receipt.status === "processing"
                 ? "还在识别账单…"
                 : receipt.status === "rejected"
@@ -1144,7 +1143,7 @@ export function StatementPage({ identity }: { identity?: string }) {
                 : navigate("/spending")
             }
           >
-            {receipt.status === "processing" ? "查询结果" : "看看日常支出"}
+            {receipt.status === "processing" ? "查询结果" : "查看日常支出"}
           </Button>
         </Card>
       )}

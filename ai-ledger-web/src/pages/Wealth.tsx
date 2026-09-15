@@ -133,7 +133,7 @@ function BalanceEditor({
   const { accounts, api, refresh, notify } = useApp();
   const [selected, setSelected] = useState(account ? [account.id] : []);
   return (
-    <Modal title="给账户更新一下余额" onClose={onClose}>
+    <Modal title="更新余额" onClose={onClose}>
       <ActionForm
         label="保存本次余额"
         disabled={!selected.length}
@@ -162,7 +162,7 @@ function BalanceEditor({
             { observations },
             "更新账户余额",
           );
-          notify("家里的余额更新好了");
+          notify("余额已更新");
           refresh();
           onClose();
         }}
@@ -486,7 +486,6 @@ export function WealthPage() {
   return (
     <>
       <Heading
-        eyebrow="GROWING OUR LITTLE WORLD"
         title="家庭财富"
         actions={
           <>
@@ -496,12 +495,12 @@ export function WealthPage() {
             </Button>
             <Button kind="primary" onClick={() => setBalance(true)}>
               <Plus size={16} />
-              更新余额
+              批量更新余额
             </Button>
           </>
         }
       >
-        家里的钱放在哪里，我们一起心里有数。
+        查看账户余额、资产和负债。
       </Heading>
       <ErrorBox error={report.error || error} retry={report.reload} />
       {report.loading ? (
@@ -522,7 +521,7 @@ export function WealthPage() {
             )}
             <div className="section-heading">
               <h2>
-                家里的账户{" "}
+                账户{" "}
                 <span className="count">
                   {accounts.filter((a) => a.status === "active").length}
                 </span>
@@ -598,6 +597,7 @@ export function WealthPage() {
                       历史
                     </Button>
                     <Button
+                      aria-label={`更新余额：${a.name}`}
                       onClick={() =>
                         setBalance(accounts.find((x) => x.id === a.account_id)!)
                       }
@@ -611,13 +611,13 @@ export function WealthPage() {
             </div>
             {!report.data.accounts.length && (
               <Card>
-                <Empty title="先把家里的账户加进来">
+                <Empty title="还没有账户">
                   <a href="#/settings">添加第一个账户</a>
                 </Empty>
               </Card>
             )}
             <div className="two-columns">
-              <Card title="家底的变化">
+              <Card title="净资产变化">
                 {history.data ? (
                   <WealthHistory points={history.data.points} />
                 ) : history.error ? (
@@ -626,7 +626,7 @@ export function WealthPage() {
                   <Loading />
                 )}
               </Card>
-              <Card title="资产的稳健与波动">
+              <Card title="资产风险分布">
                 <div className="risk-list">
                   {report.data.risk_buckets.map((r, i) => (
                     <div key={r.risk_level}>
@@ -649,7 +649,7 @@ export function WealthPage() {
           </>
         )
       )}
-      <Card title="投资这段时间的变化">
+      <Card title="投资收益">
         <ErrorBox error={investments.error} retry={investments.reload} />
         {investments.data?.items.length ? (
           investments.data.items.map((i) => (
@@ -674,7 +674,7 @@ export function WealthPage() {
             </button>
           ))
         ) : (
-          <Empty title="更新两次投资余额，就能看看变化" />
+          <Empty title="至少记录两次投资余额后，可查看收益" />
         )}
         <p className="small muted">
           估算收益暂按没有额外投入或取出计算。点开一段时间，补充投入与取出后会重新计算。不同币种分开查看。

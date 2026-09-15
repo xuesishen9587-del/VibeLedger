@@ -4,7 +4,6 @@ import {
   FileText,
   Image,
   ChevronRight,
-  Check,
   CalendarDays,
 } from "lucide-react";
 import { useApp, useResource, navigate } from "../lib/context";
@@ -193,7 +192,7 @@ function CaptureEditor({
             }
           }
           refresh();
-          notify(discard ? "已放弃这次识别" : "保存好了");
+          notify(discard ? "已放弃这次识别" : "已保存");
           onClose();
         }}
       >
@@ -587,11 +586,10 @@ export function ReviewPage({ identity }: { identity?: string }) {
   return (
     <>
       <Heading
-        eyebrow="A LITTLE CARE FOR OUR HOME"
         title="待处理"
-        actions={<Tag tone="amber">{total} 件小事</Tag>}
+        actions={<Tag tone="amber">{total} 项待处理</Tag>}
       >
-        只把真正需要你看一眼的事情，留在这里。
+        核对有疑问的记录，补充缺少的信息。
       </Heading>
       <Card>
         <div className="tabs review-tabs">
@@ -724,11 +722,7 @@ export function ReviewPage({ identity }: { identity?: string }) {
               ))}
           </>
         ) : (
-          !active.error && (
-            <Empty title="这一栏都整理好了">
-              <Check size={18} /> 把时间留给生活吧。
-            </Empty>
-          )
+          !active.error && <Empty title="这一栏暂无待处理事项" />
         )}
         <div className="pagination">
           {cursor && (

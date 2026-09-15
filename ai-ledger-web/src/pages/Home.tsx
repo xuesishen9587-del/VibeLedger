@@ -2,7 +2,7 @@ import {
   ArrowUpRight,
   FileUp,
   Plus,
-  Leaf,
+  Wallet,
   ArrowRight,
   Clock3,
   Check,
@@ -41,8 +41,7 @@ export function Home() {
   return (
     <>
       <Heading
-        eyebrow="A LITTLE EVERYDAY, A LITTLE TOGETHER"
-        title="我们的小日子，心里都有数。"
+        title="总览"
         actions={
           <>
             <Button onClick={() => navigate("/statement")}>
@@ -56,7 +55,7 @@ export function Home() {
           </>
         }
       >
-        一起看看，最近的生活攒下了什么。
+        本月支出、家庭资产和待处理事项。
       </Heading>
       <ErrorBox error={wealth.error} retry={wealth.reload} />
       {wealth.loading ? (
@@ -72,7 +71,7 @@ export function Home() {
                 {wealth.data.coverage.missing_fx_currencies.length
                   ? "，部分币种暂缺汇率"
                   : ""}
-                。补齐后就能看到完整的家底。
+                。补齐后可查看完整的资产总额。
                 <LinkButton to="/wealth">去更新</LinkButton>
               </div>
             )}
@@ -81,7 +80,7 @@ export function Home() {
       )}
       <div className="home-grid">
         <Card
-          title="这个月，钱花在哪里"
+          title="本月支出分类"
           action={<LinkButton to="/spending">查看支出</LinkButton>}
         >
           {spending.loading ? (
@@ -104,7 +103,7 @@ export function Home() {
                 </div>
                 <span className="month-stamp">
                   {Number(range.from.slice(5, 7))}
-                  <small>月的生活</small>
+                  <small>月</small>
                 </span>
               </div>
               <CategoryChart report={spending.data} />
@@ -114,7 +113,7 @@ export function Home() {
           )}
         </Card>
         <div className="home-aside">
-          <Card title="留一点时间，打理小家" className="attention-card">
+          <Card title="待处理" className="attention-card">
             <div className="attention-icon">
               {count ? <Clock3 /> : <Check />}
             </div>
@@ -122,12 +121,12 @@ export function Home() {
               {review.error
                 ? "暂时读不到待办"
                 : count
-                  ? `${count} 件小事，等你看一眼`
-                  : "都整理好了，安心过日子。"}
+                  ? `${count} 项待处理`
+                  : "暂无待处理事项"}
             </h3>
             <p>
               {count
-                ? "处理完这些，账本就更清楚一点。"
+                ? "有记录需要核对或补充。"
                 : "新的待处理事项会出现在这里。"}
             </p>
             <LinkButton to="/review">
@@ -135,18 +134,16 @@ export function Home() {
             </LinkButton>
           </Card>
           <Card className="soft-card">
-            <Leaf size={24} />
-            <h3>慢慢积累，也是一种幸福。</h3>
-            <p>
-              不必每天计算所有余额。每隔一段时间，给家里的账户更新一下就好。
-            </p>
-            <LinkButton to="/wealth">看看家庭财富</LinkButton>
+            <Wallet size={24} />
+            <h3>账户余额</h3>
+            <p>余额变化后，可在家庭财富中更新记录。</p>
+            <LinkButton to="/wealth">查看家庭财富</LinkButton>
           </Card>
         </div>
       </div>
       <div className="two-columns">
         <Card
-          title="最近的生活记录"
+          title="最近交易"
           action={<LinkButton to="/spending">全部记录</LinkButton>}
         >
           {recent.data?.items.length ? (
@@ -180,11 +177,11 @@ export function Home() {
           ) : recent.error ? (
             <ErrorBox error={recent.error} retry={recent.reload} />
           ) : (
-            <Empty title="从一笔小小的记录开始" />
+            <Empty title="暂无交易记录" />
           )}
         </Card>
         <Card
-          title="账户的小提醒"
+          title="账户提醒"
           action={<LinkButton to="/wealth">全部账户</LinkButton>}
         >
           {wealth.data?.accounts
@@ -216,9 +213,7 @@ export function Home() {
             ) && (
               <div className="calm-message">
                 <Check size={22} />
-                <p>
-                  账户余额都有记录。<small>下一次更新，继续在这里相见。</small>
-                </p>
+                <p>暂无余额更新提醒。</p>
               </div>
             )}
         </Card>

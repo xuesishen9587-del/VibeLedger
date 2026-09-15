@@ -60,7 +60,7 @@ export function ScheduleEditor({
           ? "把这笔全额消费改为分期"
           : item
             ? "修改月度计划"
-            : "添一个月度计划"
+            : "新建月度计划"
       }
       onClose={onClose}
     >
@@ -118,7 +118,7 @@ export function ScheduleEditor({
         </>
       ) : (
         <ActionForm
-          label={item ? "保存修改" : "看看记账安排"}
+          label={item ? "保存修改" : "预览记账安排"}
           onSave={async (f) => {
             setSavedForm(
               Object.fromEntries(
@@ -168,7 +168,7 @@ export function ScheduleEditor({
                   sourceDraft?.merchant ||
                   "",
               )}
-              placeholder="房租、订阅，或一件心仪的家电"
+              placeholder="比如：房租、订阅、家电分期"
             />
           </Field>
           <div className="form-grid">
@@ -325,7 +325,7 @@ export function Schedules() {
   return (
     <>
       <Card
-        title="每个月，按计划记好"
+        title="月度计划"
         action={
           <Button kind="primary" onClick={() => setEdit(true)}>
             <Plus size={15} />
@@ -334,7 +334,7 @@ export function Schedules() {
         }
       >
         <p className="muted">
-          房租、订阅和分期，不必反复填写。已到期但可能重复的消费，会请你再看一眼。
+          记录房租、订阅和分期消费。到期后可能重复的记录会放入待处理。
         </p>
         <ErrorBox error={list.error || error} retry={list.reload} />
         <Button
@@ -408,7 +408,7 @@ export function Schedules() {
             </div>
           ))
         ) : (
-          <Empty title="给每月的固定花费一个安排" />
+          <Empty title="暂无月度计划" />
         )}
         {list.data?.next_cursor && (
           <Button onClick={() => setCursor(list.data!.next_cursor)}>

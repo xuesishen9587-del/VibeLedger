@@ -13,12 +13,14 @@ export function Button({
   kind = "",
   disabled = false,
   type = "button",
+  "aria-label": ariaLabel,
 }: {
   children: ReactNode;
   onClick?: () => void;
   kind?: string;
   disabled?: boolean;
   type?: "button" | "submit";
+  "aria-label"?: string;
 }) {
   return (
     <button
@@ -26,6 +28,7 @@ export function Button({
       className={"button " + kind}
       disabled={disabled}
       onClick={onClick}
+      aria-label={ariaLabel}
     >
       {children}
     </button>
@@ -100,7 +103,7 @@ export function Heading({
   children,
   actions,
 }: {
-  eyebrow: string;
+  eyebrow?: string;
   title: string;
   children?: ReactNode;
   actions?: ReactNode;
@@ -108,7 +111,7 @@ export function Heading({
   return (
     <header className="page-heading">
       <div>
-        <span className="eyebrow">{eyebrow}</span>
+        {eyebrow && <span className="eyebrow">{eyebrow}</span>}
         <h1>{title}</h1>
         {children && <p>{children}</p>}
       </div>

@@ -108,8 +108,16 @@ const totals = {
 };
 async function setup(
   page: Page,
-  { count = 42, uncertain = false, shortExpiry = false } = {},
+  {
+    count = 42,
+    uncertain = false,
+    shortExpiry = false,
+    multipleAccounts = false,
+  } = {},
 ) {
+  const accounts = multipleAccounts
+    ? [account, { ...account, id: "second-account", name: "备用信用卡" }]
+    : [account];
   let receipt = statement(count, uncertain);
   const writes: { path: string; body: any }[] = [];
   let refreshes = 0;
@@ -176,7 +184,7 @@ async function setup(
     const body = method === "GET" ? null : r.request().postDataJSON();
     if (method !== "GET") writes.push({ path, body });
     let data: unknown = { items: [], next_cursor: null };
-    if (path === "/accounts") data = { items: [account], next_cursor: null };
+    if (path === "/accounts") data = { items: accounts, next_cursor: null };
     else if (path === "/categories")
       data = { items: categories, next_cursor: null };
     else if (path === "/reports/wealth")
@@ -190,21 +198,19 @@ async function setup(
         known_assets: "286542.80",
         known_liabilities: "8236.50",
         known_net_worth: "278306.30",
-        accounts: [
-          {
-            account_id: "account",
-            name: account.name,
-            account_type: "credit",
-            currency: "CNY",
-            balance: "-8236.50",
-            converted_amount: "-8236.50",
-            as_of: "2026-09-01T00:00:00Z",
-            age_days: 14,
-            needs_update: false,
-            very_stale: false,
-            balance_scope: account.balance_scope,
-          },
-        ],
+        accounts: accounts.map((account) => ({
+          account_id: account.id,
+          name: account.name,
+          account_type: "credit",
+          currency: "CNY",
+          balance: "-8236.50",
+          converted_amount: "-8236.50",
+          as_of: "2026-09-01T00:00:00Z",
+          age_days: 14,
+          needs_update: false,
+          very_stale: false,
+          balance_scope: account.balance_scope,
+        })),
         risk_buckets: [
           { risk_level: "low", amount: "286542.80", percentage: "100" },
         ],
@@ -299,10 +305,8 @@ async function login(page: Page) {
   await page.goto("/");
   await page.getByLabel("邮箱", { exact: true }).fill("test@example.com");
   await page.getByLabel("密码", { exact: true }).fill("fixture-password");
-  await page.getByRole("button", { name: "进入我们的账本" }).click();
-  await expect(
-    page.getByRole("heading", { name: "我们的小日子，心里都有数。" }),
-  ).toBeVisible();
+  await page.getByRole("button", { name: "登录" }).click();
+  await expect(page.getByRole("heading", { name: "总览" })).toBeVisible();
 }
 test("persistent login, desktop homepage and deep-link restore, logout clears session", async ({
   page,
@@ -314,9 +318,7 @@ test("persistent login, desktop homepage and deep-link restore, logout clears se
     fullPage: true,
   });
   await page.reload();
-  await expect(
-    page.getByRole("heading", { name: "我们的小日子，心里都有数。" }),
-  ).toBeVisible();
+  await expect(page.getByRole("heading", { name: "总览" })).toBeVisible();
   await page
     .getByRole("navigation", { name: "主要导航" })
     .getByRole("link", { name: "家庭财富" })
@@ -326,10 +328,46 @@ test("persistent login, desktop homepage and deep-link restore, logout clears se
     page.getByRole("heading", { name: "家庭财富", exact: true }),
   ).toBeVisible();
   await page.getByRole("button", { name: "退出登录", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "欢迎回家" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "登录" })).toBeVisible();
   await page.reload();
-  await expect(page.getByRole("heading", { name: "欢迎回家" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "登录" })).toBeVisible();
 });
+test("balance actions distinguish batch entry from each account after cards load", async ({
+  page,
+}) => {
+  await setup(page, { multipleAccounts: true });
+  await login(page);
+  await page.goto("/#/wealth");
+  const batch = page.getByRole("button", { name: "批量更新余额", exact: true });
+  for (const name of ["家庭信用卡", "备用信用卡"]) {
+    const single = page.getByRole("button", {
+      name: `更新余额：${name}`,
+      exact: true,
+    });
+    await expect(single).toBeVisible();
+    await expect(batch).toHaveCount(1);
+    await single.click();
+    const dialog = page.getByRole("dialog", { name: "更新余额", exact: true });
+    await expect(
+      dialog.getByRole("checkbox", { name: `${name} CNY`, exact: true }),
+    ).toBeChecked();
+    await expect(dialog.getByRole("checkbox", { checked: true })).toHaveCount(
+      1,
+    );
+    await dialog.getByRole("button", { name: "关闭", exact: true }).click();
+  }
+  await batch.click();
+  const dialog = page.getByRole("dialog", { name: "更新余额", exact: true });
+  await expect(dialog.getByRole("checkbox", { checked: true })).toHaveCount(0);
+  await dialog
+    .getByRole("checkbox", { name: "家庭信用卡 CNY", exact: true })
+    .check();
+  await dialog
+    .getByRole("checkbox", { name: "备用信用卡 CNY", exact: true })
+    .check();
+  await expect(dialog.getByRole("checkbox", { checked: true })).toHaveCount(2);
+});
+
 test("42-row statement shows at least 10 complete rows and imports with one confirmation", async ({
   page,
 }) => {
@@ -350,9 +388,7 @@ test("42-row statement shows at least 10 complete rows and imports with one conf
   });
   expect(visible).toBeGreaterThanOrEqual(10);
   await page.getByRole("button", { name: "确认导入整份账单" }).click();
-  await expect(
-    page.getByRole("heading", { name: "这份账单，记好了。" }),
-  ).toBeVisible();
+  await expect(page.getByRole("heading", { name: "账单已导入" })).toBeVisible();
   expect(state.writes.filter((w) => w.path.endsWith("/confirm"))).toHaveLength(
     1,
   );
@@ -378,9 +414,7 @@ test("100 rows retain inline edits across filters and reload; confirmation uses 
     "88.80",
   );
   await page.getByRole("button", { name: "确认导入整份账单" }).click();
-  await expect(
-    page.getByRole("heading", { name: "这份账单，记好了。" }),
-  ).toBeVisible();
+  await expect(page.getByRole("heading", { name: "账单已导入" })).toBeVisible();
   const patch = state.writes.find((w) => w.path.endsWith("/draft"))!;
   expect(patch.body.lines[0].confirm_facts).toBe(true);
   expect(patch.body.lines[1].original_amount).toBe("88.80");
@@ -430,7 +464,7 @@ test("an expiring login is renewed by the auth SDK without losing the open page"
   await expect(
     page.getByRole("heading", { name: "家庭财富", exact: true }),
   ).toBeVisible();
-  await expect(page.getByRole("heading", { name: "欢迎回家" })).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "登录" })).toHaveCount(0);
 });
 
 test("logging out clears open financial views and local draft data in the other tab", async ({
@@ -445,14 +479,14 @@ test("logging out clears open financial views and local draft data in the other 
   await expect(other.getByTestId("statement-row")).toHaveCount(42);
   await other.getByLabel("第 2 笔金额", { exact: true }).fill("99.90");
   await page.getByRole("button", { name: "退出登录", exact: true }).click();
-  await expect(other.getByRole("heading", { name: "欢迎回家" })).toBeVisible();
+  await expect(other.getByRole("heading", { name: "登录" })).toBeVisible();
   expect(
     await other.evaluate(() =>
       Object.keys(sessionStorage).filter((k) => k.startsWith("vl-")),
     ),
   ).toEqual([]);
   await other.reload();
-  await expect(other.getByRole("heading", { name: "欢迎回家" })).toBeVisible();
+  await expect(other.getByRole("heading", { name: "登录" })).toBeVisible();
 });
 
 test("a PDF password error returns to upload instead of opening a failed draft", async ({

@@ -13,11 +13,16 @@ React candidate, test results, limitations and exact continuation priorities in
 [FRONTEND_PROGRESS](docs/architecture/FRONTEND_PROGRESS.md). The new frontend lives
 in `ai-ledger-web`; Streamlit remains the fallback. No hosted cutover is claimed.
 
-Docker is now available. Local verification: 264 backend unit, 187 PostgreSQL
-integration, 99 legacy Dashboard, 12 frontend logic, 3 proxy, 7 browser scenarios,
-and 1 browser-to-real-API/JWT/PostgreSQL workflow passed. See FRONTEND_PROGRESS
-for the remaining hosted acceptance and less-common workflow tests. All changes
-are still uncommitted in this working tree.
+Docker is available. The `7088962` baseline passed 264 backend unit, 187 PostgreSQL
+integration and 99 legacy Dashboard tests locally. This frontend follow-up passed
+the build, 12 frontend logic tests, 3 proxy tests, 8 browser scenarios and 1
+browser-to-real-API/JWT/PostgreSQL workflow. See FRONTEND_PROGRESS for the remaining
+hosted acceptance and less-common workflow tests. The frontend was committed and
+pushed as `7088962`; Draft PR #17 remains open. Its push Web CI
+passed, but the subsequent PR Web CI failed when both balance buttons had the
+accessible name “更新余额”. The focused follow-up distinguishes batch/account
+actions, tests the fully loaded cards, and removes promotional copy. Current CI
+results must be checked on the current commit; hosted acceptance remains pending.
 
 
 Updated: **2026-09-14**.

@@ -21,10 +21,8 @@ test("browser → same-origin proxy → JWT-protected API → PostgreSQL writes 
   await page.goto("/");
   await page.getByLabel("邮箱", { exact: true }).fill("test@example.com");
   await page.getByLabel("密码", { exact: true }).fill("fixture-only");
-  await page.getByRole("button", { name: "进入我们的账本" }).click();
-  await expect(
-    page.getByRole("heading", { name: "我们的小日子，心里都有数。" }),
-  ).toBeVisible();
+  await page.getByRole("button", { name: "登录" }).click();
+  await expect(page.getByRole("heading", { name: "总览" })).toBeVisible();
   await page.goto("/#/spending/new");
   const editor = page.getByRole("dialog");
   await editor.getByLabel("金额", { exact: true }).fill("88.80");
@@ -37,10 +35,14 @@ test("browser → same-origin proxy → JWT-protected API → PostgreSQL writes 
   await editor
     .getByLabel("商户 / 用途", { exact: true })
     .fill("真实接口测试晚餐");
-  await editor.getByRole("button", { name: "记好了", exact: true }).click();
+  await editor.getByRole("button", { name: "保存记录", exact: true }).click();
   await expect(editor).toHaveCount(0);
   await page.goto("/#/wealth");
-  await page.getByRole("button", { name: "更新余额", exact: true }).click();
+  // Wait for the account action as well as the page header: this caught the CI race.
+  await expect(
+    page.getByRole("button", { name: "更新余额：验收钱包", exact: true }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "批量更新余额", exact: true }).click();
   await page.getByRole("dialog").getByLabel("验收钱包 CNY").check();
   await page
     .getByRole("dialog")
@@ -49,26 +51,20 @@ test("browser → same-origin proxy → JWT-protected API → PostgreSQL writes 
   await page.getByRole("button", { name: "保存本次余额" }).click();
   await expect(page.getByRole("dialog")).toHaveCount(0);
   await page.goto("/#/statement");
-  await page
-    .getByLabel("PDF 账单", { exact: true })
-    .setInputFiles({
-      name: "statement.pdf",
-      mimeType: "application/pdf",
-      buffer: Buffer.from("%PDF-browser-fixture"),
-    });
+  await page.getByLabel("PDF 账单", { exact: true }).setInputFiles({
+    name: "statement.pdf",
+    mimeType: "application/pdf",
+    buffer: Buffer.from("%PDF-browser-fixture"),
+  });
   await page.getByRole("button", { name: "开始识别账单" }).click();
   await expect(page.getByTestId("statement-row")).toHaveCount(42);
   await expect(page.getByLabel("第 1 笔金额", { exact: true })).toHaveValue(
     "10.00",
   );
   await page.getByRole("button", { name: "确认导入整份账单" }).click();
-  await expect(
-    page.getByRole("heading", { name: "这份账单，记好了。" }),
-  ).toBeVisible();
+  await expect(page.getByRole("heading", { name: "账单已导入" })).toBeVisible();
   await page.reload();
-  await expect(
-    page.getByRole("heading", { name: "这份账单，记好了。" }),
-  ).toBeVisible();
+  await expect(page.getByRole("heading", { name: "账单已导入" })).toBeVisible();
   const records = await (
     await request.get("/api/v1/transactions?limit=100", { headers })
   ).json();

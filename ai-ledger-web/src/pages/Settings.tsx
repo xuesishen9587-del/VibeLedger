@@ -47,10 +47,7 @@ function AccountEditor({
     Page<{ id: string; alias: string; status: string; row_version: number }>
   >(item ? `/accounts/${item.id}/aliases` : null);
   return (
-    <Modal
-      title={item ? "打理这个账户" : "把一个账户加进家里"}
-      onClose={onClose}
-    >
+    <Modal title={item ? "编辑账户" : "添加账户"} onClose={onClose}>
       <ActionForm
         onSave={async (f) => {
           const body = {
@@ -423,9 +420,7 @@ export function SettingsPage({ onLogout }: { onLogout: () => Promise<void> }) {
   );
   return (
     <>
-      <Heading eyebrow="OUR HOME, OUR WAY" title="小家的设置">
-        让账本更贴合我们自己的日常。
-      </Heading>
+      <Heading title="设置">管理账户、分类、设备和提醒。</Heading>
       <div className="settings-layout">
         <nav className="settings-nav" aria-label="设置分类">
           {[

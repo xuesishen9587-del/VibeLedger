@@ -66,34 +66,23 @@ function Login({
           VibeLedger
         </span>
         <div>
-          <span className="eyebrow">OUR LITTLE LEDGER</span>
-          <h1>
-            日子慢慢过，
-            <br />
-            幸福一起攒。
-          </h1>
-          <p>
-            花出去的，留下来的。
-            <br />
-            属于我们两个人的家庭账本。
-          </p>
+          <h1>家庭账本</h1>
+          <p>记录支出，查看账户余额和资产。</p>
           <div className="home-art" aria-hidden="true">
             <House size={160} strokeWidth={0.8} />
             <Heart size={28} />
           </div>
         </div>
-        <small>把生活记下来，把安心留给彼此。</small>
       </div>
       <section className="login-card">
-        <span className="eyebrow">WELCOME HOME</span>
-        <h2>欢迎回家</h2>
-        <p>登录后，一起看看家里的近况。</p>
+        <h2>登录</h2>
+        <p>使用家庭成员账号登录。</p>
         <ErrorBox error={error} />
         {!auth ? (
           <p className="notice">登录服务尚未配置，请配置家庭账本的登录服务。</p>
         ) : (
           <ActionForm
-            label="进入我们的账本"
+            label="登录"
             onSave={async (form) => {
               const { error } = await auth.auth.signInWithPassword({
                 email: String(form.get("email")).trim(),
@@ -235,17 +224,11 @@ function Shell({
               <House size={23} />
             </span>
             <span>
-              VibeLedger<small>我们的小账本</small>
+              VibeLedger<small>家庭账本</small>
             </span>
           </a>
           <Navigation route={route} />
           <div className="sidebar-bottom">
-            <div className="together">
-              <Heart size={18} />
-              <p>
-                两个人的小日子<small>一起打理，慢慢积累。</small>
-              </p>
-            </div>
             <button
               className="logout"
               onClick={() => {
@@ -259,13 +242,13 @@ function Shell({
         </aside>
         <div className="main-area">
           <div className="topbar">
-            <span>生活有数，心里有底。</span>
+            <span>家庭账本</span>
             <div>
               <span className="avatar">我</span>
               <span className="avatar partner">
                 <Heart size={12} />
               </span>
-              <span className="small">我们的家</span>
+              <span className="small">家庭成员</span>
             </div>
           </div>
           <main className="page" id="main-content">
@@ -288,7 +271,7 @@ function Shell({
             </Suspense>
           </main>
           <footer className="page-footer">
-            <Heart size={12} /> 一起记下生活的每一份美好 <span>VibeLedger</span>
+            <span>VibeLedger</span>
           </footer>
         </div>
         {toast && (
@@ -319,7 +302,7 @@ function Navigation({ route }: { route: string }) {
   return (
     <nav aria-label="主要导航">
       {[
-        ["/home", "我们的家", House],
+        ["/home", "总览", House],
         ["/spending", "日常支出", Wallet],
         ["/wealth", "家庭财富", ChartNoAxesCombined],
         ["/review", "待处理", Inbox],

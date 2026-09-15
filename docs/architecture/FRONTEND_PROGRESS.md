@@ -1,12 +1,21 @@
 # 前端重设计进度与续接
 
-日期：2026-09-15；分支 `experiment/astra-simplified`；起点 `9c713fe`。本文件取代此前 Docker 未启动时的检查点。
+日期：2026-09-15；分支 `experiment/astra-simplified`；前端基线提交 `7088962`，已推送。本文记录候选前端和本次 CI / 文案修正，取代此前未提交时的检查点。
 
 ## 工作方式与范围
 
-用户要求优先完成全面方案，并在 5 小时额度剩余不超过 10% 时收尾。完整方案先行写入 [FRONTEND_REDESIGN.md](FRONTEND_REDESIGN.md)。第一次窗口到 9% 时已保存检查点；后续额度窗口刷新并收到继续及 Docker 已启动的指示后恢复工作。本轮到剩余 17% 时停止扩展功能，进入最终回归与交接；最终查询使用 93% / 剩余 7%，按规则只完成收尾；未使用重置券。
+完整方案见 [FRONTEND_REDESIGN.md](FRONTEND_REDESIGN.md)。首轮已按额度要求收尾；随后用户要求将代码提交推送，并针对 GitHub CI 的按钮命名冲突作小范围修正，同时简化文案和更新交接。
 
-新前端为 React + TypeScript + Vite，继续使用既有 FastAPI 和 Supabase。旧 Streamlit 完整保留。所有代码在本地工作树，未提交、未推送、未部署、未切换托管入口。
+新前端为 React + TypeScript + Vite，继续使用既有 FastAPI 和 Supabase。旧 Streamlit 保留。`7088962` 已提交并推送，关联 [Draft PR #17](https://github.com/xuesishen9587-del/VibeLedger/pull/17)。尚未部署或切换托管入口。
+
+## 7088962 的 GitHub CI 与本次修正
+
+- [Backend CI](https://github.com/xuesishen9587-del/VibeLedger/actions/runs/34957798233) 通过。Web CI 的 [push 运行](https://github.com/xuesishen9587-del/VibeLedger/actions/runs/34957794113) 通过，但后续 [PR 运行](https://github.com/xuesishen9587-del/VibeLedger/actions/runs/34957798348) 在真实 API / PostgreSQL 浏览器测试失败，不能笼统记为全部通过。
+- 失败原因：页头与账户卡片的按钮都叫“更新余额”。账户卡片先加载出来时，Playwright 严格定位匹配两个按钮；卡片尚未加载时则碰巧通过。
+- 修正：页头明确为“批量更新余额”；账户按钮的可访问名称为“更新余额：账户名”。联合测试等待账户按钮加载后再选批量入口；新增两个账户的浏览器回归，核对各自预选账户与批量选择行为。
+- 文案统一为直接的日常中文，移除首页、登录、页脚和空状态中的口号及英文宣传副标题。首页改为“总览”，保留具体的操作说明和财务提醒。
+- 本次本地验证通过：前端构建、12 项前端逻辑、3 项 Node 转发/配置、8 项浏览器交互，以及 1 项真实 JWT / API / PostgreSQL 联合测试。联合测试使用临时 PostgreSQL 17，完成后已清理。后端代码未改动，本次未重跑下方的后端独立测试集。
+- 推送后 CI 以该提交的 GitHub Checks 为准；PR 交接同步记录远端结果。真实环境验收仍见剩余清单。
 
 ## 已实现
 
@@ -19,10 +28,10 @@
 - 消费截图明确选择一次性或分期，支持全额记录、绑定已有计划某一期、从原分期草稿新建计划。没有自动把分期改成一次性消费。
 - 财富支持批量余额、截图识别恢复、余额历史更正/作废、投资投入取出确认与撤回。修复联合测试发现的“尚未选账户时复选框也被禁用”问题。
 - 设置支持账户和分类、账户别名修改/停用、账户关闭/重开/取消（由后端检查零余额或空账户）、设备创建/撤销、投资提醒阈值。
-- 同源 Node 固定 API 转发、公开配置白名单、no-store、CSP、不转发 Cookie、不跟随重定向；多阶段非 root Docker；独立 Web CI，含 PostgreSQL 联合测试任务。CI 尚未推送执行。
+- 同源 Node 固定 API 转发、公开配置白名单、no-store、CSP、不转发 Cookie、不跟随重定向；多阶段非 root Docker；独立 Web CI，含 PostgreSQL 联合测试任务，已在 GitHub 执行。
 - 按页加载已完成，主 JS 约 460 kB / gzip 133 kB，各页面约 5–25 kB；构建不再出现 500 kB 包体积提示。提高了辅助文字和账单表头的对比度。
 
-## 已完成验证
+## 7088962 的本地验证记录
 
 | 验证 | 结果 | 说明 |
 | --- | --- | --- |
@@ -37,7 +46,7 @@
 
 联合测试通过浏览器新增 ¥88.80 消费、记录 ¥1,000 余额、上传 42 行负号账单（40 消费、1 退款、1 还款），最后数据库中共 42 笔交易、净支出 ¥478.80、净资产 ¥1,000。整单提交后刷新可恢复，不重复入账。所有数据均为虚构，未访问真实家庭或 Gemini。
 
-日志：根目录 `backend-unit-test.log`、`backend-integration-test.log`、`dashboard-test.log`、`web-container-build.log`（Git 忽略）。浏览器截图在 `ai-ledger-web/test-results`；稳定预览另存 `docs/architecture/screenshots/frontend`。最终镜像再次通过 Web 200 / API 200 / 未登录 401；本次四个测试容器、临时数据库卷和测试网络已清理，保留 `vibeledger-web:acceptance` 镜像。测试命令见 [Web README](../../ai-ledger-web/README.md)。
+首轮日志在根目录 `backend-unit-test.log`、`backend-integration-test.log`、`dashboard-test.log`、`web-container-build.log`（Git 忽略）。浏览器交互测试会在 `ai-ledger-web/test-results` 生成截图，后续 Playwright 运行会重建该目录；`docs/architecture/screenshots/frontend` 保存的是 `7088962` 的界面，文案已被本次修改取代。首轮镜像通过 Web 200 / API 200 / 未登录 401；临时容器和测试卷已清理。测试命令见 [Web README](../../ai-ledger-web/README.md)。
 
 ## 仍需完成，不能宣称生产切换就绪
 
@@ -52,4 +61,4 @@
 
 ## 下一次续接
 
-先读本文件、完整方案和 Web README，核对 `git status --short`。保留已通过的金额/认证/幂等边界，从上面的剩余清单推进，不重新设计 S1/S2。当前代码尚未提交，先审查再建立可回退提交与候选部署。禁止把剩余验收项改写成已完成。
+先读本文件、完整方案和 Web README，核对当前提交及对应 GitHub Checks。保留已通过的金额/认证/幂等边界，从剩余清单推进，不重新设计 S1/S2。PR 保持 Draft，完成候选环境验收后再决定切换入口。不要把本地通过或历史 CI 通过当作最新提交和托管验收通过。

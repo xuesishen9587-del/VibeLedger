@@ -39,7 +39,9 @@ export function CategoryChart({ report }: { report: Spending }) {
       </small>
     </div>
   ) : (
-    <Empty title="这个月还没有支出">记下第一笔，慢慢了解日常的花费。</Empty>
+    <Empty title="这个月还没有支出">
+      添加记录或导入账单后，可查看分类统计。
+    </Empty>
   );
 }
 export function WealthStats({ report }: { report: Wealth }) {

@@ -47,13 +47,11 @@ export function TransactionEditor({
     return <ScheduleEditor replacement={record} onClose={onClose} />;
   return (
     <Modal
-      title={
-        voiding ? "作废这笔记录" : record ? "修改这笔记录" : "记下一笔生活"
-      }
+      title={voiding ? "作废这笔记录" : record ? "修改这笔记录" : "新增记录"}
       onClose={onClose}
     >
       <ActionForm
-        label={voiding ? "确认作废" : record ? "保存修改" : "记好了"}
+        label={voiding ? "确认作废" : record ? "保存修改" : "保存记录"}
         onSave={async (f) => {
           if (voiding) {
             await api.command(
@@ -89,7 +87,7 @@ export function TransactionEditor({
               record ? "修改记录" : "新增记录",
             );
           }
-          notify(voiding ? "这笔记录已作废" : "记好了");
+          notify(voiding ? "这笔记录已作废" : "记录已保存");
           refresh();
           onSaved?.();
           onClose();
@@ -150,7 +148,7 @@ export function TransactionEditor({
                 name="merchant"
                 maxLength={240}
                 defaultValue={record?.merchant || ""}
-                placeholder="比如：两个人的晚餐"
+                placeholder="比如：晚餐"
               />
             </Field>
             <div className="form-grid">
@@ -256,7 +254,6 @@ export function SpendingPage() {
   return (
     <>
       <Heading
-        eyebrow="EVERYDAY MOMENTS"
         title="日常支出"
         actions={
           <>
@@ -271,7 +268,7 @@ export function SpendingPage() {
           </>
         }
       >
-        每一笔，都是生活的一部分。
+        查看和记录消费、退款及收入。
       </Heading>
       <div className="toolbar">
         <div className="tabs">

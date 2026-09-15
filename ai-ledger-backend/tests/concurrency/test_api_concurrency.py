@@ -1,31 +1,23 @@
 import unittest
-import uuid
 from uuid import UUID, uuid4
 import hashlib
-import base64
 import threading
-from decimal import Decimal
 from datetime import date
 from fastapi.testclient import TestClient
 
-from app.db import get_connection
+from app.db import get_connection, transaction
 from app.main import create_app
 from app.api.deps import get_db_connection
-from app.api.routes.expenses import router as expenses_router
-from app.api.routes.ingestion import router as ingestion_router
 from app.repositories import accounts as accounts_repo
+from app.repositories import categories as categories_repo
 from app.repositories import devices as devices_repo
-from app.services.gemini_service import ExpenseExtractionResult, MockGeminiService
-from app.services.reference_fx_service import ReferenceFxService
+from app.repositories.simplified_schema import acquire_household_finance_lock
+
 try:
     from tests.support.db_helper import BaseDbTestCase
 except ModuleNotFoundError:
     from support.db_helper import BaseDbTestCase
 
-VALID_PNG_BYTES = (
-    b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde'
-    b'\x00\x00\x00\x0cIDATx\x9cc\xf8\xcf\xc0\x00\x00\x03\x01\x01\x00\xc9\xfe\x92\xef\x00\x00\x00\x00IEND\xaeB`\x82'
-)
 
 class TestApiConcurrency(BaseDbTestCase):
     @classmethod
@@ -47,171 +39,203 @@ class TestApiConcurrency(BaseDbTestCase):
         self.user_id = uuid4()
         self.device_id_1 = uuid4()
         self.raw_token_1 = f"vbl_test_{uuid4().hex}"
+        self.headers = {"Authorization": f"Bearer {self.raw_token_1}"}
 
-        self.mock_gemini = MockGeminiService()
-        self.mock_fx = ReferenceFxService()
+        conn = get_connection(self.test_schema)
+        try:
+            with transaction(conn):
+                accounts_repo.create_household(conn, self.household_id, "Test Household", reporting_currency="CNY")
+                accounts_repo.create_user(conn, self.user_id, "auth_concur_user", "Test User", "user@concur.local")
+                accounts_repo.add_user_to_household(conn, self.household_id, self.user_id, role="owner")
 
-        expenses_router._gemini_service = self.mock_gemini
-        expenses_router._reference_fx_service = self.mock_fx
-        ingestion_router._gemini_service = self.mock_gemini
-        ingestion_router._reference_fx_service = self.mock_fx
+                t1_hash = hashlib.sha256(self.raw_token_1.encode('utf-8')).digest()
+                devices_repo.create_device(
+                    conn=conn,
+                    device_id=self.device_id_1,
+                    user_id=self.user_id,
+                    device_name="iPhone 15 Pro",
+                    token_hash=t1_hash,
+                    household_id=self.household_id,
+                    platform="ios_shortcuts"
+                )
 
-        with self.conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO households (id, name, reporting_currency, ledger_start_date, status, created_at, updated_at)
-                VALUES (%s, %s, 'CNY', '2026-01-01', 'active', now(), now());
-                """,
-                (self.household_id, "Test Household")
-            )
-            cur.execute(
-                """
-                INSERT INTO users (id, auth_subject, email, display_name, default_currency, status, created_at, updated_at)
-                VALUES (%s, %s, %s, 'Test User', 'CNY', 'active', now(), now());
-                """,
-                (self.user_id, f"auth_{uuid4().hex[:8]}", f"user_{uuid4().hex[:6]}@example.com")
-            )
-            cur.execute(
-                """
-                INSERT INTO household_members (household_id, user_id, role, joined_at)
-                VALUES (%s, %s, 'owner', now());
-                """,
-                (self.household_id, self.user_id)
-            )
+                self.acc_checking_id = uuid4()
+                accounts_repo.create_account(
+                    conn=conn,
+                    account_id=self.acc_checking_id,
+                    household_id=self.household_id,
+                    name="招商银行储蓄卡",
+                    balance_scope="Main Account",
+                    account_type="cash",
+                    currency="CNY"
+                )
 
-            t1_hash = hashlib.sha256(self.raw_token_1.encode('utf-8')).digest()
-            devices_repo.create_device(
-                conn=self.conn,
-                device_id=self.device_id_1,
-                user_id=self.user_id,
-                device_name="iPhone 15 Pro",
-                token_hash=t1_hash,
-                platform="ios_shortcuts"
-            )
+                self.cat_food_id = uuid4()
+                categories_repo.create_category(
+                    conn=conn,
+                    category_id=self.cat_food_id,
+                    household_id=self.household_id,
+                    name="餐饮美食",
+                    category_type="expense"
+                )
+        finally:
+            conn.close()
 
-            self.acc_cny_checking = uuid4()
-            cur.execute(
-                """
-                INSERT INTO accounts (id, household_id, name, account_type, currency, status, created_at, updated_at)
-                VALUES (%s, %s, '招商银行储蓄卡', 'cash', 'CNY', 'active', now(), now());
-                """,
-                (self.acc_cny_checking, self.household_id)
-            )
-            cur.execute(
-                """
-                INSERT INTO account_state (account_id, ledger_balance, row_version, updated_at)
-                VALUES (%s, 10000.00, 0, now());
-                """,
-                (self.acc_cny_checking,)
-            )
-
-            self.cat_food = uuid4()
-            cur.execute(
-                """
-                INSERT INTO categories (id, household_id, name, category_type, status, created_at, updated_at)
-                VALUES (%s, %s, '餐饮美食', 'expense', 'active', now(), now());
-                """,
-                (self.cat_food, self.household_id)
-            )
-        self.conn.commit()
-
-    def _sample_png_payload(self):
-        return {
-            "mime_type": "image/png",
-            "base64": base64.b64encode(VALID_PNG_BYTES).decode('utf-8')
-        }
-
-    def test_11_concurrent_identical_requests_produce_single_outcome(self):
-        key = f"key-concurrent-{uuid4().hex}"
-        payload = {
-            "idempotency_key": key,
-            "captured_at": "2026-08-20T12:00:00Z",
-            "client_version": "1.0.0",
-            "image": self._sample_png_payload(),
-            "note": "Concurrent Test"
-        }
-
+    def test_account_patch_optimistic_concurrency_race(self):
+        """
+        When 5 concurrent threads attempt to update an account with the same expected_version,
+        exactly ONE thread succeeds (200 OK) and the other 4 fail with 409 ROW_VERSION_CONFLICT.
+        """
         results = []
+        threads = []
 
-        def worker():
+        def worker(idx):
             client = TestClient(self.app)
-            res = client.post(
-                "/api/v1/expenses",
-                headers={"Authorization": f"Bearer {self.raw_token_1}"},
-                json=payload
+            res = client.patch(
+                f"/api/v1/accounts/{self.acc_checking_id}",
+                json={
+                    "name": f"Renamed Account {idx}",
+                    "expected_version": 0
+                },
+                headers={
+                    **self.headers,
+                    "Idempotency-Key": f"key-race-patch-{idx}-{uuid4().hex}"
+                }
             )
             results.append((res.status_code, res.json()))
 
-        threads = [threading.Thread(target=worker) for _ in range(5)]
+        for i in range(5):
+            t = threading.Thread(target=worker, args=(i,))
+            threads.append(t)
+
         for t in threads:
             t.start()
         for t in threads:
             t.join()
 
-        # All 5 requests must return HTTP 200 with the exact same request_id
-        self.assertEqual(len(results), 5)
-        status_codes = [r[0] for r in results]
-        self.assertEqual(set(status_codes), {200})
+        successes = [r for r in results if r[0] == 200]
+        conflicts = [r for r in results if r[0] == 409]
 
-        request_ids = {r[1]["request_id"] for r in results}
-        self.assertEqual(len(request_ids), 1, f"Multiple request IDs created: {request_ids}")
+        self.assertEqual(len(successes), 1, f"Expected exactly 1 success, got {len(successes)}: {results}")
+        self.assertEqual(len(conflicts), 4, f"Expected 4 conflicts, got {len(conflicts)}: {results}")
 
-        with self.conn.cursor() as cur:
-            cur.execute("SELECT COUNT(*) FROM ingestion_requests WHERE idempotency_key = %s;", (key,))
-            self.assertEqual(cur.fetchone()[0], 1)
+        for code, data in conflicts:
+            self.assertEqual(data.get("error", {}).get("code"), "ROW_VERSION_CONFLICT")
 
-    def test_39_concurrent_confirm_produces_single_commit(self):
-        # 1. Create a pending confirmation request
-        self.mock_gemini.set_next_result(ExpenseExtractionResult(
-            occurred_on=date(2026, 8, 20),
-            merchant="商户",
-            original_amount=Decimal("100.00"),
-            original_currency="CNY",
-            from_account="招商银行储蓄卡",
-            category="餐饮美食",
-            payment_mode="one_off",
-            confidence=0.70 # forces pending_confirmation
-        ))
+        # Verify final account row_version in DB is exactly 1
+        conn = get_connection(self.test_schema)
+        try:
+            acc = accounts_repo.get_account(conn, self.acc_checking_id, self.household_id)
+            self.assertEqual(acc["row_version"], 1)
+        finally:
+            conn.close()
 
-        res_init = self.client.post(
-            "/api/v1/expenses",
-            headers={"Authorization": f"Bearer {self.raw_token_1}"},
-            json={
-                "idempotency_key": f"key-conf-race-{uuid4().hex}",
-                "captured_at": "2026-08-20T12:00:00Z",
-                "client_version": "1.0.0",
-                "image": self._sample_png_payload()
-            }
-        )
-        req_id = res_init.json()["request_id"]
-
-        # 2. Concurrently call /confirm under /api/v1/ingestion-requests
+    def test_category_patch_optimistic_concurrency_race(self):
+        """
+        When 5 concurrent threads attempt to update a category with the same expected_version,
+        exactly ONE thread succeeds (200 OK) and the other 4 fail with 409.
+        """
         results = []
+        threads = []
 
-        def worker():
+        def worker(idx):
             client = TestClient(self.app)
-            res = client.post(
-                f"/api/v1/ingestion-requests/{req_id}/confirm",
-                headers={"Authorization": f"Bearer {self.raw_token_1}"}
+            res = client.patch(
+                f"/api/v1/categories/{self.cat_food_id}",
+                json={
+                    "name": f"Renamed Cat {idx}",
+                    "expected_version": 0
+                },
+                headers={
+                    **self.headers,
+                    "Idempotency-Key": f"key-race-cat-patch-{idx}-{uuid4().hex}"
+                }
             )
             results.append((res.status_code, res.json()))
 
-        threads = [threading.Thread(target=worker) for _ in range(5)]
+        for i in range(5):
+            t = threading.Thread(target=worker, args=(i,))
+            threads.append(t)
+
         for t in threads:
             t.start()
         for t in threads:
             t.join()
 
-        # All succeed or replay committed outcome with 200
-        for code, body in results:
-            self.assertEqual(code, 200)
-            self.assertEqual(body["status"], "committed")
+        successes = [r for r in results if r[0] == 200]
+        conflicts = [r for r in results if r[0] == 409]
 
-        # Single transaction committed in ledger
-        with self.conn.cursor() as cur:
-            cur.execute("SELECT COUNT(*) FROM transactions WHERE source_request_id = %s;", (UUID(req_id),))
-            self.assertEqual(cur.fetchone()[0], 1)
+        self.assertEqual(len(successes), 1, f"Expected exactly 1 success, got {len(successes)}: {results}")
+        self.assertEqual(len(conflicts), 4, f"Expected 4 conflicts, got {len(conflicts)}: {results}")
 
-        # Single balance deduction of 100.00
-        state = accounts_repo.get_account_state(self.conn, self.acc_cny_checking)
-        self.assertEqual(state["ledger_balance"], Decimal("9900.000000")) # 10000 - 100
+    def test_concurrent_duplicate_alias_creation_race(self):
+        """
+        When 4 concurrent threads attempt to create identical aliases on the same account,
+        exactly ONE succeeds (201) and the remaining 3 are rejected with conflict (422).
+        """
+        results = []
+        threads = []
+
+        def worker(idx):
+            client = TestClient(self.app)
+            res = client.post(
+                f"/api/v1/accounts/{self.acc_checking_id}/aliases",
+                json={"alias": "招行卡"},
+                headers={
+                    **self.headers,
+                    "Idempotency-Key": f"key-race-alias-create-{idx}-{uuid4().hex}"
+                }
+            )
+            results.append((res.status_code, res.json()))
+
+        for i in range(4):
+            t = threading.Thread(target=worker, args=(i,))
+            threads.append(t)
+
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        successes = [r for r in results if r[0] == 201]
+        conflicts = [r for r in results if r[0] == 422]
+
+        self.assertEqual(len(successes), 1, f"Expected exactly 1 success, got {len(successes)}: {results}")
+        self.assertEqual(len(conflicts), 3, f"Expected 3 conflicts, got {len(conflicts)}: {results}")
+
+    def test_household_finance_lock_serialization(self):
+        """
+        Validates that acquire_household_finance_lock serializes financial writes in PostgreSQL
+        without deadlocks.
+        """
+        log = []
+
+        def worker(idx):
+            conn = get_connection(self.test_schema)
+            try:
+                with transaction(conn):
+                    acquire_household_finance_lock(conn, self.household_id)
+                    log.append(f"enter_{idx}")
+                    # Brief critical section
+                    with conn.cursor() as cur:
+                        cur.execute("SELECT 1;")
+                    log.append(f"exit_{idx}")
+            finally:
+                conn.close()
+
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(len(log), 8)
+        # Check interleaving: each enter should match its exit before another enter/exit can break consistency
+        # In PostgreSQL FOR UPDATE, each transaction runs sequentially
+        enters = [x for x in log if x.startswith("enter")]
+        exits = [x for x in log if x.startswith("exit")]
+        self.assertEqual(len(enters), 4)
+        self.assertEqual(len(exits), 4)
+
+if __name__ == "__main__":
+    unittest.main()

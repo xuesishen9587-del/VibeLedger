@@ -80,30 +80,36 @@ def create_household(
     household_id: UUID,
     name: str,
     reporting_currency: str = "CNY",
+    started_on: Optional[date] = None,
     ledger_start_date: Optional[date] = None,
+    tz_name: str = "Asia/Singapore",
     status: str = "active",
 ) -> Dict[str, Any]:
     """
-    Creates a household record (primarily for provisioning and test fixtures).
+    Creates a household record matching the simplified schema.
     """
-    start_date = ledger_start_date or date(2026, 1, 1)
+    start_date = started_on or ledger_start_date or date(2026, 1, 1)
     with conn.cursor() as cur:
         cur.execute(
             """
             INSERT INTO households (
-                id, name, reporting_currency, ledger_start_date, status, created_at, updated_at
-            ) VALUES (%s, %s, %s, %s, %s, now(), now())
-            RETURNING id, name, reporting_currency, ledger_start_date, status, created_at, updated_at;
+                id, name, reporting_currency, started_on, timezone,
+                investment_review_change_ratio, status, row_version, created_at, updated_at
+            ) VALUES (%s, %s, %s, %s, %s, 0.2000, %s, 0, now(), now())
+            RETURNING id, name, reporting_currency, started_on, timezone, investment_review_change_ratio, status, row_version, created_at, updated_at;
             """,
-            (household_id, name, reporting_currency, start_date, status)
+            (household_id, name, reporting_currency, start_date, tz_name, status)
         )
         row = cur.fetchone()
         return {
             "id": row[0],
             "name": row[1],
             "reporting_currency": row[2],
-            "ledger_start_date": row[3],
-            "status": row[4],
-            "created_at": row[5],
-            "updated_at": row[6],
+            "started_on": row[3],
+            "timezone": row[4],
+            "investment_review_change_ratio": row[5],
+            "status": row[6],
+            "row_version": row[7],
+            "created_at": row[8],
+            "updated_at": row[9],
         }

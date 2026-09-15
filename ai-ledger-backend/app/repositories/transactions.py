@@ -482,24 +482,21 @@ def list_transactions_with_filters(
 
 def get_transaction_detail(conn, transaction_id: UUID, household_id: Optional[UUID] = None) -> Optional[Dict[str, Any]]:
     query = """
-        SELECT t.id, t.household_id, t.transaction_type, t.occurred_on, t.occurred_at, t.posted_on,
-               t.from_account_id, fa.name AS from_account_name,
-               t.to_account_id, ta.name AS to_account_name,
+        SELECT t.id, t.household_id, t.transaction_type, t.occurred_on, t.occurred_at,
                t.original_amount, t.original_currency,
-               t.from_amount, t.from_currency, t.to_amount, t.to_currency, t.effective_fx_rate,
-               t.account_leg_status, t.reporting_amount, t.reporting_currency, t.reporting_fx_rate,
+               t.account_id, a.name AS account_name,
                t.category_id, c.name AS category_name,
                t.merchant, t.remarks,
-               t.source, t.status, t.verification_status, t.confidence,
-               t.source_request_id, t.statement_batch_id,
+               t.source, t.status,
+               t.reporting_amount, t.reporting_currency, t.reporting_fx_rate,
+               t.source_request_id,
                t.created_at, t.updated_at, t.deleted_at, t.row_version
         FROM transactions t
-        LEFT JOIN accounts fa ON fa.id = t.from_account_id
-        LEFT JOIN accounts ta ON ta.id = t.to_account_id
+        LEFT JOIN accounts a ON a.id = t.account_id
         LEFT JOIN categories c ON c.id = t.category_id
         WHERE t.id = %s
     """
-    params = [transaction_id]
+    params: List[Any] = [transaction_id]
     if household_id is not None:
         query += " AND t.household_id = %s"
         params.append(household_id)
@@ -510,27 +507,8 @@ def get_transaction_detail(conn, transaction_id: UUID, household_id: Optional[UU
         if not r:
             return None
 
-        from_acc = {"id": str(r[6]), "name": r[7]} if r[6] else None
-        to_acc = {"id": str(r[8]), "name": r[9]} if r[8] else None
-        cat = {"id": str(r[21]), "name": r[22]} if r[21] else None
-
-        # Fetch links
-        cur.execute(
-            """
-            SELECT id, source_transaction_id, target_transaction_id, relation_type, created_at
-            FROM transaction_links
-            WHERE source_transaction_id = %s OR target_transaction_id = %s;
-            """,
-            (transaction_id, transaction_id)
-        )
-        link_rows = cur.fetchall()
-        links = [{
-            "id": lr[0],
-            "source_transaction_id": lr[1],
-            "target_transaction_id": lr[2],
-            "relation_type": lr[3],
-            "created_at": lr[4]
-        } for lr in link_rows]
+        acc = {"id": str(r[7]), "name": r[8]} if r[7] else None
+        cat = {"id": str(r[9]), "name": r[10]} if r[9] else None
 
         return {
             "id": r[0],
@@ -538,34 +516,34 @@ def get_transaction_detail(conn, transaction_id: UUID, household_id: Optional[UU
             "transaction_type": r[2],
             "occurred_on": r[3],
             "occurred_at": r[4],
-            "posted_on": r[5],
-            "from_account": from_acc,
-            "to_account": to_acc,
-            "original_amount": r[10],
-            "original_currency": r[11],
-            "from_amount": r[12],
-            "from_currency": r[13],
-            "to_amount": r[14],
-            "to_currency": r[15],
-            "effective_fx_rate": r[16],
-            "account_leg_status": r[17],
-            "reporting_amount": r[18],
-            "reporting_currency": r[19],
-            "reporting_fx_rate": r[20],
+            "posted_on": None,
+            "from_account": acc,
+            "to_account": None,
+            "original_amount": r[5],
+            "original_currency": r[6],
+            "from_amount": r[5],
+            "from_currency": r[6],
+            "to_amount": None,
+            "to_currency": None,
+            "effective_fx_rate": None,
+            "account_leg_status": "authoritative",
+            "reporting_amount": r[15],
+            "reporting_currency": r[16],
+            "reporting_fx_rate": r[17],
             "category": cat,
-            "merchant": r[23],
-            "remarks": r[24],
-            "source": r[25],
-            "status": r[26],
-            "verification_status": r[27],
-            "confidence": r[28],
-            "source_request_id": r[29],
-            "statement_batch_id": r[30],
-            "created_at": r[31],
-            "updated_at": r[32],
-            "deleted_at": r[33],
-            "row_version": r[34],
-            "links": links
+            "merchant": r[11],
+            "remarks": r[12],
+            "source": r[13],
+            "status": r[14],
+            "verification_status": "verified",
+            "confidence": None,
+            "source_request_id": r[18],
+            "statement_batch_id": None,
+            "created_at": r[19],
+            "updated_at": r[20],
+            "deleted_at": r[21],
+            "row_version": r[22],
+            "links": []
         }
 
 def update_transaction_fields(

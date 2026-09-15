@@ -1,5 +1,6 @@
 from typing import Protocol, Dict, Any, Optional, List, runtime_checkable
 import jwt
+from functools import lru_cache
 
 from app.domain.auth import InvalidCredentialsError
 
@@ -96,6 +97,11 @@ class StaticBrowserAuthVerifier:
 
 _active_verifier: Optional[BrowserAuthVerifier] = None
 
+@lru_cache(maxsize=4)
+def _jwks_verifier(url, issuer, audience, algorithms):
+    from app.auth.jwks_verifier import JWKSBrowserAuthVerifier
+    return JWKSBrowserAuthVerifier(url, issuer, audience, algorithms)
+
 def get_browser_verifier() -> BrowserAuthVerifier:
     """Returns the globally configured or injected BrowserAuthVerifier."""
     global _active_verifier
@@ -104,6 +110,11 @@ def get_browser_verifier() -> BrowserAuthVerifier:
 
     from app.config import get_settings
     settings = get_settings()
+    if settings.AUTH_JWKS_URL:
+        return _jwks_verifier(settings.AUTH_JWKS_URL, settings.AUTH_ISSUER,
+                              settings.AUTH_AUDIENCE, tuple(settings.AUTH_ALGORITHMS))
+    if settings.ENVIRONMENT == "production":
+        raise InvalidCredentialsError("Production browser authentication requires pinned JWKS configuration.")
     return JWTBrowserAuthVerifier(
         key=settings.AUTH_PUBLIC_KEY,
         algorithms=settings.AUTH_ALGORITHMS,

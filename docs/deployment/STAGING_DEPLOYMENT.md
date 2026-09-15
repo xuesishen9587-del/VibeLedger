@@ -1,8 +1,18 @@
 # VibeLedger Staging Deployment Runbook
 
+> **Historical runbook for the previous accepted staging architecture.** The
+> 2026-09-05 [simplified target](../architecture/README.md) uses a fresh schema and
+> different workflows. The commands below are retained as deployment evidence and
+> must be updated in implementation slice S5 before use with the simplified runtime.
+> They are not permission to deploy or modify the existing environment. The user
+> separately reports later real-device Expense Shortcut acceptance; this document's
+> Phase 11.5 evidence table only records its earlier runtime gate.
+
 > **Phase 11.5 — Pre-production Deployment & Runtime Readiness**  
 > **Target Environment**: Isolated Disposable Staging (`ENVIRONMENT=staging`)  
-> **Authority**: `TARGET_DOMAIN_MODEL.md`, `docs/architecture/PHYSICAL_SCHEMA.md`, `docs/architecture/API_CONTRACT.md`
+> **Historical authority**: the architecture at Git commit `3ac0ed6`. Current target:
+> [product rules](../../TARGET_DOMAIN_MODEL.md), [contracts](../architecture/CONTRACTS.md)
+> and [transition/acceptance](../architecture/IMPLEMENTATION_PLAN.md).
 
 This document provides the complete, copy-pasteable operational runbook to deploy and verify an isolated VibeLedger Staging environment prior to Phase 12 real-device acceptance testing.
 

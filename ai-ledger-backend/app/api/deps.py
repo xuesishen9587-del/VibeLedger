@@ -1,5 +1,5 @@
 from typing import Optional, Dict, Any, Generator
-from fastapi import Header, Depends
+from fastapi import Header, Depends, HTTPException
 from app.db import get_connection
 from app.auth.context import AuthContext
 from app.auth.service import AuthService
@@ -7,6 +7,26 @@ from app.domain.auth import (
     AuthRequiredError,
     HouseholdPermissionDeniedError,
 )
+
+def require_idempotency_key(
+    idempotency_key: Optional[str] = Header(None, alias="Idempotency-Key")
+) -> str:
+    """
+    Validates mandatory Idempotency-Key header (8..200 characters).
+    Fails transport validation before any receipt or mutation can be established.
+    """
+    if not idempotency_key:
+        raise HTTPException(
+            status_code=422,
+            detail="Missing required header: Idempotency-Key"
+        )
+    key = idempotency_key.strip()
+    if len(key) < 8 or len(key) > 200:
+        raise HTTPException(
+            status_code=422,
+            detail="Idempotency-Key must be between 8 and 200 characters."
+        )
+    return key
 
 def get_db_connection() -> Generator[Any, None, None]:
     """

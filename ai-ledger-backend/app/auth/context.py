@@ -31,3 +31,52 @@ class AuthContext:
     @property
     def can_write(self) -> bool:
         return self.household_role in ("owner", "member")
+
+    @property
+    def actor_scope(self) -> str:
+        """
+        Server-derived invariant actor scope:
+        - device:<uuid> for authenticated device
+        - user:<uuid> for authenticated browser user
+        """
+        if self.is_device and self.device_id:
+            return f"device:{self.device_id}"
+        return f"user:{self.user_id}"
+
+    @staticmethod
+    def system_scope(household_id: UUID) -> str:
+        """
+        Minimal infrastructure for trusted internal code to derive
+        system:<household_uuid> only from a server-known household ID.
+        """
+        return f"system:{household_id}"
+
+
+@dataclass(frozen=True)
+class SystemCommandActor:
+    """
+    Trusted server-only command actor abstraction for internal and background operations.
+    Never constructible from HTTP client inputs, query parameters, headers, or tokens.
+    """
+    household_id: UUID
+    user_id: UUID  # Explicit server-known household member associated with the operation
+
+    @property
+    def is_device(self) -> bool:
+        return False
+
+    @property
+    def is_browser(self) -> bool:
+        return False
+
+    @property
+    def is_system(self) -> bool:
+        return True
+
+    @property
+    def device_id(self) -> Optional[UUID]:
+        return None
+
+    @property
+    def actor_scope(self) -> str:
+        return AuthContext.system_scope(self.household_id)

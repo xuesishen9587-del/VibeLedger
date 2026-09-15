@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "flow_id": "09_target_delayed_post_race_cancellation",
+  "specification_status": "TARGET_SPECIFICATION_S2_NOT_CURRENT_SHORTCUT",
+  "description": "Target interrupted-request cancellation race: GET by-key returns 404, client issues POST cancel tombstone before clearing key; delayed original POST arrives later and is safely blocked.",
+  "step_1_get_by_key_404": {
+    "request": {
+      "method": "GET",
+      "path": "/api/v1/ingestion-requests/by-key/ee335577-8899-44aa-bbcc-ddeeff001122",
+      "headers": {
+        "Authorization": "Bearer vbl_dev_sample_token_sanitized"
+      }
+    },
+    "response": {
+      "http_status": 404,
+      "body": {
+        "error": {
+          "code": "REQUEST_NOT_FOUND",
+          "message": "The request was not received by the server.",
+          "retryable": false,
+          "details": {}
+        }
+      }
+    }
+  },
+  "step_2_target_post_cancel": {
+    "description": "Target S2 action: POST /by-key/{key}/cancel reserves a rejected tombstone so a late-arriving POST cannot create money records.",
+    "request": {
+      "method": "POST",
+      "path": "/api/v1/ingestion-requests/by-key/ee335577-8899-44aa-bbcc-ddeeff001122/cancel",
+      "headers": {
+        "Authorization": "Bearer vbl_dev_sample_token_sanitized",
+        "Content-Type": "application/json"
+      },
+      "body": {
+        "reason": "Client cancelled recovery before recapture"
+      }
+    },
+    "response": {
+      "http_status": 200,
+      "body": {
+        "status": "rejected",
+        "request_id": "6cd18297-8a4a-4895-e62f-5fc96299d2d9",
+        "display_summary": "已放弃记账: Client cancelled recovery before recapture"
+      }
+    }
+  },
+  "step_3_delayed_original_post_arrival": {
+    "description": "Original delayed POST arrives over slow network. Collides with rejected tombstone; replays rejection without AI or financial write.",
+    "request": {
+      "method": "POST",
+      "path": "/api/v1/expenses",
+      "headers": {
+        "Authorization": "Bearer vbl_dev_sample_token_sanitized",
+        "Content-Type": "application/json"
+      },
+      "body": {
+        "idempotency_key": "ee335577-8899-44aa-bbcc-ddeeff001122",
+        "captured_at": "2026-09-06T19:00:00+08:00",
+        "client_version": "expense-shortcut-v2",
+        "image": {
+          "mime_type": "image/jpeg",
+          "base64": "/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////wgALCAABAAEBAREA/8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABPxA="
+        },
+        "note": "Delayed payment"
+      }
+    },
+    "response": {
+      "http_status": 200,
+      "body": {
+        "status": "rejected",
+        "request_id": "6cd18297-8a4a-4895-e62f-5fc96299d2d9",
+        "display_summary": "已放弃记账: Client cancelled recovery before recapture"
+      }
+    },
+    "financial_records_created": 0
+  },
+  "shortcut_consumed_fields": [
+    "status",
+    "request_id",
+    "display_summary"
+  ]
+}

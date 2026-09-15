@@ -1,4 +1,4 @@
-FROM python:3.13.5-slim
+FROM python:3.13-slim
 
 WORKDIR /app
 
@@ -11,7 +11,8 @@ RUN apt-get update && apt-get install -y \
 COPY requirements.txt ./
 RUN pip3 install --no-cache-dir -r requirements.txt
 
-COPY api_client.py app.py time_utils.py dashboard_controller.py ./
+# Include every current runtime module, including pages imported after login.
+COPY . .
 
 EXPOSE 8501
 

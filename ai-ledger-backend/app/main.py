@@ -29,6 +29,12 @@ from app.api.routes.investments import router as investments_router
 from app.api.routes.devices import router as devices_router
 from app.api.routes.work_queue import router as work_queue_router
 from app.api.routes.audit import router as audit_router
+from app.api.routes.history import router as history_router
+from app.api.routes.spending_reports import router as spending_reports_router
+from app.api.routes.spending_schedules import router as spending_schedules_router
+from app.api.routes.wealth import router as wealth_router
+from app.api.routes.balance_captures import router as balance_captures_router
+from app.api.routes.investment_gains import router as investment_gains_router
 
 def create_app() -> FastAPI:
     """
@@ -53,10 +59,15 @@ def create_app() -> FastAPI:
     app.include_router(accounts_router)
     app.include_router(categories_router)
     app.include_router(transactions_router)
+    app.include_router(spending_reports_router)
+    app.include_router(spending_schedules_router)
     app.include_router(dashboard_router)
     app.include_router(credit_cards_router)
     app.include_router(installments_router)
     app.include_router(snapshots_router)
+    app.include_router(wealth_router)
+    app.include_router(investment_gains_router)
+    app.include_router(balance_captures_router)
     app.include_router(reconciliation_router)
     app.include_router(reconciliation_candidates_router)
     app.include_router(statements_router)
@@ -64,6 +75,7 @@ def create_app() -> FastAPI:
     app.include_router(devices_router)
     app.include_router(work_queue_router)
     app.include_router(audit_router)
+    app.include_router(history_router)
 
     @app.get("/health", tags=["Health"])
     @app.get("/api/v1/health", tags=["Health"])
@@ -104,66 +116,20 @@ def create_app() -> FastAPI:
             )
 
         try:
+            from migrations.runner import verify_schema_lineage, LINEAGE_SIMPLIFIED
             with conn.cursor() as cur:
                 cur.execute("SELECT 1;")
-                cur.execute(
-                    """
-                    SELECT EXISTS (
-                        SELECT 1 FROM information_schema.tables 
-                        WHERE table_schema = current_schema() AND table_name = 'schema_migrations'
-                    );
-                    """
+
+            is_ok, reason = verify_schema_lineage(conn, lineage=LINEAGE_SIMPLIFIED)
+            if not is_ok:
+                return JSONResponse(
+                    status_code=503,
+                    content={
+                        "status": "unavailable",
+                        "database": reason,
+                        "gemini": gemini_status
+                    }
                 )
-                has_migrations = cur.fetchone()[0]
-                if not has_migrations:
-                    return JSONResponse(
-                        status_code=503,
-                        content={
-                            "status": "unavailable",
-                            "database": "schema_not_ready",
-                            "gemini": gemini_status
-                        }
-                    )
-
-                from migrations.runner import MIGRATIONS_DIR, get_migration_files
-                import hashlib
-
-                expected_files = get_migration_files()
-                cur.execute("SELECT migration_name, checksum_sha256 FROM schema_migrations;")
-                applied_migrations = {row[0]: row[1] for row in cur.fetchall()}
-
-                for filename in expected_files:
-                    if filename not in applied_migrations:
-                        return JSONResponse(
-                            status_code=503,
-                            content={
-                                "status": "unavailable",
-                                "database": "schema_not_ready",
-                                "gemini": gemini_status
-                            }
-                        )
-                    filepath = os.path.join(MIGRATIONS_DIR, filename)
-                    try:
-                        with open(filepath, "rb") as f:
-                            file_checksum = hashlib.sha256(f.read()).hexdigest()
-                    except Exception:
-                        return JSONResponse(
-                            status_code=503,
-                            content={
-                                "status": "unavailable",
-                                "database": "schema_not_ready",
-                                "gemini": gemini_status
-                            }
-                        )
-                    if applied_migrations[filename] != file_checksum:
-                        return JSONResponse(
-                            status_code=503,
-                            content={
-                                "status": "unavailable",
-                                "database": "schema_not_ready",
-                                "gemini": gemini_status
-                            }
-                        )
         except Exception as e:
             logging.getLogger("app.readiness").error(f"Readiness check execution failed: {e}")
             return JSONResponse(

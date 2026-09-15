@@ -31,14 +31,17 @@ def normalize_str(val: Optional[str]) -> Optional[str]:
 def bootstrap_staging_environment(
     conn,
     seed_data: Dict[str, Any],
-    ledger_start_date: date,
-    owner_auth_subject: str,
+    started_on: Optional[date] = None,
+    owner_auth_subject: str = "",
+    ledger_start_date: Optional[date] = None,
 ) -> Dict[str, Any]:
     """
     Idempotently sets up initial staging configuration using household-scoped natural keys.
+    Conforms to the Astra-simplified 16-table architecture (no legacy account_state table).
     Validates strict consistency if an entity already exists and raises BootstrapConsistencyError on conflict.
-    Initializes account_state with initialized_at=NULL (does not establish opening balances or baselines).
     """
+    effective_started_on = started_on or ledger_start_date or date(2026, 1, 1)
+
     summary: Dict[str, Any] = {
         "household_id": None,
         "owner_user_id": None,
@@ -56,11 +59,12 @@ def bootstrap_staging_environment(
     hh_config = seed_data.get("household", {})
     hh_name = hh_config.get("name", "Staging Household").strip()
     reporting_currency = hh_config.get("reporting_currency", "CNY").strip().upper()
+    timezone = hh_config.get("timezone", "Asia/Singapore").strip()
 
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT id, name, reporting_currency, ledger_start_date, status
+            SELECT id, name, reporting_currency, started_on, status
             FROM households
             WHERE lower(name) = lower(%s);
             """,
@@ -69,15 +73,15 @@ def bootstrap_staging_environment(
         existing_hh = cur.fetchone()
 
     if existing_hh:
-        hh_id, db_name, db_currency, db_start_date, db_status = existing_hh
+        hh_id, db_name, db_currency, db_started_on, db_status = existing_hh
         if db_status != "active":
             raise BootstrapConsistencyError(
                 f"Household '{hh_name}' exists but status is '{db_status}' (expected 'active')"
             )
-        if db_start_date != ledger_start_date:
+        if db_started_on != effective_started_on:
             raise BootstrapConsistencyError(
-                f"Household '{hh_name}' exists but ledger_start_date mismatch: "
-                f"existing '{db_start_date}' != expected '{ledger_start_date}'"
+                f"Household '{hh_name}' exists but started_on/ledger_start_date mismatch: "
+                f"existing '{db_started_on}' != expected '{effective_started_on}'"
             )
         if db_currency != reporting_currency:
             raise BootstrapConsistencyError(
@@ -91,8 +95,9 @@ def bootstrap_staging_environment(
             conn=conn,
             household_id=household_id,
             name=hh_name,
-            ledger_start_date=ledger_start_date,
+            started_on=effective_started_on,
             reporting_currency=reporting_currency,
+            tz_name=timezone,
             status="active"
         )
 
@@ -104,12 +109,11 @@ def bootstrap_staging_environment(
     owner_config = seed_data.get("owner", {})
     display_name = owner_config.get("display_name", "Staging Owner").strip()
     email = normalize_str(owner_config.get("email"))
-    default_currency = owner_config.get("default_currency", "CNY").strip().upper()
 
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT id, auth_subject, email, display_name, default_currency, status
+            SELECT id, auth_subject, email, display_name, status
             FROM users
             WHERE auth_subject = %s;
             """,
@@ -118,15 +122,10 @@ def bootstrap_staging_environment(
         existing_user = cur.fetchone()
 
     if existing_user:
-        u_id, u_sub, u_email, u_dname, u_curr, u_status = existing_user
+        u_id, u_sub, u_email, u_dname, u_status = existing_user
         if u_status != "active":
             raise BootstrapConsistencyError(
                 f"User with auth_subject '{owner_auth_subject}' exists but status is '{u_status}' (expected 'active')"
-            )
-        if u_curr != default_currency:
-            raise BootstrapConsistencyError(
-                f"User with auth_subject '{owner_auth_subject}' exists but default_currency mismatch: "
-                f"existing '{u_curr}' != expected '{default_currency}'"
             )
         if u_dname != display_name:
             raise BootstrapConsistencyError(
@@ -147,7 +146,6 @@ def bootstrap_staging_environment(
             auth_subject=owner_auth_subject,
             display_name=display_name,
             email=email,
-            default_currency=default_currency,
             status="active"
         )
 
@@ -183,21 +181,11 @@ def bootstrap_staging_environment(
     # 4. Accounts (Natural Key: (household_id, lower(name)))
     # -------------------------------------------------------------
     raw_accounts = seed_data.get("accounts", [])
-    raw_account_names = {a["name"].strip() for a in raw_accounts}
-
-    # Validate linked_cash_account_name references
-    for acc in raw_accounts:
-        linked_name = acc.get("linked_cash_account_name")
-        if linked_name:
-            if linked_name.strip() not in raw_account_names:
-                raise BootstrapConsistencyError(
-                    f"Account '{acc['name']}' specifies linked_cash_account_name '{linked_name}' which is not in seed accounts."
-                )
 
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT id, name, institution, account_type, currency, billing_day, due_day, linked_cash_account_id, owner_user_id, status
+            SELECT id, name, account_type, balance_scope, currency, risk_level, statement_import_enabled, owner_user_id, opened_on, status
             FROM accounts
             WHERE household_id = %s;
             """,
@@ -210,18 +198,17 @@ def bootstrap_staging_environment(
         acc_by_name[r[1].lower().strip()] = {
             "id": r[0],
             "name": r[1],
-            "institution": r[2],
-            "account_type": r[3],
+            "account_type": r[2],
+            "balance_scope": r[3],
             "currency": r[4],
-            "billing_day": r[5],
-            "due_day": r[6],
-            "linked_cash_account_id": r[7],
-            "owner_user_id": r[8],
+            "risk_level": r[5],
+            "statement_import_enabled": r[6],
+            "owner_user_id": r[7],
+            "opened_on": r[8],
             "status": r[9],
         }
 
     account_id_map: Dict[str, UUID] = {}
-    # Build complete account ID map for new and existing accounts
     for acc in raw_accounts:
         a_name = acc["name"].strip()
         a_key = a_name.lower()
@@ -230,22 +217,15 @@ def bootstrap_staging_environment(
         else:
             account_id_map[a_name] = uuid4()
 
-    # Sort accounts so unlinked accounts are created before linked accounts
-    sorted_accounts = sorted(
-        raw_accounts,
-        key=lambda a: 1 if a.get("linked_cash_account_name") else 0
-    )
-
-    for acc in sorted_accounts:
+    for acc in raw_accounts:
         a_name = acc["name"].strip()
         a_key = a_name.lower()
         a_type = acc["account_type"].strip()
+        a_scope = acc.get("balance_scope", f"{a_name} balance").strip()
         a_curr = acc["currency"].strip().upper()
-        a_inst = normalize_str(acc.get("institution"))
-        a_bday = acc.get("billing_day")
-        a_dday = acc.get("due_day")
-        expected_linked_name = acc.get("linked_cash_account_name")
-        expected_linked_id = account_id_map[expected_linked_name.strip()] if expected_linked_name else None
+        a_risk = acc.get("risk_level")
+        a_stmt = bool(acc.get("statement_import_enabled", False))
+        a_opened = acc.get("opened_on") or effective_started_on
 
         if a_key in acc_by_name:
             curr_acc = acc_by_name[a_key]
@@ -269,43 +249,6 @@ def bootstrap_staging_environment(
                     f"Account '{a_name}' exists but currency mismatch: "
                     f"existing '{curr_acc['currency']}' != expected '{a_curr}'"
                 )
-            if (curr_acc["billing_day"] or None) != (a_bday or None):
-                raise BootstrapConsistencyError(
-                    f"Account '{a_name}' exists but billing_day mismatch: "
-                    f"existing '{curr_acc['billing_day']}' != expected '{a_bday}'"
-                )
-            if (curr_acc["due_day"] or None) != (a_dday or None):
-                raise BootstrapConsistencyError(
-                    f"Account '{a_name}' exists but due_day mismatch: "
-                    f"existing '{curr_acc['due_day']}' != expected '{a_dday}'"
-                )
-            if (curr_acc["institution"] or None) != (a_inst or None):
-                raise BootstrapConsistencyError(
-                    f"Account '{a_name}' exists but institution mismatch: "
-                    f"existing '{curr_acc['institution']}' != expected '{a_inst}'"
-                )
-            if curr_acc["linked_cash_account_id"] != expected_linked_id:
-                raise BootstrapConsistencyError(
-                    f"Account '{a_name}' exists but linked_cash_account_id mismatch: "
-                    f"existing '{curr_acc['linked_cash_account_id']}' != expected '{expected_linked_id}'. "
-                    f"Bootstrap refuses to silently modify existing account relationships."
-                )
-
-            # Ensure account_state row exists and has initialized_at IS NULL and ledger_balance == 0
-            state = accounts_repo.get_account_state(conn, curr_acc["id"])
-            if not state:
-                raise BootstrapConsistencyError(f"Account '{a_name}' exists but missing account_state projection row.")
-            if state["initialized_at"] is not None:
-                raise BootstrapConsistencyError(
-                    f"Account '{a_name}' already has initialized_at='{state['initialized_at']}'. "
-                    f"Phase 11.5 staging bootstrap requires initialized_at=NULL and must not overwrite an authoritative baseline."
-                )
-            if Decimal(str(state["ledger_balance"])) != Decimal("0.000000"):
-                raise BootstrapConsistencyError(
-                    f"Account '{a_name}' has non-zero ledger_balance '{state['ledger_balance']}'. "
-                    f"Staging bootstrap requires clean zero balance."
-                )
-
             summary["accounts_verified"] += 1
         else:
             acc_id = account_id_map[a_name]
@@ -314,13 +257,13 @@ def bootstrap_staging_environment(
                 account_id=acc_id,
                 household_id=household_id,
                 name=a_name,
+                balance_scope=a_scope,
                 account_type=a_type,
                 currency=a_curr,
-                institution=a_inst,
                 owner_user_id=owner_user_id,
-                linked_cash_account_id=expected_linked_id,
-                billing_day=a_bday,
-                due_day=a_dday,
+                risk_level=a_risk,
+                opened_on=a_opened,
+                statement_import_enabled=a_stmt,
                 status="active"
             )
             summary["accounts_created"] += 1
@@ -340,11 +283,11 @@ def bootstrap_staging_environment(
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT id, alias_text, normalized_alias, status, deleted_at
+                SELECT id, alias_text, normalized_alias, status
                 FROM account_aliases
-                WHERE account_id = %s;
+                WHERE household_id = %s AND account_id = %s;
                 """,
-                (target_acc_id,)
+                (household_id, target_acc_id)
             )
             existing_alias_rows = cur.fetchall()
 
@@ -355,7 +298,6 @@ def bootstrap_staging_environment(
                 "alias_text": r[1],
                 "normalized_alias": r[2],
                 "status": r[3],
-                "deleted_at": r[4]
             }
 
         for alias_text in alias_list:
@@ -363,9 +305,9 @@ def bootstrap_staging_environment(
             norm_alias = raw_alias.lower()
             if norm_alias in alias_by_norm:
                 ex_a = alias_by_norm[norm_alias]
-                if ex_a["status"] != "active" or ex_a["deleted_at"] is not None:
+                if ex_a["status"] != "active":
                     raise BootstrapConsistencyError(
-                        f"Alias '{raw_alias}' for account '{clean_acc_name}' exists in inactive/deleted state."
+                        f"Alias '{raw_alias}' for account '{clean_acc_name}' exists in inactive state."
                     )
                 summary["aliases_verified"] += 1
             else:
@@ -375,14 +317,14 @@ def bootstrap_staging_environment(
                     account_id=target_acc_id,
                     alias_text=raw_alias,
                     normalized_alias=norm_alias,
-                    status="active"
+                    status="active",
+                    household_id=household_id,
                 )
                 alias_by_norm[norm_alias] = {
                     "id": target_acc_id,
                     "alias_text": raw_alias,
                     "normalized_alias": norm_alias,
                     "status": "active",
-                    "deleted_at": None
                 }
                 summary["aliases_created"] += 1
 
@@ -424,10 +366,10 @@ def bootstrap_staging_environment(
         else:
             categories_repo.create_category(
                 conn=conn,
-                category_id=uuid4(),
                 household_id=household_id,
                 name=c_name,
                 category_type=c_type,
+                category_id=uuid4(),
                 status="active"
             )
             summary["categories_created"] += 1
@@ -460,15 +402,15 @@ def run_bootstrap_cli():
         print("ERROR: STAGING_OWNER_AUTH_SUBJECT environment variable must be set.")
         sys.exit(1)
 
-    start_date_str = os.environ.get("STAGING_LEDGER_START_DATE")
+    start_date_str = os.environ.get("STAGING_STARTED_ON") or os.environ.get("STAGING_LEDGER_START_DATE")
     if not start_date_str or not start_date_str.strip():
-        print("ERROR: STAGING_LEDGER_START_DATE environment variable must be set (expected YYYY-MM-DD).")
+        print("ERROR: STAGING_STARTED_ON (or STAGING_LEDGER_START_DATE) environment variable must be set (expected YYYY-MM-DD).")
         sys.exit(1)
 
     try:
-        ledger_start_date = datetime.strptime(start_date_str.strip(), "%Y-%m-%d").date()
+        started_on = datetime.strptime(start_date_str.strip(), "%Y-%m-%d").date()
     except ValueError:
-        print(f"ERROR: Invalid STAGING_LEDGER_START_DATE format '{start_date_str}': expected YYYY-MM-DD.")
+        print(f"ERROR: Invalid date format '{start_date_str}': expected YYYY-MM-DD.")
         sys.exit(1)
 
     if not os.path.exists(args.config):
@@ -480,7 +422,7 @@ def run_bootstrap_cli():
 
     print(f"LOG: Starting staging bootstrap against schema '{settings.DB_SCHEMA}'...")
     print(f"LOG: Owner auth_subject: '{owner_sub}'")
-    print(f"LOG: Ledger start date: '{ledger_start_date}'")
+    print(f"LOG: Started on: '{started_on}'")
 
     conn = get_connection(schema=settings.DB_SCHEMA)
     try:
@@ -488,7 +430,7 @@ def run_bootstrap_cli():
             res = bootstrap_staging_environment(
                 conn=conn,
                 seed_data=seed_data,
-                ledger_start_date=ledger_start_date,
+                started_on=started_on,
                 owner_auth_subject=owner_sub.strip()
             )
         print("SUCCESS: Staging bootstrap completed successfully!")

@@ -69,9 +69,15 @@ test("browser → same-origin proxy → JWT-protected API → PostgreSQL writes 
     await request.get("/api/v1/transactions?limit=100", { headers })
   ).json();
   expect(records.items).toHaveLength(42);
-  const date = new Date().toISOString().slice(0, 10);
+  // The UI uses the household date while the PDF fixture uses UTC. Cover both
+  // actual business dates, including runs after midnight in Asia/Singapore.
+  const dates = records.items
+    .map((r: { occurred_on: string }) => r.occurred_on)
+    .sort();
+  const from = dates[0],
+    to = dates[dates.length - 1];
   const report = await (
-    await request.get(`/api/v1/reports/spending?from=${date}&to=${date}`, {
+    await request.get(`/api/v1/reports/spending?from=${from}&to=${to}`, {
       headers,
     })
   ).json();

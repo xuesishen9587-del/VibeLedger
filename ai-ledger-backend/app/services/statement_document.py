@@ -273,7 +273,14 @@ intent, decimal-string original amounts, merchant and provider transaction ID if
 explicit. Never guess dates, account identity or missing lines. Preserve multiple
 equal purchases. Fees are expenses; transfers, repayments, opening balances and
 trades are not spending. Return processed page numbers, expected line count and
-honest completeness. Closing balance must be as of its own visible date, with full
+honest completeness.
+For transaction amounts, return positive absolute decimal strings; determine kind
+from the transaction meaning, debit/credit columns and labels, never from a plus
+or minus sign alone. Banks use opposite sign conventions for card purchases and
+refunds. Refunds keep kind refund and repayments keep kind repayment regardless
+of their displayed sign. If intent is ambiguous, use kind unknown and low intent
+confidence. This absolute-amount rule does not apply to closing balance evidence.
+Closing balance must be as of its own visible date, with full
 account scope. A credit monthly bill is not total debt. Never infer capital flows.
 """
         context={"account":{k:account.get(k) for k in ("id","name","currency","account_type","balance_scope","aliases")},

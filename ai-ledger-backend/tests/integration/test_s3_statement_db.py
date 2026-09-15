@@ -107,6 +107,9 @@ class TestS3StatementDb(BaseDbTestCase):
 
     def test_skipped_nonspending_and_unlinked_refund_require_note(self):
         draft=self.upload(self.extraction([self.line(kind="transfer"),self.line(kind="refund"),self.line(kind="fee",merchant="Fee")])).json()
+        # Extracted refunds now have an honest source note. Explicitly removing
+        # that note must still preserve the existing unlinked-refund guard.
+        draft=self.edit(draft,[{"row_id":r["row_id"],"action":r["action"],"remarks":None} for r in draft["draft"]["lines"]])
         self.assertEqual(self.confirm(draft).json()["status"],"needs_confirmation")
         current=self.client.get(f"/api/v1/ingestion-requests/{draft['request_id']}").json()
         lines=[{"row_id":r["row_id"],"action":r["action"],**({"remarks":"Prior purchase refund"} if r["transaction_type"]=="refund" else {})} for r in current["draft"]["lines"]]
@@ -114,6 +117,23 @@ class TestS3StatementDb(BaseDbTestCase):
         result=self.confirm(edited)
         self.assertEqual(result.json()["status"],"committed",result.text)
         self.assertEqual(result.json()["counts"],{"create":2,"link":0,"skip":1})
+
+    def test_opposite_statement_signs_import_without_per_row_edits(self):
+        from decimal import Decimal
+        for sign in ("-", "+"):
+            draft=self.upload(self.extraction([
+                self.line(amount=sign+"100.00",merchant="Purchase "+sign),
+                self.line(amount=sign+"20.00",kind="refund",merchant="Refund "+sign),
+                self.line(amount=sign+"5.00",kind="fee",merchant="Fee "+sign),
+                self.line(amount=sign+"300.00",kind="repayment")])).json()
+            self.assertEqual(draft["warnings"],[])
+            result=self.confirm(draft)
+            self.assertEqual(result.json()["status"],"committed",result.text)
+            self.assertEqual(result.json()["counts"],{"create":3,"link":0,"skip":1})
+            self.assertEqual(self.confirm(draft).json(),result.json())
+        records=repo.rows(self.conn,"SELECT * FROM transactions")
+        self.assertEqual(len(records),6)
+        self.assertEqual(sum(r["original_amount"]*(-1 if r["transaction_type"]=="refund" else 1) for r in records),Decimal("170.00"))
 
     def test_balance_only_import_and_explicit_identical_observation_reuse(self):
         closing={"row_id":"closing","label":"Wallet","amount":"100.00","currency":"CNY","meaning":"asset","as_of":"2026-02-28",
@@ -132,6 +152,37 @@ class TestS3StatementDb(BaseDbTestCase):
         reused=self.confirm(fixed).json()
         self.assertTrue(reused["snapshots"][0]["reused"],reused)
         self.assertEqual(repo.rows(self.conn,"SELECT count(*) n FROM account_snapshots")[0]["n"],1)
+
+    def test_explicit_legacy_amount_repair_preserves_evidence_edits_and_uncertainty(self):
+        import json
+        draft=self.upload(self.extraction([
+            self.line(amount="-12.00"),
+            self.line(amount="-23.00",merchant="Uncertain",confidence={k:.2 for k in ("amount","currency","date","intent","category")}),
+            self.line(amount="-34.00",merchant="Edited"),
+            self.line(amount="-45.00",kind="unknown",merchant="Unknown")])).json()
+        legacy=draft["draft"]
+        for line,amount in zip(legacy["lines"],["-12.00","-23.00","8.00","-45.00"]):
+            line["original_amount"]=amount
+            line.pop("kind",None)
+        with self.conn.cursor() as cur:
+            cur.execute("UPDATE ingestion_requests SET draft_payload=%s::jsonb WHERE id=%s",
+                (json.dumps(legacy),draft["request_id"]))
+        self.conn.commit()
+        evidence=repo.rows(self.conn,"SELECT id,extracted_payload FROM statement_lines ORDER BY row_no")
+        path=f"/api/v1/ingestion-requests/{draft['request_id']}"
+        self.assertEqual(self.client.get(path).json()["draft"]["lines"][0]["original_amount"],"-12.00")
+        body={"expected_version":draft["row_version"],"normalize_display_amounts":True,
+            "lines":[{"row_id":r["row_id"],"action":r["action"]} for r in legacy["lines"]]}
+        repaired=self.client.patch(path+"/draft",json=body)
+        self.assertEqual(repaired.status_code,200,repaired.text)
+        lines=repaired.json()["draft"]["lines"]
+        self.assertEqual([r["original_amount"] for r in lines],["12.00","23.00","8.00","-45.00"])
+        self.assertFalse(lines[0]["requires_review"])
+        self.assertTrue(lines[1]["requires_review"])
+        self.assertTrue(lines[1]["category_uncertain"])
+        self.assertEqual(evidence,repo.rows(self.conn,"SELECT id,extracted_payload FROM statement_lines ORDER BY row_no"))
+        self.assertEqual(self.client.patch(path+"/draft",json=body).status_code,409)
+        self.assertEqual(repo.rows(self.conn,"SELECT count(*) n FROM transactions")[0]["n"],0)
 
     def test_statement_binds_due_schedule_once_with_statement_provenance(self):
         from datetime import date

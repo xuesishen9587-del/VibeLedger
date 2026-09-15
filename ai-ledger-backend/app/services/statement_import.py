@@ -7,6 +7,7 @@ from uuid import uuid4
 from fastapi import HTTPException
 from app.domain.spending import fail, money, business_date
 from app.domain.statement_import import StatementExtraction
+from app.domain.statement_amounts import statement_amount
 from app.repositories import spending as repo, simplified_schema as schema
 from app.services import capture_receipts as receipts, balance_service as balances, balance_capture
 from app.services import spending_service as spending, spending_schedules as schedules
@@ -75,9 +76,11 @@ def prepare(conn,actor,row,data,account,categories,head):
         category=fallback if uncertain else category
         excluded=extracted["kind"] in ("transfer","repayment","income","opening_balance","investment_trade")
         line={"row_id":str(identity),"row_no":number,"action":"skip" if excluded else "create",
-            "occurred_on":extracted["occurred_on"],"original_amount":extracted["amount"],"original_currency":extracted["currency"],
+            "occurred_on":extracted["occurred_on"],"original_amount":statement_amount(extracted["amount"],extracted["kind"]),"original_currency":extracted["currency"],
             "merchant":extracted["merchant"],"transaction_type":"refund" if extracted["kind"]=="refund" else "expense" if extracted["kind"] in ("expense","fee") else None,
-            "category_id":str(category["id"]),"category_uncertain":uncertain,"remarks":None,
+            "category_id":str(category["id"]),"category_uncertain":uncertain,
+            "kind":extracted["kind"],
+            "remarks":("账单退款"+(" · "+extracted["merchant"] if extracted["merchant"] else "")) if extracted["kind"]=="refund" else None,
             "provider_transaction_id":extracted["provider_transaction_id"],"reason":"Not spending: "+extracted["kind"] if excluded else None,
             "requires_review":any(extracted["confidence"][k]<.85 for k in ("amount","currency","date","intent")),"duplicate_ids":[]}
         targets=provider_matches(conn,actor.household_id,account["id"],line["provider_transaction_id"])
@@ -258,9 +261,16 @@ def revise(factory,actor,identity,data):
         ids=[r["row_id"] for r in data["lines"]]
         if set(ids)!=set(prior) or len(ids)!=len(set(ids)):
             fail("INVALID_STATEMENT_ROWS","Preserve every row ID and explicitly skip excluded lines.")
+        extracted_by_id={}
+        if data.get("normalize_display_amounts"):
+            extracted_by_id={str(r["id"]):r["extracted_payload"] for r in repo.rows(conn,
+                "SELECT id,extracted_payload FROM statement_lines WHERE household_id=%s AND request_id=%s",
+                (actor.household_id,identity))}
         revised=[]
         for line in data["lines"]:
             previous=prior[line["row_id"]]
+            if data.get("normalize_display_amounts"):
+                previous=repair_display_amount(previous,extracted_by_id.get(line["row_id"],{}),line)
             confirmed = line.get("confirm_facts",False)
             edited={**previous,**line,"requires_review":False if confirmed else previous["requires_review"],
                     "explicit_create":line["action"]=="create" and (confirmed or previous.get("explicit_create",False))}
@@ -280,6 +290,24 @@ def revise(factory,actor,identity,data):
                 draft[field]=data[field]
         draft,_=validate(conn,actor,row,draft)
         return receipts.response(receipts.draft(conn,actor,row,draft))
+
+
+def repair_display_amount(previous,extracted,edit):
+    """Explicit repair of a pre-normalization draft, never a read-side migration.
+
+    Only original, unedited amounts of a matching known kind are eligible.
+    Keep low-confidence review flags and all immutable statement evidence.
+    """
+    kind=extracted.get("kind")
+    expected_type="refund" if kind=="refund" else "expense" if kind in ("expense","fee") else None
+    if (expected_type is None or previous.get("transaction_type")!=expected_type
+            or "original_amount" in edit or "transaction_type" in edit
+            or previous.get("original_amount")!=extracted.get("amount")):
+        return previous
+    normalized=statement_amount(extracted.get("amount"),kind)
+    if normalized==previous.get("original_amount"):
+        return previous
+    return {**previous,"original_amount":normalized}
 
 
 def confirm(factory,actor,identity,version,provider=None):

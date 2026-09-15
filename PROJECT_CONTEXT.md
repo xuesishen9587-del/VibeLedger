@@ -1,5 +1,25 @@
 # VibeLedger project handoff
 
+## 2026-09-15 frontend redesign continuation
+
+The user's current handoff supersedes older pending-status and quota notes below.
+S3 balance screenshot and S4 investment/auth/device live paths have passed as
+reported by the user; statement UX/import, latest Shortcut and JWKS rotation remain
+pending. The user reinstated the five-hour remaining <=10% wrap-up rule.
+
+The complete redesign plan is in
+[FRONTEND_REDESIGN](docs/architecture/FRONTEND_REDESIGN.md), with the implemented
+React candidate, test results, limitations and exact continuation priorities in
+[FRONTEND_PROGRESS](docs/architecture/FRONTEND_PROGRESS.md). The new frontend lives
+in `ai-ledger-web`; Streamlit remains the fallback. No hosted cutover is claimed.
+
+Docker is now available. Local verification: 264 backend unit, 187 PostgreSQL
+integration, 99 legacy Dashboard, 12 frontend logic, 3 proxy, 7 browser scenarios,
+and 1 browser-to-real-API/JWT/PostgreSQL workflow passed. See FRONTEND_PROGRESS
+for the remaining hosted acceptance and less-common workflow tests. All changes
+are still uncommitted in this working tree.
+
+
 Updated: **2026-09-14**.
 
 ## Deployment Readiness checkpoint — 2026-09-14

@@ -69,3 +69,4 @@ class StatementDraftEdit(BaseModel):
     period_end: date | None = None
     acknowledge_partial: bool = False
     confirm_account_identity: bool = False
+    normalize_display_amounts: bool = False

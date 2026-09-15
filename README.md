@@ -1,5 +1,10 @@
 # VibeLedger
 
+2026-09-15: a new [React frontend candidate](ai-ledger-web/README.md) and
+[complete redesign plan](docs/architecture/FRONTEND_REDESIGN.md) are available.
+See [implementation progress and remaining acceptance](docs/architecture/FRONTEND_PROGRESS.md)
+before switching the hosted Dashboard. Existing Streamlit remains available.
+
 A personal finance system for a two-person household: capture everyday expenses
 with an iPhone Shortcut, periodically update account balances, and see household
 assets, debts, net worth, investment gains and risk distribution.

@@ -113,18 +113,34 @@ async function setup(
     uncertain = false,
     shortExpiry = false,
     multipleAccounts = false,
+    mixedReview = false,
+    userEmail = "test@example.com",
+    userId = "11111111-1111-4111-8111-111111111111",
   } = {},
 ) {
   const accounts = multipleAccounts
     ? [account, { ...account, id: "second-account", name: "备用信用卡" }]
     : [account];
   let receipt = statement(count, uncertain);
+  if (mixedReview) {
+    receipt.draft.lines[0].requires_review = true;
+    // Existing receipts may expose only the first warning, hiding an invalid category.
+    receipt.draft.lines[1].requires_review = true;
+    receipt.draft.lines[1].category_id = "removed-category";
+    receipt.draft.lines[2].transaction_type = "";
+    receipt.warnings = receipt.draft.warnings = [
+      { code: "STATEMENT_LINE_UNCERTAIN", row_id: "row-0" },
+      { code: "STATEMENT_LINE_UNCERTAIN", row_id: "row-1" },
+      { code: "INVALID_TRANSACTION_TYPE", row_id: "row-2" },
+      { code: "POSSIBLE_DUPLICATE", row_id: "row-3" },
+    ];
+  }
   const writes: { path: string; body: any }[] = [];
   let refreshes = 0;
   const user = {
-    id: "11111111-1111-4111-8111-111111111111",
+    id: userId,
     aud: "authenticated",
-    email: "test@example.com",
+    email: userEmail,
     app_metadata: {},
     user_metadata: {},
     created_at: "2026-01-01T00:00:00Z",
@@ -279,9 +295,22 @@ async function setup(
         if (edit.confirm_facts) line.requires_review = false;
       }
       receipt.row_version++;
-      receipt.warnings = receipt.draft.warnings = receipt.draft.lines
-        .filter((l) => l.requires_review)
-        .map((l) => ({ code: "STATEMENT_LINE_UNCERTAIN", row_id: l.row_id }));
+      receipt.warnings = receipt.draft.warnings = receipt.draft.lines.flatMap(
+        (l) => {
+          const code = !categories.some((c) => c.id === l.category_id)
+            ? "INVALID_CATEGORY"
+            : !["expense", "refund"].includes(l.transaction_type)
+              ? "INVALID_TRANSACTION_TYPE"
+              : l.requires_review
+                ? "STATEMENT_LINE_UNCERTAIN"
+                : mixedReview &&
+                    l.row_id === "row-3" &&
+                    !(l as any).confirm_facts
+                  ? "POSSIBLE_DUPLICATE"
+                  : null;
+          return code ? [{ code, row_id: l.row_id }] : [];
+        },
+      );
       data = receipt;
     } else if (path === "/ingestion-requests/statement/confirm") {
       expect(body.expected_version).toBe(receipt.row_version);
@@ -313,6 +342,9 @@ test("persistent login, desktop homepage and deep-link restore, logout clears se
 }) => {
   await setup(page);
   await login(page);
+  await expect(page.getByLabel("当前登录身份")).toContainText(
+    "test@example.com",
+  );
   await page.screenshot({
     path: "test-results/home-desktop.png",
     fullPage: true,
@@ -523,4 +555,191 @@ test("a PDF password error returns to upload instead of opening a failed draft",
       Object.keys(sessionStorage).filter((k) => k.startsWith("vl-upload:")),
     ),
   ).toEqual([]);
+});
+
+test("mixed statement warnings resolve on review, expose real blockers, and import once", async ({
+  page,
+}) => {
+  const state = await setup(page, { count: 5, mixedReview: true });
+  await login(page);
+  await page.goto("/#/statement/statement");
+  await page.getByRole("button", { name: "只看待检查 4" }).click();
+  await page
+    .getByTestId("statement-row")
+    .filter({ has: page.getByLabel("第 1 笔商户", { exact: true }) })
+    .getByRole("button", { name: "检查", exact: true })
+    .click();
+  await page.getByRole("button", { name: "这一笔已核对", exact: true }).click();
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: "只看待检查 3" }),
+  ).toBeVisible();
+  await expect(page.getByLabel("第 1 笔商户", { exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "全部 5 笔" }).click();
+  await expect(
+    page
+      .getByTestId("statement-row")
+      .first()
+      .getByRole("button", { name: "就绪" }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "只看待检查 3" }).click();
+  const invalid = page
+    .getByTestId("statement-row")
+    .filter({ has: page.getByLabel("第 2 笔商户", { exact: true }) });
+  await expect(invalid).toContainText("请选择可用的支出分类");
+  await invalid.getByRole("button", { name: "检查", exact: true }).click();
+  const dialog = page.getByRole("dialog");
+  await expect(dialog).toContainText("核对不能代替修改");
+  await dialog.getByRole("button", { name: "保存修改并重新检查" }).click();
+  await expect(dialog).toBeVisible();
+  await expect(
+    dialog.getByRole("button", { name: "保存修改并重新检查" }),
+  ).toBeEnabled();
+  await expect(
+    page.getByRole("button", { name: "只看待检查 3" }),
+  ).toBeVisible();
+  await expect(dialog).toContainText("请选择可用的支出分类");
+  await dialog
+    .getByRole("combobox", { name: "支出分类", exact: true })
+    .selectOption("food");
+  await dialog.getByRole("button", { name: "保存修改并重新检查" }).click();
+  await expect(dialog).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: "只看待检查 2" }),
+  ).toBeVisible();
+  await page
+    .getByTestId("statement-row")
+    .first()
+    .getByRole("button", { name: "检查", exact: true })
+    .click();
+  await expect(dialog).toContainText("请选择交易性质：消费或退款");
+  await dialog
+    .getByRole("combobox", { name: "交易性质", exact: true })
+    .selectOption("expense");
+  await dialog.getByRole("button", { name: "保存修改并重新检查" }).click();
+  await expect(dialog).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: "只看待检查 1" }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "检查", exact: true }).click();
+  await expect(dialog).toContainText("可能已经记过");
+  await dialog
+    .getByRole("button", { name: "这一笔已核对", exact: true })
+    .click();
+  await expect(dialog).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: "只看待检查 0" }),
+  ).toBeVisible();
+  await page.reload();
+  await expect(
+    page.getByRole("button", { name: "只看待检查 0" }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "确认导入整份账单" }).click();
+  await expect(page.getByRole("heading", { name: "账单已导入" })).toBeVisible();
+  expect(state.writes.filter((w) => w.path.endsWith("/confirm"))).toHaveLength(
+    1,
+  );
+  expect(
+    state.writes.find((w) => w.path.endsWith("/draft"))!.body.lines[1]
+      .confirm_facts,
+  ).toBeUndefined();
+});
+
+for (const uncertain of [false, true]) {
+  test(`PDF processing appears immediately, reassures during a wait, and ${uncertain ? "preserves recovery after network failure" : "clears on receipt"}`, async ({
+    page,
+  }) => {
+    await page.clock.install();
+    await setup(page);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let uploadKey: string | undefined;
+    let uploads = 0;
+    await page.route(
+      "**/api/v1/accounts/account/statement-imports",
+      async (r) => {
+        uploads++;
+        uploadKey = r.request().headers()["idempotency-key"];
+        await gate;
+        if (uncertain) await r.abort("failed");
+        else await r.fulfill({ json: statement(5) });
+      },
+    );
+    await page.route("**/api/v1/ingestion-requests/by-key/*", async (r) => {
+      expect(r.request().url()).toContain(uploadKey);
+      await r.fulfill({ json: statement(5) });
+    });
+    await login(page);
+    await page.goto("/#/statement");
+    await page.getByLabel("PDF 账单", { exact: true }).setInputFiles({
+      name: "card.pdf",
+      mimeType: "application/pdf",
+      buffer: Buffer.from("%PDF-fixture"),
+    });
+    await page.getByRole("button", { name: "开始识别账单" }).click();
+    await expect(
+      page.getByRole("progressbar", { name: "账单识别进行中" }),
+    ).toBeVisible();
+    await expect(
+      page.getByText("正在读取并识别账单，请稍候", { exact: true }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "正在识别…" }),
+    ).toBeDisabled();
+    await expect(
+      page.getByRole("button", { name: "开始识别账单" }),
+    ).toHaveCount(0);
+    await expect(
+      page.getByRole("button", { name: "取消这次上传" }),
+    ).toHaveCount(0);
+    await page.clock.fastForward(31000);
+    await expect(page.getByText(/识别仍在进行/)).toBeVisible();
+    await expect(page.getByText("已等待 31 秒")).toBeVisible();
+    release();
+    if (uncertain) {
+      await expect(
+        page.getByRole("button", { name: "查询识别结果" }),
+      ).toBeVisible();
+      await expect(page.getByRole("progressbar")).toHaveCount(0);
+      await page.reload();
+      await page.getByRole("button", { name: "查询识别结果" }).click();
+    }
+    await expect(page.getByRole("heading", { name: "核对账单" })).toBeVisible();
+    await expect(page.getByRole("progressbar")).toHaveCount(0);
+    expect(uploads).toBe(1);
+  });
+}
+
+test("current login identity changes with the signed-in account on mobile", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await setup(page);
+  await login(page);
+  await expect(page.getByLabel("当前登录身份")).toContainText(
+    "test@example.com",
+  );
+  await page.goto("/#/settings");
+  await page.getByRole("button", { name: "提醒与登录", exact: true }).click();
+  await page
+    .getByRole("button", { name: "退出登录", exact: true })
+    .last()
+    .click();
+  await expect(page.getByRole("heading", { name: "登录" })).toBeVisible();
+  await setup(page, {
+    userEmail: "another-member@example.com",
+    userId: "22222222-2222-4222-8222-222222222222",
+  });
+  await login(page);
+  await expect(page.getByLabel("当前登录身份")).toContainText(
+    "another-member@example.com",
+  );
+  await expect(page.getByLabel("当前登录身份")).not.toContainText(
+    "test@example.com",
+  );
+  expect(
+    await page.evaluate(() => document.documentElement.scrollWidth),
+  ).toBeLessThanOrEqual(390);
 });

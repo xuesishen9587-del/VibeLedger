@@ -68,6 +68,39 @@ class TestS3StatementDb(BaseDbTestCase):
         fixed=self.edit(result,[{"row_id":line["row_id"],"action":"create","occurred_on":"2026-02-03"}],acknowledge_partial=True,confirm_account_identity=True)
         self.assertEqual(self.confirm(fixed).json()["status"],"committed")
 
+    def test_acknowledgement_clears_uncertainty_but_preserves_validation_and_atomic_import(self):
+        confidence={k:.2 for k in ("amount","currency","date","intent","category")}
+        draft=self.upload(self.extraction([
+            self.line(merchant="Low confidence",confidence=confidence),
+            self.line(merchant="Missing category",confidence=confidence),
+            self.line(merchant="Unknown intent",kind="unknown"),
+            self.line(merchant="Missing date",occurred_on=None),
+            self.line(merchant="Invalid amount",amount="0"),
+        ])).json()
+        lines=[{"row_id":r["row_id"],"action":r["action"]} for r in draft["draft"]["lines"]]
+        lines[1]["category_id"]=None
+        reviewed=self.edit(draft,lines)
+        by_row={w["row_id"]:w["code"] for w in reviewed["warnings"]}
+        self.assertNotIn(lines[0]["row_id"],by_row)
+        self.assertEqual(by_row[lines[1]["row_id"]],"INVALID_CATEGORY")
+        self.assertEqual(by_row[lines[2]["row_id"]],"INVALID_TRANSACTION_TYPE")
+        self.assertIn(lines[3]["row_id"],by_row)
+        self.assertIn(lines[4]["row_id"],by_row)
+        blocked=self.confirm(reviewed).json()
+        self.assertEqual(blocked["status"],"needs_confirmation")
+        self.assertEqual(repo.rows(self.conn,"SELECT count(*) n FROM transactions")[0]["n"],0)
+        lines[1]["category_id"]=draft["draft"]["lines"][0]["category_id"]
+        lines[2]["transaction_type"]="expense"
+        lines[3]["occurred_on"]="2026-02-03"
+        lines[4]["original_amount"]="12.00"
+        fixed=self.edit(blocked,lines)
+        self.assertEqual(fixed["warnings"],[])
+        result=self.confirm(fixed).json()
+        self.assertEqual(result["status"],"committed")
+        self.assertEqual(result["counts"]["create"],5)
+        self.assertEqual(self.confirm(fixed).json(),result)
+        self.assertEqual(repo.rows(self.conn,"SELECT count(*) n FROM transactions")[0]["n"],5)
+
     def test_provider_id_overlap_links_and_equal_purchases_preserve_multiplicity(self):
         first=self.upload(self.extraction([self.line(provider_transaction_id="bank-1")])).json()
         saved=self.confirm(first).json()

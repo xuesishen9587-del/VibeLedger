@@ -243,12 +243,11 @@ function Shell({
         <div className="main-area">
           <div className="topbar">
             <span>家庭账本</span>
-            <div>
-              <span className="avatar">我</span>
-              <span className="avatar partner">
-                <Heart size={12} />
-              </span>
-              <span className="small">家庭成员</span>
+            <div className="login-identity" aria-label="当前登录身份">
+              <span>当前登录</span>
+              <strong>
+                {session.user.email || session.user.phone || session.user.id}
+              </strong>
             </div>
           </div>
           <main className="page" id="main-content">

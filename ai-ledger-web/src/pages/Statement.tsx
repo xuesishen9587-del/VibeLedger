@@ -17,6 +17,7 @@ import {
   statementEdit,
   statementSummary,
   lineWarnings,
+  reviewReason,
 } from "../lib/statement";
 import type {
   Receipt,
@@ -26,6 +27,7 @@ import type {
   Transaction,
   Schedule,
   Snapshot,
+  Warning,
 } from "../types";
 import {
   Heading,
@@ -56,6 +58,18 @@ function StatementUpload() {
   const [error, setError] = useState<Error | null>(null),
     [busy, setBusy] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
+  const [recognizing, setRecognizing] = useState(false);
+  const [elapsed, setElapsed] = useState(0);
+  useEffect(() => {
+    if (!recognizing) return;
+    const started = Date.now();
+    setElapsed(0);
+    const timer = window.setInterval(
+      () => setElapsed(Math.floor((Date.now() - started) / 1000)),
+      1000,
+    );
+    return () => window.clearInterval(timer);
+  }, [recognizing]);
   const eligible = accounts.filter(
     (a) => a.status === "active" && a.statement_import_enabled,
   );
@@ -96,7 +110,24 @@ function StatementUpload() {
       <h2>上传 PDF 账单</h2>
       <p>上传 PDF，先看识别结果，再一次确认导入。</p>
       {!pending && <ErrorBox error={error} />}
-      {pending ? (
+      {recognizing ? (
+        <div className="recognition-progress" aria-busy="true">
+          <div role="status">
+            <strong>正在读取并识别账单，请稍候</strong>
+            <p>
+              {elapsed >= 30
+                ? "识别仍在进行，较长账单需要更多时间，请不要重复上传同一份 PDF。"
+                : "正在处理 PDF，完成后会自动显示核对结果。"}
+            </p>
+          </div>
+          <progress aria-label="账单识别进行中" />
+          <p className="muted">已等待 {elapsed} 秒</p>
+          <Button disabled>
+            <LoaderCircle className="spin" size={17} />
+            正在识别…
+          </Button>
+        </div>
+      ) : pending ? (
         <div className="notice warning">
           <strong>上次上传的结果还未确认</strong>
           <p>可以先查询结果，或取消本次上传后重新选择文件。</p>
@@ -136,6 +167,7 @@ function StatementUpload() {
               account: String(form.get("account")),
             };
             setBusy(true);
+            setRecognizing(true);
             setError(null);
             remember(p);
             const data = new FormData();
@@ -174,6 +206,7 @@ function StatementUpload() {
               throw e;
             } finally {
               setBusy(false);
+              setRecognizing(false);
               const password = document.querySelector<HTMLInputElement>(
                 'input[name="password"]',
               );
@@ -227,13 +260,22 @@ function StatementDetail({
   onChange,
   onClose,
   onConfirm,
+  warnings,
+  busy,
+  error: saveError,
 }: {
   row: StatementLine;
   onChange: (update: Partial<StatementLine>) => void;
   onClose: () => void;
   onConfirm: () => void;
+  warnings: Warning[];
+  busy: boolean;
+  error: Error | null;
 }) {
-  const { api } = useApp();
+  const { api, categories } = useApp();
+  const blocked = warnings.some(
+    (w) => !["STATEMENT_LINE_UNCERTAIN", "POSSIBLE_DUPLICATE"].includes(w.code),
+  );
   const [targets, setTargets] = useState<Transaction[]>([]),
     [error, setError] = useState<Error | null>(null);
   const schedules = useResource<Page<Schedule>>(
@@ -272,138 +314,230 @@ function StatementDetail({
     ).values(),
   ];
   return (
-    <Modal title={row.merchant || `第 ${row.row_no} 笔交易`} onClose={onClose}>
-      <p className="muted">
-        {day(row.occurred_on)} ·{" "}
-        {money(row.original_amount, row.original_currency || "CNY")}
-      </p>
-      <Field label="怎样处理这笔？">
-        <select
-          value={row.action}
-          onChange={(e) =>
-            onChange({
-              action: e.target.value as StatementLine["action"],
-              reason: e.target.value === "skip" ? "不计入本次支出" : row.reason,
-            })
-          }
-        >
-          <option value="create">记为一笔独立消费 / 退款</option>
-          <option value="link_existing">已经记过，关联已有记录</option>
-          <option value="skip">跳过，不计入支出</option>
-          <option value="use_schedule_period">对应月度计划的某一期</option>
-        </select>
-      </Field>
-      {row.duplicate_ids.length > 0 && (
-        <div className="notice warning">
-          发现可能重复的记录。选择独立记录表示这是另一笔真实交易。
+    <Modal
+      title={row.merchant || `第 ${row.row_no} 笔交易`}
+      onClose={() => {
+        if (!busy) onClose();
+      }}
+    >
+      <ErrorBox error={saveError} />
+      {warnings.length > 0 && (
+        <div className="notice warning" role="status">
+          <strong>
+            {blocked ? "请修改以下问题后重新检查" : "请核对以下疑点"}
+          </strong>
+          <ul>
+            {warnings.map((w, i) => (
+              <li key={i}>{reviewReason(w)}</li>
+            ))}
+          </ul>
         </div>
       )}
-      {row.action === "link_existing" && (
-        <>
-          <Field label="查找已有记录">
-            <input
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder="搜索商户"
-            />
-          </Field>
-          <ErrorBox error={error || candidates.error} />
-          <Field label="选择已经记过的那一笔">
-            <select
-              value={row.transaction_id || ""}
-              onChange={(e) => {
-                const t = choices.find((t) => t.id === e.target.value);
-                onChange({
-                  transaction_id: t?.id || null,
-                  expected_transaction_version: t?.row_version ?? null,
-                });
-              }}
-            >
-              <option value="">请选择</option>
-              {choices.map((t) => (
-                <option key={t.id} value={t.id}>
-                  {day(t.occurred_on)} ·{" "}
-                  {t.merchant || kindLabel[t.transaction_type]} ·{" "}
-                  {money(t.original_amount, t.original_currency)}
-                </option>
-              ))}
-            </select>
-          </Field>
-        </>
-      )}
-      {row.action === "use_schedule_period" && (
-        <>
-          <ErrorBox error={schedules.error} />
-          <Field label="月度计划">
-            <select
-              value={row.schedule_id || ""}
-              onChange={(e) => {
-                const s = schedules.data?.items.find(
-                  (s) => s.id === e.target.value,
-                );
-                onChange({
-                  schedule_id: s?.id || null,
-                  expected_schedule_version: s?.row_version ?? null,
-                  period_no: row.period_no || 1,
-                });
-              }}
-            >
-              <option value="">请选择</option>
-              {schedules.data?.items.map((s) => (
-                <option key={s.id} value={s.id}>
-                  {s.name}
-                </option>
-              ))}
-            </select>
-          </Field>
-          {schedules.data?.next_cursor && (
-            <p className="notice">
-              只列出前 200 个计划，请先在月度计划中定位目标。
-            </p>
-          )}
-          <Field label="第几期">
-            <input
-              type="number"
-              min="1"
-              value={row.period_no || 1}
-              onChange={(e) => onChange({ period_no: Number(e.target.value) })}
-            />
-          </Field>
-        </>
-      )}
-      <Field label="备注">
-        <input
-          value={row.remarks || ""}
-          onChange={(e) => onChange({ remarks: e.target.value || null })}
-          maxLength={2000}
-        />
-      </Field>
-      {row.action === "skip" && (
-        <Field label="跳过原因">
+      <fieldset disabled={busy}>
+        <p className="muted">
+          {day(row.occurred_on)} ·{" "}
+          {money(row.original_amount, row.original_currency || "CNY")}
+        </p>
+        <Field label="怎样处理这笔？">
+          <select
+            value={row.action}
+            onChange={(e) =>
+              onChange({
+                action: e.target.value as StatementLine["action"],
+                reason:
+                  e.target.value === "skip" ? "不计入本次支出" : row.reason,
+              })
+            }
+          >
+            <option value="create">记为一笔独立消费 / 退款</option>
+            <option value="link_existing">已经记过，关联已有记录</option>
+            <option value="skip">跳过，不计入支出</option>
+            <option value="use_schedule_period">对应月度计划的某一期</option>
+          </select>
+        </Field>
+        {row.action === "create" || row.action === "use_schedule_period" ? (
+          <div className="form-grid">
+            <Field label="交易日期">
+              <input
+                type="date"
+                value={row.occurred_on || ""}
+                onChange={(e) => onChange({ occurred_on: e.target.value })}
+              />
+            </Field>
+            <Field label="交易金额">
+              <input
+                inputMode="decimal"
+                value={row.original_amount || ""}
+                onChange={(e) => onChange({ original_amount: e.target.value })}
+              />
+            </Field>
+            <Field label="交易币种">
+              <select
+                value={row.original_currency || ""}
+                onChange={(e) =>
+                  onChange({ original_currency: e.target.value })
+                }
+              >
+                <option value="">请选择</option>
+                {currencies.map((c) => (
+                  <option key={c}>{c}</option>
+                ))}
+              </select>
+            </Field>
+            <Field label="交易性质">
+              <select
+                value={row.transaction_type || ""}
+                onChange={(e) =>
+                  onChange({
+                    transaction_type: e.target.value as "expense" | "refund",
+                  })
+                }
+              >
+                <option value="">请选择</option>
+                <option value="expense">消费</option>
+                <option value="refund">退款</option>
+              </select>
+            </Field>
+            <Field label="支出分类">
+              <select
+                value={row.category_id || ""}
+                onChange={(e) => onChange({ category_id: e.target.value })}
+              >
+                <option value="">请选择</option>
+                {categories
+                  .filter(
+                    (c) =>
+                      c.status === "active" && c.category_type === "expense",
+                  )
+                  .map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.name}
+                    </option>
+                  ))}
+              </select>
+            </Field>
+          </div>
+        ) : null}
+        {row.duplicate_ids.length > 0 && (
+          <div className="notice warning">
+            发现可能重复的记录。选择独立记录表示这是另一笔真实交易。
+          </div>
+        )}
+        {row.action === "link_existing" && (
+          <>
+            <Field label="查找已有记录">
+              <input
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="搜索商户"
+              />
+            </Field>
+            <ErrorBox error={error || candidates.error} />
+            <Field label="选择已经记过的那一笔">
+              <select
+                value={row.transaction_id || ""}
+                onChange={(e) => {
+                  const t = choices.find((t) => t.id === e.target.value);
+                  onChange({
+                    transaction_id: t?.id || null,
+                    expected_transaction_version: t?.row_version ?? null,
+                  });
+                }}
+              >
+                <option value="">请选择</option>
+                {choices.map((t) => (
+                  <option key={t.id} value={t.id}>
+                    {day(t.occurred_on)} ·{" "}
+                    {t.merchant || kindLabel[t.transaction_type]} ·{" "}
+                    {money(t.original_amount, t.original_currency)}
+                  </option>
+                ))}
+              </select>
+            </Field>
+          </>
+        )}
+        {row.action === "use_schedule_period" && (
+          <>
+            <ErrorBox error={schedules.error} />
+            <Field label="月度计划">
+              <select
+                value={row.schedule_id || ""}
+                onChange={(e) => {
+                  const s = schedules.data?.items.find(
+                    (s) => s.id === e.target.value,
+                  );
+                  onChange({
+                    schedule_id: s?.id || null,
+                    expected_schedule_version: s?.row_version ?? null,
+                    period_no: row.period_no || 1,
+                  });
+                }}
+              >
+                <option value="">请选择</option>
+                {schedules.data?.items.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.name}
+                  </option>
+                ))}
+              </select>
+            </Field>
+            {schedules.data?.next_cursor && (
+              <p className="notice">
+                只列出前 200 个计划，请先在月度计划中定位目标。
+              </p>
+            )}
+            <Field label="第几期">
+              <input
+                type="number"
+                min="1"
+                value={row.period_no || 1}
+                onChange={(e) =>
+                  onChange({ period_no: Number(e.target.value) })
+                }
+              />
+            </Field>
+          </>
+        )}
+        <Field label="备注">
           <input
-            value={row.reason || ""}
-            onChange={(e) => onChange({ reason: e.target.value })}
+            value={row.remarks || ""}
+            onChange={(e) => onChange({ remarks: e.target.value || null })}
+            maxLength={2000}
           />
         </Field>
-      )}
-      <p className="muted small">
-        核对金额、日期和交易性质后，确认这一笔。其他交易的疑点会继续保留。
-      </p>
-      <div className="form-footer">
-        <Button
-          kind="primary"
-          disabled={
-            (row.action === "link_existing" && !row.transaction_id) ||
-            (row.action === "use_schedule_period" && !row.schedule_id)
-          }
-          onClick={onConfirm}
-        >
-          <Check size={16} />
-          {row.action === "create" && row.duplicate_ids.length
-            ? "确认是另一笔交易"
-            : "这一笔已核对"}
-        </Button>
-      </div>
+        {row.action === "skip" && (
+          <Field label="跳过原因">
+            <input
+              value={row.reason || ""}
+              onChange={(e) => onChange({ reason: e.target.value })}
+            />
+          </Field>
+        )}
+        <p className="muted small">
+          {blocked
+            ? "核对不能代替修改。保存后会重新校验，仍有问题会在此显示。"
+            : "核对金额、日期和交易性质后，确认这一笔。其他交易的疑点会继续保留。"}
+        </p>
+        <div className="form-footer">
+          <Button
+            kind="primary"
+            disabled={
+              (row.action === "link_existing" && !row.transaction_id) ||
+              (row.action === "use_schedule_period" && !row.schedule_id)
+            }
+            onClick={onConfirm}
+          >
+            <Check size={16} />
+            {busy
+              ? "正在保存并检查…"
+              : blocked
+                ? "保存修改并重新检查"
+                : row.action === "create" && row.duplicate_ids.length
+                  ? "确认是另一笔交易"
+                  : "这一笔已核对"}
+          </Button>
+        </div>
+      </fieldset>
     </Modal>
   );
 }
@@ -580,9 +714,10 @@ export function StatementWorkspace({
   };
   const summary = statementSummary(draft, confirmed);
   const needs = (row: StatementLine) =>
-    row.action !== "skip" &&
-    ((row.requires_review && !confirmed.has(row.row_id)) ||
-      lineWarnings(row, draft.warnings, confirmed).length > 0);
+    (row.action !== "skip" &&
+      row.requires_review &&
+      !confirmed.has(row.row_id)) ||
+    lineWarnings(row, draft.warnings, confirmed).length > 0;
   const visible = draft.lines.filter(
     (r) =>
       (filter === "all" || needs(r)) &&
@@ -628,6 +763,45 @@ export function StatementWorkspace({
       refresh();
     }
   };
+  async function reviewRow(row: StatementLine) {
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await api.request<Receipt>(
+        `/ingestion-requests/${receipt.request_id}/draft`,
+        {
+          method: "PATCH",
+          body: JSON.stringify(
+            statementEdit(
+              receipt.draft,
+              draft,
+              receipt.row_version,
+              new Set([...confirmed, row.row_id]),
+              confirmedCategories,
+            ),
+          ),
+        },
+      );
+      onReceipt(result);
+      if (!result.draft.warnings.some((w) => w.row_id === row.row_id))
+        setSelected(null);
+    } catch (e) {
+      setError(e as Error);
+      // Recover an uncertain PATCH without discarding local edits or acknowledging another row.
+      if (e instanceof ApiError && (!e.status || e.status === 409)) {
+        try {
+          const current = await api.request<Receipt>(
+            `/ingestion-requests/${receipt.request_id}`,
+          );
+          if (current.row_version !== receipt.row_version) onReceipt(current);
+        } catch {
+          /* Keep edits available for retry. */
+        }
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
   async function save() {
     setBusy(true);
     setError(null);
@@ -928,11 +1102,12 @@ export function StatementWorkspace({
                     </td>
                     <td>
                       <button
+                        aria-label={needs(r) ? "检查" : undefined}
                         className={
                           "row-status " + (needs(r) ? "attention" : "")
                         }
                         title={lineWarnings(r, draft.warnings, confirmed)
-                          .map((w) => errorMessage(w.code))
+                          .map(reviewReason)
                           .join("；")}
                         onClick={() => setSelected(r.row_id)}
                       >
@@ -952,6 +1127,19 @@ export function StatementWorkspace({
                                 : "就绪"}
                         <ChevronRight size={12} />
                       </button>
+                      {lineWarnings(r, draft.warnings, confirmed)
+                        .filter(
+                          (w) =>
+                            ![
+                              "STATEMENT_LINE_UNCERTAIN",
+                              "POSSIBLE_DUPLICATE",
+                            ].includes(w.code),
+                        )
+                        .map((w, i) => (
+                          <p className="row-review-reason" key={i}>
+                            {reviewReason(w)}
+                          </p>
+                        ))}
                     </td>
                   </tr>
                 ))}
@@ -1005,11 +1193,13 @@ export function StatementWorkspace({
       {row && (
         <StatementDetail
           row={row}
+          warnings={lineWarnings(row, draft.warnings, confirmed)}
+          busy={busy}
+          error={error}
           onChange={(change) => update(row.row_id, change)}
           onClose={() => setSelected(null)}
           onConfirm={() => {
-            setConfirmed((s) => new Set([...s, row.row_id]));
-            setSelected(null);
+            void reviewRow(row);
           }}
         />
       )}

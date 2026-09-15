@@ -36,8 +36,10 @@ const messages: Record<string, string> = {
   REQUEST_NOT_FOUND: "暂时还查不到结果，请稍后再查，或取消本次上传。",
   STORAGE_UNAVAILABLE: "浏览器无法保存登录或重试信息，请允许本站使用本地存储。",
 };
-export function errorMessage(code: string) {
-  return messages[code] || "这项操作尚未完成，请检查相关内容或稍后重试。";
+export function errorMessage(code: string, fallback?: string) {
+  return (
+    messages[code] || fallback || "这项操作尚未完成，请检查相关内容或稍后重试。"
+  );
 }
 export class ApiError extends Error {
   constructor(

@@ -1,5 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { statementEdit, statementSummary } from "../src/lib/statement";
+import {
+  statementEdit,
+  statementSummary,
+  lineWarnings,
+  reviewReason,
+} from "../src/lib/statement";
 import { sumDecimal, money } from "../src/lib/format";
 import type { StatementDraft, StatementLine } from "../src/types";
 export const line = (
@@ -34,6 +39,24 @@ export const draft = (lines: StatementLine[]): StatementDraft => ({
   warnings: [],
 });
 describe("statement decisions", () => {
+  it("acknowledgement cannot hide invalid facts or a missing skip reason", () => {
+    const d = draft([line(1), line(2, { action: "skip", reason: "" })]);
+    d.warnings = [
+      { row_id: "row-1", code: "INVALID_TRANSACTION_TYPE" },
+      { row_id: "row-1", code: "INVALID_CATEGORY" },
+      { row_id: "row-2", code: "SKIP_REASON_REQUIRED" },
+    ];
+    const confirmed = new Set(["row-1", "row-2"]);
+    expect(statementSummary(d, confirmed).review).toBe(2);
+    expect(lineWarnings(d.lines[0], d.warnings, confirmed)).toHaveLength(2);
+    expect(reviewReason(d.warnings[0])).toContain("消费或退款");
+    expect(
+      reviewReason({
+        code: "NEW_VALIDATION",
+        message: "Select a valid target.",
+      }),
+    ).toContain("Select a valid target.");
+  });
   it("100 normal rows need no per-row confirmation or category assertion", () => {
     const d = draft(Array.from({ length: 100 }, (_, i) => line(i)));
     const edit = statementEdit(d, d, 7, new Set(), new Set());

@@ -1,5 +1,6 @@
 import type { StatementDraft, StatementLine, Warning } from "../types";
 import { sumDecimal } from "./format";
+import { errorMessage } from "./errors";
 const editable = [
   "action",
   "occurred_on",
@@ -20,7 +21,10 @@ export function lineWarnings(
   warnings: Warning[],
   confirmed: Set<string>,
 ) {
-  if (row.action === "skip") return [];
+  if (row.action === "skip")
+    return warnings.filter(
+      (w) => w.row_id === row.row_id && w.code === "SKIP_REASON_REQUIRED",
+    );
   return warnings.filter(
     (w) =>
       w.row_id === row.row_id &&
@@ -30,6 +34,17 @@ export function lineWarnings(
         confirmed.has(row.row_id)
       ),
   );
+}
+export function reviewReason(w: Warning) {
+  const reasons: Record<string, string> = {
+    INVALID_CATEGORY: "请选择可用的支出分类。",
+    INVALID_TRANSACTION_TYPE: "请选择交易性质：消费或退款。",
+    IMPORT_CHANGED:
+      "请选择有效的已有记录进行关联，或跳过；若已选记录发生变化，请重新选择。",
+    INVALID_STATEMENT_LINK: "请选择一笔有效的消费或退款记录。",
+    INVALID_SCHEDULE: "请选择有效的月度计划和期数，且交易性质必须为消费。",
+  };
+  return reasons[w.code] || errorMessage(w.code, w.message);
 }
 export function statementSummary(
   draft: StatementDraft,
@@ -54,9 +69,10 @@ export function statementSummary(
     linked: rows.filter((r) => r.action === "link_existing").length,
     review: rows.filter(
       (r) =>
-        r.action !== "skip" &&
-        ((r.requires_review && !confirmed.has(r.row_id)) ||
-          lineWarnings(r, draft.warnings, confirmed).length > 0),
+        (r.action !== "skip" &&
+          r.requires_review &&
+          !confirmed.has(r.row_id)) ||
+        lineWarnings(r, draft.warnings, confirmed).length > 0,
     ).length,
     totals: currencies.map((currency) => ({
       currency,

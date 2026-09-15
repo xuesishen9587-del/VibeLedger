@@ -158,13 +158,15 @@ def validate(conn,actor,receipt,proposed,confirming=False):
             day=business_date(line.get("occurred_on"),household)
             if start and not start<=day<=end:
                 fail("STATEMENT_DATE_OUTSIDE_PERIOD","Business date lies outside the reviewed statement period.")
-            if line.get("requires_review") or line.get("transaction_type") not in ("expense","refund"):
-                fail("STATEMENT_LINE_UNCERTAIN","Correct the amount, currency, business date and spending intent.")
+            if line.get("transaction_type") not in ("expense","refund"):
+                fail("INVALID_TRANSACTION_TYPE","Select expense or refund for this statement line.")
             if line["transaction_type"]=="refund" and not (line.get("remarks") or "").strip():
                 fail("REFUND_NOTE_REQUIRED","Provide a category and note for the unlinked refund.")
             category=schema.get_category(conn,actor.household_id,line.get("category_id")) if line.get("category_id") else None
             if not category or category["status"]!="active" or category["category_type"]!="expense":
                 fail("INVALID_CATEGORY","Select an active expense category.")
+            if line.get("requires_review"):
+                warn("STATEMENT_LINE_UNCERTAIN","Review the amount, currency, business date and spending intent.",rid)
             candidates=repo.rows(conn,"SELECT id FROM transactions WHERE household_id=%s AND status='committed' "
                 "AND transaction_type=%s AND occurred_on=%s AND original_amount=%s AND original_currency=%s "
                 "AND merchant_normalized IS NOT DISTINCT FROM %s AND (account_id=%s OR account_id IS NULL)",

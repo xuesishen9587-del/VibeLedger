@@ -21,10 +21,6 @@ export function lineWarnings(
   warnings: Warning[],
   confirmed: Set<string>,
 ) {
-  if (row.action === "skip")
-    return warnings.filter(
-      (w) => w.row_id === row.row_id && w.code === "SKIP_REASON_REQUIRED",
-    );
   return warnings.filter(
     (w) =>
       w.row_id === row.row_id &&
@@ -43,8 +39,27 @@ export function reviewReason(w: Warning) {
       "请选择有效的已有记录进行关联，或跳过；若已选记录发生变化，请重新选择。",
     INVALID_STATEMENT_LINK: "请选择一笔有效的消费或退款记录。",
     INVALID_SCHEDULE: "请选择有效的月度计划和期数，且交易性质必须为消费。",
+    SCHEDULE_OCCURRENCE_CONFLICT:
+      "金额、币种和日期必须与所选计划期数一致；请修改或重新选择计划。",
+    STATEMENT_PROVIDER_CONFLICT:
+      "这些行使用了相同的银行交易编号，但金额、日期、币种、性质或关联记录不一致。请核对并修正，关联同一笔已有记录，或跳过错误行；仅点击已核对不能解除冲突。",
   };
   return reasons[w.code] || errorMessage(w.code, w.message);
+}
+export function statementGlobalWarnings(draft: StatementDraft) {
+  const rowIds = new Set(draft.lines.map((r) => r.row_id));
+  return draft.warnings.filter((w) => !w.row_id || !rowIds.has(w.row_id));
+}
+export function globalRecovery(w: Warning) {
+  if (w.code === "STATEMENT_PERIOD_REQUIRED")
+    return "请修改页面顶部的账单开始和结束日期，再重新检查。";
+  if (w.code === "STATEMENT_ACCOUNT_MISMATCH")
+    return "请核对所选账户并勾选账户确认；余额账户也必须一致。";
+  if (w.code === "PARTIAL_STATEMENT")
+    return "请核对缺页情况并勾选接受本次识别内容，或放弃后上传完整账单。";
+  if (/BALANCE|SNAPSHOT/.test(w.code))
+    return "请展开下方“同时更新账单余额”，修正或取消本次余额更新，再重新检查。";
+  return "请点击“保存修改并重新检查整份账单”获取最新校验结果，当前修改会保留。若问题仍无法解决，可使用下方“放弃账单”后重新上传。";
 }
 export function statementSummary(
   draft: StatementDraft,
@@ -60,6 +75,7 @@ export function statementSummary(
     ),
   ];
   return {
+    globalReview: statementGlobalWarnings(draft).length,
     purchases: include.filter((r) => r.transaction_type === "expense").length,
     refunds: include.filter((r) => r.transaction_type === "refund").length,
     repayments: rows.filter(

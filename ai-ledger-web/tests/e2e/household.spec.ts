@@ -743,3 +743,165 @@ test("current login identity changes with the signed-in account on mobile", asyn
     await page.evaluate(() => document.documentElement.scrollWidth),
   ).toBeLessThanOrEqual(390);
 });
+
+test("legacy global provider failure revalidates into actionable rows and imports once after correction", async ({
+  page,
+}) => {
+  await setup(page, { count: 3 });
+  const current: any = statement(3);
+  current.warnings = current.draft.warnings = [
+    {
+      code: "IMPORT_CHANGED",
+      message: "Provider evidence has conflicting financial facts.",
+    },
+  ];
+  let patches = 0,
+    confirmations = 0;
+  await page.route(
+    "**/api/v1/ingestion-requests/statement**",
+    async (route) => {
+      const path = new URL(route.request().url()).pathname;
+      if (path.endsWith("/draft")) {
+        patches++;
+        const body = route.request().postDataJSON();
+        expect(body.expected_version).toBe(current.row_version);
+        for (const edit of body.lines)
+          Object.assign(
+            current.draft.lines.find((r: any) => r.row_id === edit.row_id),
+            edit,
+          );
+        current.warnings = current.draft.warnings =
+          current.draft.lines[1].original_amount ===
+          current.draft.lines[0].original_amount
+            ? []
+            : [0, 1].map((i) => ({
+                code: "STATEMENT_PROVIDER_CONFLICT",
+                row_id: `row-${i}`,
+              }));
+        current.row_version++;
+      } else if (path.endsWith("/confirm")) {
+        confirmations++;
+        expect(current.warnings).toEqual([]);
+        expect(route.request().postDataJSON().expected_version).toBe(
+          current.row_version,
+        );
+        current.status = "committed";
+        current.counts = { create: 2, link: 1, skip: 0 };
+      }
+      await route.fulfill({ json: current });
+    },
+  );
+  await login(page);
+  await page.goto("/#/statement/statement");
+  const global = page.getByRole("alert", { name: "整单阻塞" });
+  await expect(global).toBeVisible();
+  await expect(
+    global.getByRole("button", { name: "保存修改并重新检查整份账单" }),
+  ).toBeEnabled();
+  await expect(
+    page.getByText("还有几处需要检查，已在列表中标出。"),
+  ).toHaveCount(0);
+  // The normal final-confirm action also revalidates legacy global warnings,
+  // even if the user has made no new edits, instead of trapping the old receipt.
+  await page.getByRole("button", { name: "确认导入整份账单" }).click();
+  await expect(
+    page.getByRole("button", { name: "只看待检查 2" }),
+  ).toBeVisible();
+  await expect(page.getByTestId("statement-row")).toHaveCount(2);
+  await expect(global).toHaveCount(0);
+  expect(patches).toBe(1);
+  expect(confirmations).toBe(0);
+  await expect(page.getByTestId("statement-row").first()).toContainText(
+    "银行交易编号",
+  );
+  await page
+    .getByTestId("statement-row")
+    .nth(1)
+    .getByRole("button", { name: "检查", exact: true })
+    .click();
+  const dialog = page.getByRole("dialog");
+  await expect(dialog).toContainText("仅点击已核对不能解除冲突");
+  await dialog.getByRole("button", { name: "保存修改并重新检查" }).click();
+  await expect(
+    dialog.getByRole("button", { name: "保存修改并重新检查" }),
+  ).toBeEnabled();
+  await expect(
+    page.getByRole("button", { name: "只看待检查 2" }),
+  ).toBeVisible();
+  await dialog.getByLabel("交易金额", { exact: true }).fill("28");
+  await dialog.getByRole("button", { name: "保存修改并重新检查" }).click();
+  await expect(dialog).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: "只看待检查 0" }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "确认导入整份账单" }).click();
+  await expect(page.getByRole("heading", { name: "账单已导入" })).toBeVisible();
+  expect(confirmations).toBe(1);
+});
+
+for (const source of ["draft", "confirm"]) {
+  test(`a global ${source} blocker shows explicit recovery instead of directing users to zero review rows`, async ({
+    page,
+  }) => {
+    await setup(page, { count: 3 });
+    const current: any = statement(3);
+    let failed = false,
+      commits = 0;
+    await page.route(
+      "**/api/v1/ingestion-requests/statement**",
+      async (route) => {
+        const path = new URL(route.request().url()).pathname;
+        if (route.request().method() !== "GET") {
+          const body = route.request().postDataJSON();
+          expect(body.expected_version).toBe(current.row_version);
+          if (path.endsWith("/draft") && body.period_start)
+            current.draft.period_start = body.period_start;
+          current.row_version++;
+          if (!failed && path.endsWith(`/${source}`)) {
+            failed = true;
+            current.warnings = current.draft.warnings = [
+              {
+                code: "IMPORT_CHANGED",
+                message: "Reload statement validation before saving.",
+              },
+            ];
+          } else if (path.endsWith("/draft")) {
+            current.warnings = current.draft.warnings = [];
+          } else if (path.endsWith("/confirm")) {
+            expect(current.warnings).toEqual([]);
+            commits++;
+            current.status = "committed";
+          }
+        }
+        await route.fulfill({ json: current });
+      },
+    );
+    await login(page);
+    await page.goto("/#/statement/statement");
+    if (source === "draft")
+      await page.getByLabel("账单开始日期").fill("2026-08-31");
+    await page.getByRole("button", { name: "确认导入整份账单" }).click();
+    const global = page.getByRole("alert", { name: "整单阻塞" });
+    await expect(global).toBeVisible();
+    await expect(global).toContainText("未保存任何一笔交易");
+    await expect(
+      page.getByRole("button", { name: "只看待检查 0" }),
+    ).toBeVisible();
+    await expect(
+      page.getByText(/已在列表中标出|请再看一下标出的记录/),
+    ).toHaveCount(0);
+    expect(commits).toBe(0);
+    await global
+      .getByRole("button", { name: "保存修改并重新检查整份账单" })
+      .click();
+    await expect(global).toHaveCount(0);
+    if (source === "draft")
+      await expect(page.getByLabel("账单开始日期")).toHaveValue("2026-08-31");
+    expect(commits).toBe(0);
+    await page.getByRole("button", { name: "确认导入整份账单" }).click();
+    await expect(
+      page.getByRole("heading", { name: "账单已导入" }),
+    ).toBeVisible();
+    expect(commits).toBe(1);
+  });
+}

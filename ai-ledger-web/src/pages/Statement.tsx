@@ -18,6 +18,8 @@ import {
   statementSummary,
   lineWarnings,
   reviewReason,
+  statementGlobalWarnings,
+  globalRecovery,
 } from "../lib/statement";
 import type {
   Receipt,
@@ -713,6 +715,7 @@ export function StatementWorkspace({
       setConfirmedCategories((s) => new Set([...s, id]));
   };
   const summary = statementSummary(draft, confirmed);
+  const globalWarnings = statementGlobalWarnings(draft);
   const needs = (row: StatementLine) =>
     (row.action !== "skip" &&
       row.requires_review &&
@@ -802,7 +805,19 @@ export function StatementWorkspace({
       setBusy(false);
     }
   }
-  async function save() {
+  function showBlockers(result: Receipt) {
+    const counts = statementSummary(result.draft);
+    setSearch("");
+    setFilter(counts.review ? "review" : "all");
+    setError(
+      new Error(
+        counts.globalReview
+          ? "整份账单仍有阻塞问题，请按“整单阻塞”中的说明处理。"
+          : `还有 ${counts.review} 笔交易需要检查，请打开标出的记录修改。`,
+      ),
+    );
+  }
+  async function save(recheckOnly = false) {
     setBusy(true);
     setError(null);
     const base = "/ingestion-requests/" + receipt.request_id;
@@ -819,7 +834,7 @@ export function StatementWorkspace({
         JSON.stringify(receipt.draft) !== JSON.stringify(draft) ||
         confirmed.size ||
         confirmedCategories.size;
-      if (changed) {
+      if (changed || globalWarnings.length || recheckOnly) {
         result = await api.request<Receipt>(base + "/draft", {
           method: "PATCH",
           body: JSON.stringify(body),
@@ -827,8 +842,11 @@ export function StatementWorkspace({
         onReceipt(result);
       }
       if (result.warnings?.length) {
-        setError(new Error("还有几处需要检查，已在列表中标出。"));
-        setFilter("review");
+        showBlockers(result);
+        return;
+      }
+      if (recheckOnly) {
+        notify("已重新检查，请核对结果后确认导入整份账单。");
         return;
       }
       result = await api.request<Receipt>(base + "/confirm", {
@@ -836,8 +854,7 @@ export function StatementWorkspace({
         body: JSON.stringify({ expected_version: result.row_version }),
       });
       received(result);
-      if (result.status === "needs_confirmation")
-        setError(new Error("保存前发现了新的变化，请再看一下标出的记录。"));
+      if (result.status === "needs_confirmation") showBlockers(result);
     } catch (e) {
       setError(e as Error);
       if (e instanceof ApiError && (!e.status || e.status === 409)) {
@@ -907,6 +924,12 @@ export function StatementWorkspace({
           <strong>{summary.review}</strong>
           <span>笔待检查</span>
         </div>
+        {summary.globalReview > 0 && (
+          <div className="review-number">
+            <strong>{summary.globalReview}</strong>
+            <span>项整单阻塞</span>
+          </div>
+        )}
       </div>
       {!draft.identity_ok && (
         <label className="notice check">
@@ -944,19 +967,26 @@ export function StatementWorkspace({
         </div>
       )}
       <ErrorBox error={error} />
-      {draft.warnings
-        .filter(
-          (w) =>
-            !w.row_id &&
-            !["STATEMENT_ACCOUNT_MISMATCH", "PARTIAL_STATEMENT"].includes(
-              w.code,
-            ),
-        )
-        .map((w, i) => (
-          <div className="notice warning" key={i}>
-            {errorMessage(w.code)}
-          </div>
-        ))}
+      {globalWarnings.length > 0 && (
+        <section className="notice warning" role="alert" aria-label="整单阻塞">
+          <h3>整单阻塞：这份账单尚未导入</h3>
+          <p>
+            这些问题影响整份账单，不计入逐笔待检查数量。未保存任何一笔交易。
+          </p>
+          <ul>
+            {globalWarnings.map((w, i) => (
+              <li key={i}>
+                <strong>{errorMessage(w.code, w.message)}</strong>
+                {w.message && <p>{w.message}</p>}
+                <p>{globalRecovery(w)}</p>
+              </li>
+            ))}
+          </ul>
+          <Button disabled={busy} onClick={() => void save(true)}>
+            保存修改并重新检查整份账单
+          </Button>
+        </section>
+      )}
       <section className="card statement-workspace">
         <div className="filters">
           <div className="tabs">

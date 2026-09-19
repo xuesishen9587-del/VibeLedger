@@ -371,8 +371,8 @@ def resolve(conn, actor, key, identity, data, provider=None):
     return execute_durable_command(conn, actor, key, f"POST /api/v1/schedule-occurrences/{identity}/resolve", data, mutate)
 
 
-def bind_capture_period(conn, actor, receipt_id, draft, fields, *, source="shortcut", item_key=None):
-    """Bind explicit capture/import intent under its outer receipt and household lock."""
+def validate_capture_period(conn, actor, draft, fields):
+    """Read-only checks shared by statement preview and atomic period binding."""
     if any(draft.get(key) is None for key in ("schedule_id", "period_no", "expected_schedule_version")):
         fail("INVALID_SCHEDULE", "Select a schedule, period and current version.")
     schedule = get(conn, actor.household_id, draft["schedule_id"], draft["expected_schedule_version"])
@@ -393,10 +393,21 @@ def bind_capture_period(conn, actor, receipt_id, draft, fields, *, source="short
                                (actor.household_id, occurrence["id"]))[0]
         if transaction["status"] != "committed":
             fail("SCHEDULE_OCCURRENCE_CONFLICT", "This period was voided and cannot be regenerated.", 409)
-        return transaction
+        return schedule, occurrence, transaction
     if schedule["status"] != "active" or (occurrence and occurrence["status"] == "skipped"):
         fail("INVALID_REQUEST_STATE", "This schedule period is not available.", 409)
+    return schedule, occurrence, None
+
+
+def bind_capture_period(conn, actor, receipt_id, draft, fields, *, source="shortcut", item_key=None):
+    """Bind explicit capture/import intent under its outer receipt and household lock."""
+    schedule, occurrence, transaction = validate_capture_period(conn, actor, draft, fields)
+    if transaction:
+        return transaction
     if not occurrence:
+        number = draft["period_no"]
+        day = due_date(schedule["start_month"], schedule["day_of_month"], number)
+        expected_amount = schedule["amount_per_period"]
         occurrence = insert(conn, "schedule_occurrences", {"id": uuid4(), "household_id": actor.household_id,
             "schedule_id": schedule["id"], "period_no": number, "due_on": day, "amount": expected_amount,
             "currency": schedule["currency"], "category_id": schedule["category_id"], "account_id": schedule["account_id"],

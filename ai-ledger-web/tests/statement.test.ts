@@ -4,6 +4,7 @@ import {
   statementSummary,
   lineWarnings,
   reviewReason,
+  statementGlobalWarnings,
 } from "../src/lib/statement";
 import { sumDecimal, money } from "../src/lib/format";
 import type { StatementDraft, StatementLine } from "../src/types";
@@ -39,6 +40,20 @@ export const draft = (lines: StatementLine[]): StatementDraft => ({
   warnings: [],
 });
 describe("statement decisions", () => {
+  it("keeps global and orphaned blockers distinct from actionable rows", () => {
+    const d = draft([line(1), line(2, { action: "skip" })]);
+    d.warnings = [
+      { code: "STATEMENT_PROVIDER_CONFLICT", row_id: "row-1" },
+      { code: "IMPORT_CHANGED", row_id: "row-2" },
+      { code: "BALANCE_CHANGED" },
+      { code: "IMPORT_CHANGED", row_id: "missing-row" },
+    ];
+    expect(statementSummary(d, new Set(["row-1"]))).toMatchObject({
+      review: 2,
+      globalReview: 2,
+    });
+    expect(statementGlobalWarnings(d)).toEqual(d.warnings.slice(2));
+  });
   it("acknowledgement cannot hide invalid facts or a missing skip reason", () => {
     const d = draft([line(1), line(2, { action: "skip", reason: "" })]);
     d.warnings = [

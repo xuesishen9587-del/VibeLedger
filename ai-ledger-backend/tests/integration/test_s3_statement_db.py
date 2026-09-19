@@ -309,11 +309,133 @@ class TestS3StatementDb(BaseDbTestCase):
         for table in ("statement_lines","transactions","account_snapshots"):
             self.assertEqual(repo.rows(self.conn,f"SELECT count(*) n FROM {table}")[0]["n"],0)
 
-    def test_conflicting_provider_rows_rollback_earlier_rows(self):
-        draft=self.upload(self.extraction([self.line(provider_transaction_id="shared-id"),
-            self.line(provider_transaction_id="shared-id",amount="15.00")])).json()
-        blocked=self.confirm(draft).json()
-        self.assertEqual(blocked["status"],"needs_confirmation")
-        self.assertIn("IMPORT_CHANGED",{w["code"] for w in blocked["warnings"]})
-        self.assertEqual(repo.rows(self.conn,"SELECT count(*) n FROM transactions")[0]["n"],0)
+    def test_identical_provider_rows_share_one_transaction_and_replay_once(self):
+        draft=self.upload(self.extraction([
+            self.line(provider_transaction_id="shared-id",amount="12"),
+            self.line(provider_transaction_id="shared-id",amount="12.00",merchant="Page overlap"),
+            self.line(provider_transaction_id="shared-id",amount="+12.0"),
+        ])).json()
+        self.assertEqual(draft["warnings"],[])
+        saved=self.confirm(draft).json()
+        self.assertEqual(saved["counts"],{"create":1,"link":2,"skip":0})
+        self.assertEqual(len({r["transaction_id"] for r in saved["lines"]}),1)
+        self.assertEqual(self.confirm(draft).json(),saved)
+        self.assertEqual(repo.rows(self.conn,"SELECT count(*) n FROM transactions")[0]["n"],1)
+
+    def test_conflicting_provider_facts_are_all_actionable_before_apply(self):
+        for changes in ({"amount":"15.00"},{"occurred_on":"2026-02-04"},{"kind":"refund"},{"currency":"USD"}):
+            with self.subTest(changes=changes):
+                pid=str(uuid4())
+                draft=self.upload(self.extraction([self.line(merchant="Unrelated"),
+                    self.line(provider_transaction_id=pid),self.line(provider_transaction_id=pid,**changes)])).json()
+                expected={r["row_id"] for r in draft["draft"]["lines"][1:]}
+                self.assertEqual({w["row_id"] for w in draft["warnings"] if w["code"]=="STATEMENT_PROVIDER_CONFLICT"},expected)
+                with patch("app.services.statement_import.spending.create_record") as apply:
+                    blocked=self.confirm(draft).json()
+                    apply.assert_not_called()
+                self.assertEqual(blocked["status"],"needs_confirmation")
+                self.assertEqual({w["row_id"] for w in blocked["warnings"]},expected)
+                self.assertEqual(repo.rows(self.conn,"SELECT count(*) n FROM transactions")[0]["n"],0)
+                self.assertEqual(repo.rows(self.conn,"SELECT count(*) n FROM statement_lines WHERE final_action IS NOT NULL")[0]["n"],0)
+
+    def test_88_rows_period_correction_then_provider_correction_commits_once(self):
+        lines=[self.line(merchant=f"Purchase {i}",provider_transaction_id="repeat" if i<2 else None,
+            amount="15.00" if i==1 else "12.00") for i in range(86)]
+        lines += [self.line(kind="refund"),self.line(kind="repayment")]
+        draft=self.upload(self.extraction(lines,period_start="2026-02-10")).json()
+        self.assertIn("STATEMENT_DATE_OUTSIDE_PERIOD",{w["code"] for w in draft["warnings"]})
+        fixed_period=self.edit(draft,period_start="2026-02-01")
+        ids={r["row_id"] for r in fixed_period["draft"]["lines"][:2]}
+        self.assertEqual({w["row_id"] for w in fixed_period["warnings"]},ids)
+        with patch("app.services.statement_import.spending.create_record") as apply:
+            blocked=self.confirm(fixed_period).json()
+            apply.assert_not_called()
+        edits=[{"row_id":r["row_id"],"action":r["action"]} for r in blocked["draft"]["lines"]]
+        edits[1]["original_amount"]="12.00"
+        corrected=self.edit(blocked,edits)
+        self.assertEqual(corrected["warnings"],[])
+        saved=self.confirm(corrected).json()
+        self.assertEqual(saved["counts"],{"create":86,"link":1,"skip":1})
+        self.assertEqual(self.confirm(corrected).json(),saved)
+        self.assertEqual(repo.rows(self.conn,"SELECT count(*) n FROM transactions")[0]["n"],86)
+
+    def test_provider_conflict_can_be_resolved_by_skipping_incorrect_row(self):
+        draft=self.upload(self.extraction([self.line(provider_transaction_id="same"),
+            self.line(provider_transaction_id="same",amount="15.00")])).json()
+        lines=[{"row_id":r["row_id"],"action":"create"} for r in draft["draft"]["lines"]]
+        lines[1].update(action="skip",reason="Duplicate extraction with wrong amount")
+        fixed=self.edit(draft,lines)
+        self.assertEqual(fixed["warnings"],[])
+        self.assertEqual(self.confirm(fixed).json()["counts"],{"create":1,"link":0,"skip":1})
+
+    def test_provider_create_and_explicit_link_are_order_independent(self):
+        original=self.confirm(self.upload().json()).json()["lines"][0]["transaction_id"]
+        for link_index in (0,1):
+            draft=self.upload(self.extraction([self.line(provider_transaction_id=str(link_index))]*2)).json()
+            lines=[{"row_id":r["row_id"],"action":"create"} for r in draft["draft"]["lines"]]
+            lines[link_index].update(action="link_existing",transaction_id=original,expected_transaction_version=0)
+            fixed=self.edit(draft,lines)
+            self.assertEqual(fixed["warnings"],[])
+            saved=self.confirm(fixed).json()
+            self.assertEqual(saved["counts"],{"create":0,"link":2,"skip":0})
+            self.assertEqual({r["transaction_id"] for r in saved["lines"]},{original})
+        self.assertEqual(repo.rows(self.conn,"SELECT count(*) n FROM transactions")[0]["n"],1)
+
+    def test_same_provider_cannot_link_different_targets_even_with_identical_facts(self):
+        saved=self.confirm(self.upload(self.extraction([self.line(),self.line()])).json()).json()
+        draft=self.upload(self.extraction([self.line(provider_transaction_id="ambiguous")]*2)).json()
+        lines=[{"row_id":r["row_id"],"action":"link_existing","transaction_id":t["transaction_id"],"expected_transaction_version":0}
+            for r,t in zip(draft["draft"]["lines"],saved["lines"])]
+        blocked=self.edit(draft,lines)
+        self.assertEqual({w["row_id"] for w in blocked["warnings"]},{r["row_id"] for r in lines})
+        self.assertTrue(all(w["code"]=="STATEMENT_PROVIDER_CONFLICT" for w in blocked["warnings"]))
+        lines[1]["transaction_id"]=lines[0]["transaction_id"]
+        fixed=self.edit(blocked,lines)
+        self.assertEqual(fixed["warnings"],[])
+        self.assertEqual(self.confirm(fixed).json()["counts"]["link"],2)
+
+    def test_apply_exception_retains_row_and_rolls_back_links_transactions_and_audit(self):
+        from app.domain.spending import fail
+        from app.services.balance_service import history
+        draft=self.upload(self.extraction([self.line(provider_transaction_id="repeat")]*2)).json()
+        def injected(conn,actor,receipt_id,result,*args,**kw):
+            if result["id"]==draft["draft"]["lines"][1]["row_id"]:
+                fail("IMPORT_CHANGED","Late validation failure",409)
+            return history(conn,actor,receipt_id,result,*args,**kw)
+        with patch("app.services.statement_import.balances.history",side_effect=injected):
+            blocked=self.confirm(draft).json()
+        self.assertEqual(blocked["warnings"][0]["row_id"],draft["draft"]["lines"][1]["row_id"])
+        self.assertEqual(blocked["draft"]["lines"],draft["draft"]["lines"])
+        for table in ("transactions","audit_events"):
+            self.assertEqual(repo.rows(self.conn,f"SELECT count(*) n FROM {table} WHERE source_request_id=%s",(draft["request_id"],))[0]["n"],0)
         self.assertEqual(repo.rows(self.conn,"SELECT count(*) n FROM statement_lines WHERE final_action IS NOT NULL")[0]["n"],0)
+        fixed=self.edit(blocked)
+        saved=self.confirm(fixed).json()
+        self.assertEqual(saved["counts"],{"create":1,"link":1,"skip":0})
+        self.assertEqual(self.confirm(fixed).json(),saved)
+
+    def test_unselected_schedule_is_a_row_blocker_before_apply(self):
+        draft=self.upload().json()
+        fixed=self.edit(draft,[{"row_id":draft["draft"]["lines"][0]["row_id"],"action":"use_schedule_period"}])
+        self.assertEqual(fixed["warnings"][0]["code"],"INVALID_SCHEDULE")
+        self.assertEqual(fixed["warnings"][0]["row_id"],draft["draft"]["lines"][0]["row_id"])
+
+    def test_late_balance_failure_is_global_and_rolls_back_every_transaction(self):
+        from app.domain.spending import fail
+        closing={"row_id":"closing","label":"Wallet","amount":"100.00","currency":"CNY","meaning":"asset","as_of":"2026-02-28",
+            "current_screen":False,"overlap_uncertain":False,"confidence":{k:.99 for k in ("amount","currency","account","scope","date")}}
+        draft=self.upload(self.extraction(closing_balance=closing)).json()
+        self.assertTrue(draft["draft"]["balance"]["selected"])
+        def changed(*args,**kwargs):
+            fail("BALANCE_CHANGED","Refresh or exclude the closing balance.",409)
+        with patch("app.services.statement_import.balances.create_record",side_effect=changed):
+            blocked=self.confirm(draft).json()
+        self.assertIsNone(blocked["warnings"][0]["row_id"])
+        self.assertEqual(blocked["warnings"][0]["code"],"BALANCE_CHANGED")
+        for table in ("transactions","account_snapshots"):
+            self.assertEqual(repo.rows(self.conn,f"SELECT count(*) n FROM {table}")[0]["n"],0)
+        self.assertEqual(repo.rows(self.conn,"SELECT count(*) n FROM statement_lines WHERE final_action IS NOT NULL")[0]["n"],0)
+        fixed=self.edit(blocked)
+        saved=self.confirm(fixed).json()
+        self.assertEqual(saved["status"],"committed")
+        self.assertEqual(self.confirm(fixed).json(),saved)

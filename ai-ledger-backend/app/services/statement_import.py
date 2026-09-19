@@ -36,9 +36,13 @@ def provider_matches(conn,hh,account_id,provider_id):
         "AND r.status='committed' AND l.extracted_payload->>'provider_transaction_id'=%s",(hh,account_id,provider_id))
 
 
+def financial_identity(line):
+    return (str(line.get("occurred_on")),line.get("original_currency"),line.get("transaction_type"),
+        money(line.get("original_amount"),line.get("original_currency")))
+
+
 def identity_agrees(line,target):
-    return (str(target["occurred_on"])==str(line.get("occurred_on")) and str(target["original_currency"])==line.get("original_currency")
-        and target["transaction_type"]==line.get("transaction_type") and target["original_amount"]==money(line.get("original_amount"),line.get("original_currency")))
+    return financial_identity(line)==financial_identity(target)
 
 
 def validate_balance(conn,actor,balance):
@@ -127,7 +131,7 @@ def validate(conn,actor,receipt,proposed,confirming=False):
     except (HTTPException,ValueError,TypeError):
         start=end=None
         warn("STATEMENT_PERIOD_REQUIRED","Correct the statement period bounds.")
-    provider_targets={}
+    provider_groups={}
     for line in draft["lines"]:
         rid=line["row_id"]
         if line["action"]=="skip":
@@ -148,9 +152,7 @@ def validate(conn,actor,receipt,proposed,confirming=False):
                     fail("IMPORT_CHANGED","This provider ID already identifies a different transaction.",409)
                 if line.get("provider_transaction_id"):
                     pid=line["provider_transaction_id"]
-                    if pid in provider_targets and provider_targets[pid]!=target["id"]:
-                        fail("IMPORT_CHANGED","Rows sharing a provider ID must share a target.",409)
-                    provider_targets[pid]=target["id"]
+                    provider_groups.setdefault(pid,[]).append((line,target,str(target["id"])))
                 continue
             if prior:
                 fail("IMPORT_CHANGED","This provider ID is already imported. Link the existing record or skip.",409)
@@ -165,6 +167,12 @@ def validate(conn,actor,receipt,proposed,confirming=False):
             category=schema.get_category(conn,actor.household_id,line.get("category_id")) if line.get("category_id") else None
             if not category or category["status"]!="active" or category["category_type"]!="expense":
                 fail("INVALID_CATEGORY","Select an active expense category.")
+            if line["action"]=="use_schedule_period":
+                if line["transaction_type"]!="expense":
+                    fail("INVALID_SCHEDULE","Only expenses bind schedule periods.")
+                schedules.validate_capture_period(conn,actor,line,line)
+            if line.get("provider_transaction_id"):
+                provider_groups.setdefault(line["provider_transaction_id"],[]).append((line,line,None))
             if line.get("requires_review"):
                 warn("STATEMENT_LINE_UNCERTAIN","Review the amount, currency, business date and spending intent.",rid)
             candidates=repo.rows(conn,"SELECT id FROM transactions WHERE household_id=%s AND status='committed' "
@@ -179,6 +187,13 @@ def validate(conn,actor,receipt,proposed,confirming=False):
         except HTTPException as exc:
             detail=exc.detail.get("error",{}) if isinstance(exc.detail,dict) else {}
             warn(detail.get("code","INVALID_STATEMENT_LINE"),detail.get("message","Review this line."),rid)
+    # Compare effective financial facts (including explicit existing targets) before
+    # any writes. Every participant needs an actionable warning, not only the last.
+    for group in provider_groups.values():
+        if len({financial_identity(facts) for _,facts,_ in group})>1 or len({target for _,_,target in group if target})>1:
+            numbers=", ".join(str(line["row_no"]) for line,_,_ in group)
+            for line,_,_ in group:
+                warn("STATEMENT_PROVIDER_CONFLICT",f"Rows {numbers} share a provider ID but disagree. Correct their amount, date, currency or type; link them to the same existing transaction, or skip incorrect rows.",line["row_id"])
     balance=draft.get("balance")
     if balance and balance["selected"]:
         try:
@@ -341,42 +356,40 @@ def confirm(factory,actor,identity,version,provider=None):
             return receipts.response(receipts.draft(conn,actor,row,draft))
         with conn.cursor() as cur:
             cur.execute("SAVEPOINT statement_apply")
+        active_row_id=None
         try:
             results=[]
+            # Explicit links are authoritative regardless of their position in the
+            # PDF. Validation has already checked versions, identities and conflicts.
             local_providers={}
             for line in draft["lines"]:
+                if line["action"]=="link_existing" and line.get("provider_transaction_id"):
+                    active_row_id=line["row_id"]
+                    local_providers[line["provider_transaction_id"]]=spending.require_record(
+                        conn,actor.household_id,line["transaction_id"],line["expected_transaction_version"])
+            for line in draft["lines"]:
+                active_row_id=line["row_id"]
                 transaction=None
                 action=line["action"]
                 pid=line.get("provider_transaction_id")
                 if action!="skip" and pid and pid in local_providers:
                     prior=local_providers[pid]
                     if action=="link_existing" and str(prior["id"])!=line.get("transaction_id"):
-                        fail("IMPORT_CHANGED","Provider evidence must share one transaction.",409)
+                        fail("STATEMENT_PROVIDER_CONFLICT","Provider evidence must share one transaction.",409)
                     if action!="link_existing" and not identity_agrees(line,prior):
-                        fail("IMPORT_CHANGED","Provider evidence has conflicting financial facts.",409)
+                        fail("STATEMENT_PROVIDER_CONFLICT","Provider evidence has conflicting financial facts.",409)
                     action="link_existing"
-                    line["transaction_id"]=str(prior["id"])
-                if action=="link_existing":
+                    transaction=prior
+                elif action=="link_existing":
                     transaction=repo.get(conn,actor.household_id,line["transaction_id"])
                 elif action!="skip":
-                    pid=line.get("provider_transaction_id")
-                    if pid and pid in local_providers:
-                        transaction=local_providers[pid]
-                        if not identity_agrees(line,transaction):
-                            fail("IMPORT_CHANGED","Conflicting lines share the same provider ID.",409)
-                        action="link_existing"
+                    fields={k:line.get(k) for k in ("transaction_type","occurred_on","original_amount","original_currency","merchant","category_id","remarks")}
+                    fields.update(account_id=str(row["statement_account_id"]),payment_mode="one_off" if fields["transaction_type"]=="expense" else None)
+                    if action=="use_schedule_period":
+                        transaction=schedules.bind_capture_period(conn,actor,row["id"],{**line,"date_source":"statement"},fields,
+                            source="statement",item_key=line["row_id"])
                     else:
-                        fields={k:line.get(k) for k in ("transaction_type","occurred_on","original_amount","original_currency","merchant","category_id","remarks")}
-                        fields.update(account_id=str(row["statement_account_id"]),payment_mode="one_off" if fields["transaction_type"]=="expense" else None)
-                        if action=="use_schedule_period":
-                            if fields["transaction_type"]!="expense":
-                                fail("INVALID_SCHEDULE","Only expenses bind schedule periods.")
-                            transaction=schedules.bind_capture_period(conn,actor,row["id"],{**line,"date_source":"statement"},fields,
-                                source="statement",item_key=line["row_id"])
-                        else:
-                            transaction=spending.create_record(conn,actor,row["id"],fields,source="statement",date_source="statement",item_key=line["row_id"],category_uncertain=line["category_uncertain"])
-                        if pid:
-                            local_providers[pid]=transaction
+                        transaction=spending.create_record(conn,actor,row["id"],fields,source="statement",date_source="statement",item_key=line["row_id"],category_uncertain=line["category_uncertain"])
                 if transaction and pid:
                     local_providers[pid]=transaction
                 final_action="skip" if action=="skip" else "link" if action in ("link_existing","use_schedule_period") else "create"
@@ -385,6 +398,7 @@ def confirm(factory,actor,identity,version,provider=None):
                 balances.history(conn,actor,row["id"],result,"link_statement",reason=line.get("reason"),entity="statement_line")
                 results.append(result)
             snapshots=[]
+            active_row_id=None
             if draft.get("balance") and draft["balance"]["selected"]:
                 reused=validate_balance(conn,actor,draft["balance"])
                 snapshots=[{**balances.output(reused or balances.create_record(conn,actor,row["id"],draft["balance"],source="statement")),"reused":reused is not None}]
@@ -392,7 +406,7 @@ def confirm(factory,actor,identity,version,provider=None):
             with conn.cursor() as cur:
                 cur.execute("ROLLBACK TO SAVEPOINT statement_apply")
             error=exc.detail.get("error",{}) if isinstance(exc.detail,dict) else {}
-            draft["warnings"]=[{"code":error.get("code","IMPORT_CHANGED"),"message":error.get("message","Import changed; review before saving.")}]
+            draft["warnings"]=[{"code":error.get("code","IMPORT_CHANGED"),"message":error.get("message","Import changed; review before saving."),"row_id":active_row_id}]
             return receipts.response(receipts.draft(conn,actor,row,draft))
         repo.rows(conn,"UPDATE ingestion_requests SET period_start=%s,period_end=%s WHERE household_id=%s AND id=%s RETURNING id",(draft["period_start"],draft["period_end"],actor.household_id,row["id"]))
         result={"status":"committed","request_id":str(row["id"]),"lines":results,"snapshots":snapshots,

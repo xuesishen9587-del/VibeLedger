@@ -57,7 +57,7 @@ class AppNavigationTest(unittest.TestCase):
             next(b for b in app.button if b.label=="登录").click().run()
         self.assertEqual(len(app.exception),0)
         self.assertEqual(app.session_state["_login"]["subject"],"alice")
-        self.assertNotIn("fixture-password",repr(app.session_state.filtered_state))
+        self.assertNotIn("fixture-password",repr(app.session_state))
         self.assertEqual(app.radio[0].options,["财富","支出","复核","设置"])
 
     def test_logout_removes_cached_finances_and_returns_to_login(self):
@@ -74,8 +74,8 @@ class AppNavigationTest(unittest.TestCase):
             app.radio(key="main_page").set_value("设置").run()
             next(b for b in app.button if b.label=="退出登录").click().run()
         self.assertEqual(len(app.exception),0)
-        self.assertNotIn("cached_finances",app.session_state.filtered_state)
-        self.assertNotIn("_login",app.session_state.filtered_state)
+        self.assertNotIn("cached_finances",app.session_state)
+        self.assertNotIn("_login",app.session_state)
         self.assertEqual([x.label for x in app.text_input],["邮箱","密码"])
         provider.sign_out.assert_called_once_with("fixture-token")
 

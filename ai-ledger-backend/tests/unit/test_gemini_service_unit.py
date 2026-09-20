@@ -76,29 +76,6 @@ class TestGeminiServiceUnit(unittest.TestCase):
         self.assertEqual(res.original_amount, Decimal("150.75"))
         self.assertIsNone(res.occurred_on)
 
-    def test_gemini_response_schema_has_no_additional_properties(self):
-        """
-        Verify that ExpenseExtractionTransportSchema generates strict JSON schema
-        without additionalProperties, adhering to Gemini Developer API constraints.
-        """
-        from app.services.gemini_service import ExpenseExtractionTransportSchema
-        import json
-
-        # 1. Inspect Pydantic JSON Schema
-        pydantic_schema = ExpenseExtractionTransportSchema.model_json_schema()
-        pydantic_schema_str = json.dumps(pydantic_schema)
-        self.assertNotIn("additionalProperties", pydantic_schema_str)
-
-        # 2. Inspect Google GenAI SDK transformed Schema
-        try:
-            from google.genai import _transformers
-            sdk_schema = _transformers.t_schema(None, ExpenseExtractionTransportSchema)
-            sdk_dump = json.dumps(sdk_schema.model_dump(by_alias=True, exclude_none=True) if hasattr(sdk_schema, "model_dump") else str(sdk_schema))
-            self.assertNotIn("additionalProperties", sdk_dump)
-            self.assertNotIn("additional_properties", sdk_dump)
-        except ImportError:
-            pass
-
     def test_gemini_json_response_maps_correctly_to_extraction_result(self):
         """
         Verify that a structured JSON output from Gemini parses into ExpenseExtractionTransportSchema
@@ -191,7 +168,7 @@ class TestGeminiServiceUnit(unittest.TestCase):
 
     def test_gemini_service_extract_expense_with_mocked_client(self):
         """
-        Verify GeminiService.extract_expense properly sets response_schema to ExpenseExtractionTransportSchema
+        Verify GeminiService.extract_expense uses plain response_json_schema followed by local validation
         and handles response conversion end-to-end.
         """
         from unittest.mock import MagicMock, patch
@@ -230,11 +207,15 @@ class TestGeminiServiceUnit(unittest.TestCase):
                 categories=[{"name": "Snacks", "category_type": "expense"}]
             )
 
+            self.assertEqual(mock_client_cls.call_args.kwargs["http_options"].timeout, 40000)
+            self.assertEqual(mock_client_cls.call_args.kwargs["http_options"].retry_options.attempts, 1)
             # Assert client generate_content was called
             self.assertTrue(mock_client.models.generate_content.called)
             call_kwargs = mock_client.models.generate_content.call_args[1]
             config = call_kwargs["config"]
-            self.assertEqual(config.response_schema, ExpenseExtractionTransportSchema)
+            from app.services.gemini_service import _EXPENSE_EXTRACTION_TRANSPORT_SCHEMA
+            self.assertIsNone(config.response_schema)
+            self.assertEqual(config.response_json_schema, _EXPENSE_EXTRACTION_TRANSPORT_SCHEMA)
 
             # Assert parsed result
             self.assertEqual(result.merchant, "Mock Shop")
@@ -246,26 +227,6 @@ class TestGeminiServiceUnit(unittest.TestCase):
             self.assertEqual(result.field_confidence.get("category", 0.0), 0.85)
             self.assertEqual(result.field_confidence.get("date", 0.0), 0.95)
             self.assertEqual(result.field_confidence.get("total_periods", 0.0), 0.0)
-
-    def test_gemini_revision_response_schema_has_no_additional_properties(self):
-        """
-        Verify that ExpenseRevisionTransportSchema generates strict JSON schema
-        without additionalProperties, adhering to Gemini Developer API constraints.
-        """
-        # 1. Inspect Pydantic JSON Schema
-        pydantic_schema = ExpenseRevisionTransportSchema.model_json_schema()
-        pydantic_schema_str = json.dumps(pydantic_schema)
-        self.assertNotIn("additionalProperties", pydantic_schema_str)
-
-        # 2. Inspect Google GenAI SDK transformed Schema
-        try:
-            from google.genai import _transformers
-            sdk_schema = _transformers.t_schema(None, ExpenseRevisionTransportSchema)
-            sdk_dump = json.dumps(sdk_schema.model_dump(by_alias=True, exclude_none=True) if hasattr(sdk_schema, "model_dump") else str(sdk_schema))
-            self.assertNotIn("additionalProperties", sdk_dump)
-            self.assertNotIn("additional_properties", sdk_dump)
-        except ImportError:
-            pass
 
     def test_build_revision_system_prompt_includes_accounts_and_aliases(self):
         service = GeminiService(api_key="mock_key")
@@ -348,7 +309,9 @@ class TestGeminiServiceUnit(unittest.TestCase):
             self.assertTrue(mock_client.models.generate_content.called)
             call_kwargs = mock_client.models.generate_content.call_args[1]
             config = call_kwargs["config"]
-            self.assertEqual(config.response_schema, ExpenseRevisionTransportSchema)
+            from app.services.gemini_service import _EXPENSE_REVISION_TRANSPORT_SCHEMA
+            self.assertIsNone(config.response_schema)
+            self.assertEqual(config.response_json_schema, _EXPENSE_REVISION_TRANSPORT_SCHEMA)
 
             self.assertEqual(result.merchant, "Target")
             self.assertEqual(result.original_amount, Decimal("88.50"))

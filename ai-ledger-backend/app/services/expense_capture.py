@@ -6,6 +6,8 @@ import time
 from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo
 from fastapi import HTTPException
+from app.services.gemini_diagnostics import request_context, log_failure
+from app.domain.transactions import GeminiDependencyError
 from app.domain.capture_images import decode_image
 from app.domain.capture_edits import ReviseRequestPayload
 from pydantic import ValidationError
@@ -179,11 +181,17 @@ def process(factory, actor, payload, model, fx_provider=None):
         household = schema.get_household(conn, actor.household_id)
     try:
         # No database connection is alive here. The SDK has a 40s timeout and no retry.
-        result = model.extract_expense(raw, mime, payload.get("note"), accounts, categories, captured_at=captured_at)
+        with request_context(row["id"]):
+            result = model.extract_expense(raw, mime, payload.get("note"), accounts, categories, captured_at=captured_at)
         proposed = initial_draft(result, captured_at, household, accounts, categories)
         if time.monotonic() - started >= 45:
-            raise TimeoutError()
-    except Exception:
+            with request_context(row["id"]):
+                log_failure("expense_extract", "capture_deadline", TimeoutError())
+            return dependency_failure(factory, actor, row["id"])
+    except Exception as exc:
+        if not isinstance(exc, GeminiDependencyError):
+            with request_context(row["id"]):
+                log_failure("expense_extract", "domain_validation", exc)
         return dependency_failure(factory, actor, row["id"])
     finally:
         raw = None
@@ -191,6 +199,8 @@ def process(factory, actor, payload, model, fx_provider=None):
         with receipts.session(factory) as conn:
             prime_quote(conn, actor.household_id, proposed, fx_provider)
     if time.monotonic() - started >= 45:
+        with request_context(row["id"]):
+            log_failure("expense_extract", "capture_deadline", TimeoutError())
         return dependency_failure(factory, actor, row["id"])
     with receipts.session(factory) as conn:
         current = receipts.get(conn, actor, row["id"], lock=True)
@@ -240,9 +250,13 @@ def revise(factory, actor, identity, changes, model=None):
         if patch:
             fail("INVALID_REQUEST", "Use structured edits or a correction note, not both.")
         try:
-            result = model.revise_expense_draft(row["draft_payload"], note, accounts, categories)
+            with request_context(row["id"]):
+                result = model.revise_expense_draft(row["draft_payload"], note, accounts, categories)
             patch = result.model_dump(mode="json", exclude_none=True, exclude={"raw_response"})
-        except Exception:
+        except Exception as exc:
+            if not isinstance(exc, GeminiDependencyError):
+                with request_context(row["id"]):
+                    log_failure("expense_revise", "domain_validation", exc)
             fail("CAPTURE_DEPENDENCY_UNAVAILABLE", "Draft revision unavailable; the saved draft is unchanged.", 503)
         for source, target, refs in (("from_account", "from_account_id", accounts), ("category", "category_id", categories)):
             if source in patch:
@@ -251,7 +265,9 @@ def revise(factory, actor, identity, changes, model=None):
         try:
             # Model output crosses the same bounds as structured user edits.
             patch = ReviseRequestPayload.model_validate(patch).model_dump(mode="json", exclude_unset=True)
-        except ValidationError:
+        except ValidationError as exc:
+            with request_context(row["id"]):
+                log_failure("expense_revise", "domain_validation", exc)
             fail("CAPTURE_DEPENDENCY_UNAVAILABLE", "Draft revision was invalid; the saved draft is unchanged.", 503)
     with receipts.session(factory) as conn:
         current = receipts.get(conn, actor, identity, lock=True)

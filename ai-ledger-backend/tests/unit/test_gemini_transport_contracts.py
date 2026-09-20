@@ -12,6 +12,22 @@ class GeminiTransportContractTests(unittest.TestCase):
     def _source(self, module):
         return Path(module.__file__).read_text(encoding="utf-8")
 
+    def test_expense_transport_is_plain_and_local_validation_remains(self):
+        source = self._source(gemini_service)
+        self.assertNotIn("response_schema=", source)
+        self.assertNotIn("model_json_schema()", source)
+        for name, model in [("_EXPENSE_EXTRACTION_TRANSPORT_SCHEMA", "ExpenseExtractionTransportSchema"),
+                            ("_EXPENSE_REVISION_TRANSPORT_SCHEMA", "ExpenseRevisionTransportSchema")]:
+            self.assertIn("response_json_schema=" + name, source)
+            self.assertIn(model + ".model_validate(data)", source)
+            schema = getattr(gemini_service, name)
+            self.assertEqual(schema["type"], "object")
+            self.assertEqual(set(schema["properties"]), set(getattr(gemini_service, model).model_fields))
+            import json
+            encoded = json.dumps(schema)
+            for rich_keyword in ("$ref", "$defs", "anyOf", "format", "additionalProperties", "default"):
+                self.assertNotIn('"' + rich_keyword + '"', encoded)
+
     def test_balance_uses_simplified_transport_schema(self):
         source = self._source(balance_extractor)
 

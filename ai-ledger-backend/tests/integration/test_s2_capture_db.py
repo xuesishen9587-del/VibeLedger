@@ -303,10 +303,12 @@ class TestS2CaptureDb(BaseDbTestCase):
 
     def test_overall_deadline_after_extraction_saves_failed_receipt(self):
         key = str(uuid4())
-        with patch("app.services.expense_capture.time") as clock:
+        with patch("app.services.expense_capture.time") as clock, self.assertLogs("app.gemini") as logs:
             clock.monotonic.side_effect = [0, 1, 46]
             response = self.capture(key)
         self.assertEqual(response.status_code, 503)
+        self.assertIn("category=timeout", logs.output[0])
+        self.assertIn("phase=capture_deadline", logs.output[0])
         self.assertEqual(self.client.get(f"/api/v1/ingestion-requests/by-key/{key}").json()["status"], "failed")
         self.assertEqual(self.capture(key).status_code, 503)
         self.assertEqual(self.model.call_count, 1)
@@ -442,3 +444,40 @@ class TestS2CaptureDb(BaseDbTestCase):
                 release.set()
             self.assertEqual(pending.result().status_code, 409)
         self.assertEqual(self.client.get(f"/api/v1/ingestion-requests/{draft['request_id']}").json()["draft"]["merchant"], "Newer")
+
+    def test_real_gemini_service_failure_logs_receipt_and_preserves_public_recovery(self):
+        from google.genai.errors import ClientError
+        from app.services.gemini_service import GeminiService
+        from unittest.mock import MagicMock
+        self.model = GeminiService(api_key="SECRET_KEY")
+        client = MagicMock()
+        client.models.generate_content.side_effect = ClientError(400, {"error": {"message": "SECRET_UPSTREAM_SCHEMA"}})
+        key = str(uuid4())
+        with patch("google.genai.Client", return_value=client), self.assertLogs("app.gemini") as logs:
+            response = self.capture(key, note="SECRET_NOTE")
+        self.assertEqual(response.status_code, 503)
+        identity = response.json()["error"]["details"]["request_id"]
+        self.assertIn("request_id=" + identity, logs.output[0])
+        self.assertIn("category=upstream", logs.output[0])
+        self.assertIn("upstream_status=400", logs.output[0])
+        self.assertNotIn("SECRET", response.text + str(logs.output))
+        self.assertEqual(self.capture(key, note="SECRET_NOTE").json(), response.json())
+        self.assertEqual(client.models.generate_content.call_count, 1)
+        self.assertEqual(repo.rows(self.conn, "SELECT count(*) n FROM transactions")[0]["n"], 0)
+
+    def test_real_gemini_revision_validation_logs_receipt_without_changing_draft(self):
+        from app.services.gemini_service import GeminiService
+        from unittest.mock import MagicMock
+        draft = self.draft()
+        self.model = GeminiService(api_key="SECRET_KEY")
+        client = MagicMock()
+        client.models.generate_content.return_value.text = '{"occurred_on":"SECRET_BAD_DATE"}'
+        with patch("google.genai.Client", return_value=client), self.assertLogs("app.gemini") as logs:
+            response = self.client.post(f"/api/v1/ingestion-requests/{draft['request_id']}/revise", json={"correction_note":"SECRET_NOTE"})
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("request_id=" + draft["request_id"], logs.output[0])
+        self.assertIn("category=response_validation", logs.output[0])
+        self.assertNotIn("SECRET", response.text + str(logs.output))
+        current = self.client.get(f"/api/v1/ingestion-requests/{draft['request_id']}").json()
+        self.assertEqual(current["draft"], draft["draft"])
+        self.assertEqual(current["row_version"], draft["row_version"])

@@ -54,8 +54,8 @@ class StatementFactReviewTest(unittest.TestCase):
              patch.object(statement_import.schema,"get_household",return_value={"timezone":"Asia/Singapore"}), \
              patch.object(statement_import,"provider_matches",return_value=[]), \
              patch.object(statement_import.schema,"get_category",return_value={"status":"active","category_type":"expense"}), \
-             patch.object(statement_import.repo,"rows",return_value=[]):
-            return statement_import.validate(None,actor,{"statement_account_id":"account"},draft)
+             patch.object(statement_import.repo,"rows",side_effect=lambda conn,query,args: [{"id":"row","extracted_payload":{}}] if "statement_lines" in query else []):
+            return statement_import.validate(None,actor,{"id":"receipt","statement_account_id":"account"},draft)
 
     def test_valid_uncertain_facts_clear_after_acknowledgement(self):
         result,blocked=self.validate()
@@ -82,7 +82,8 @@ class StatementLinkReviewTest(unittest.TestCase):
         with patch.object(statement_import,"account_for_import",return_value={"id":"account"}), \
              patch.object(statement_import.schema,"get_household",return_value={"timezone":"Asia/Singapore"}), \
              patch.object(statement_import,"provider_matches",return_value=[]), \
-             patch.object(statement_import.spending,"require_record",return_value={"status":"voided"}):
-            result,blocked=statement_import.validate(None,actor,{"statement_account_id":"account"},draft)
+             patch.object(statement_import.spending,"require_record",return_value={"status":"voided"}), \
+             patch.object(statement_import.repo,"rows",return_value=[{"id":"row","extracted_payload":{}}]):
+            result,blocked=statement_import.validate(None,actor,{"id":"receipt","statement_account_id":"account"},draft)
         self.assertTrue(blocked)
         self.assertEqual(result["warnings"][0]["code"],"IMPORT_CHANGED")

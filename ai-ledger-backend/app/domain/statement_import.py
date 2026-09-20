@@ -13,7 +13,7 @@ class StatementConfidence(BaseModel):
     category: float = Field(0,ge=0,le=1)
 
 
-class ExtractedStatementLine(BaseModel):
+class StatementReferenceLine(BaseModel):
     model_config = ConfigDict(extra="forbid")
     occurred_on: date | None = None
     posted_on: date | None = None
@@ -21,9 +21,14 @@ class ExtractedStatementLine(BaseModel):
     currency: str | None = Field(None,max_length=3)
     merchant: str | None = Field(None,max_length=240)
     kind: Literal["expense","refund","fee","transfer","repayment","income","opening_balance","investment_trade","unknown"]
-    provider_transaction_id: str | None = Field(None,max_length=200)
+    provider_reference: str | None = Field(None,max_length=200)
     category: str | None = Field(None,max_length=120)
     confidence: StatementConfidence = Field(default_factory=StatementConfidence)
+
+
+class ExtractedStatementLine(StatementReferenceLine):
+    # Only a server-configured adapter may give this field unique-ID semantics.
+    provider_transaction_id: str | None = Field(None,max_length=200)
 
 
 class StatementExtraction(BaseModel):
@@ -38,6 +43,11 @@ class StatementExtraction(BaseModel):
     processed_pages: list[int] = Field(max_length=50)
     expected_line_count: int = Field(ge=0)
     complete: bool = False
+
+
+class StatementDocumentExtraction(StatementExtraction):
+    # Generic PDF/model output cannot assert unique provider identity.
+    lines: list[StatementReferenceLine] = Field(max_length=1000)
 
 
 class StatementLineEdit(BaseModel):

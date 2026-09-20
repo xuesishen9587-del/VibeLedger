@@ -834,7 +834,7 @@ export function StatementWorkspace({
         JSON.stringify(receipt.draft) !== JSON.stringify(draft) ||
         confirmed.size ||
         confirmedCategories.size;
-      if (changed || globalWarnings.length || recheckOnly) {
+      if (changed || receipt.warnings?.length || recheckOnly) {
         result = await api.request<Receipt>(base + "/draft", {
           method: "PATCH",
           body: JSON.stringify(body),

@@ -304,8 +304,9 @@ holds an optional balance selection and editable selected actions keyed by row I
 
 statement_lines: id, household_id, request_id, account_id, row_no, immutable
 extracted_payload JSONB (typed date, posted date if present, amount/currency, merchant,
-kind expense/refund/fee/transfer/repayment/income/unknown, provider_transaction_id
-nullable), applied_transaction_id nullable, final_action create/link/skip nullable.
+kind expense/refund/fee/transfer/repayment/income/unknown, provider_reference nullable;
+trusted adapters may additionally supply provider_transaction_id with a server-owned
+provider_id_namespace), applied_transaction_id nullable, final_action create/link/skip nullable.
 UNIQUE(request_id,row_no); household composite FKs. The original extraction is evidence;
 user corrections live in the versioned draft and audit, not overwrites of extracted data.
 Store no whole model response. No match scores, candidate records or adjustment amounts.
@@ -331,14 +332,30 @@ At least one row action or balance is required; all-skipped imports may commit a
 zero-created summary recording the user's exclusions.
 
 Duplicate protection runs both in preview and under the finance-write lock at commit:
-same scoped provider transaction ID already linked in a committed statement import
+same scoped, guaranteed-unique provider transaction ID already linked in a committed statement import
 means reuse its transaction only if financial identity agrees; contradictions require
 review. Without a reliable ID, exact date/amount/currency/normalized merchant with same
 or unknown account produces suggested matches, not automatic merges. Multiple equal
 purchases preserve multiplicity. All evidence rows sharing a provider ID must point
 to the same transaction; enforce in the locked service. Void history does not authorize
 resurrection: reuse/skip or an explicit separate correction, never automatic recreation.
-No fuzzy scoring, amount tolerance or settlement conversion is an identity proof.
+Generic PDF/Gemini extraction supplies only non-unique `provider_reference`, preserving
+exact merchant text and every source row occurrence. Repeated Grab/bank references,
+including identical-looking rows, never imply a shared transaction. Only a vetted
+server parser adapter with a documented provider uniqueness guarantee may configure
+`unique_id_namespace`; model output and draft edits cannot assert that guarantee.
+Matching requires the same namespace, household and account. No production PDF
+adapter currently has such a guarantee. Existing unnamed model-extracted IDs are
+interpreted as references on validation, without rewriting immutable extraction or
+user corrections. Old unconfirmed automatic links are rechecked as possible duplicates;
+explicit user link decisions remain intact. Already committed imports are not rewritten.
+
+The existing document SHA-256/account reservation identifies a single import receipt;
+its immutable `(request_id,row_no)` occurrences have durable row UUIDs. Transaction
+`(source_request_id,source_item_key=row UUID)` uniqueness and the locked terminal
+receipt prevent retry/re-upload duplicates without collapsing equal financial facts.
+An overlapping *different* PDF without trusted IDs still requires explicit duplicate
+review. No fuzzy scoring, amount tolerance or settlement conversion is an identity proof.
 
 Per-line actions: create, link_existing(transaction_id,expected_version), skip(reason),
 or use_schedule_period(schedule_id,period_no,expected_schedule_version). Link is explicit

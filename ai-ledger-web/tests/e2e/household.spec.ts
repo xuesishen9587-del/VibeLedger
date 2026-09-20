@@ -905,3 +905,83 @@ for (const source of ["draft", "confirm"]) {
     expect(commits).toBe(1);
   });
 }
+
+test("legacy repeated PDF references revalidate and import every row without merchant edits", async ({
+  page,
+}) => {
+  await setup(page, { count: 7 });
+  const current: any = statement(7);
+  const references = [
+    "A-9MALQB8WWS7EAV",
+    "A-9MALQB8WWS7EAV",
+    "A-9M8VV2DGWQ6LAV",
+    "A-9M8VV2DGWQ6LAV",
+    "A-9LC54QKWWS94AV",
+    "A-9LC54QKWWS94AV",
+    "A-9LC54QKWWS94AV",
+  ];
+  const amounts = ["26.50", "10.00", "15.30", "2.00", "2.00", "20.00", "20.00"];
+  current.draft.lines.forEach((line: any, i: number) =>
+    Object.assign(line, {
+      merchant: "Grab* " + references[i],
+      original_amount: amounts[i],
+      provider_transaction_id: references[i],
+      original_currency: "SGD",
+    }),
+  );
+  current.warnings = current.draft.warnings = current.draft.lines.map(
+    (line: any) => ({
+      code: "STATEMENT_PROVIDER_CONFLICT",
+      row_id: line.row_id,
+    }),
+  );
+  let patches = 0,
+    confirmations = 0;
+  await page.route(
+    "**/api/v1/ingestion-requests/statement**",
+    async (route) => {
+      const path = new URL(route.request().url()).pathname;
+      if (path.endsWith("/draft")) {
+        patches++;
+        const body = route.request().postDataJSON();
+        expect(body.lines.map((r: any) => r.row_id)).toEqual(
+          current.draft.lines.map((r: any) => r.row_id),
+        );
+        expect(
+          body.lines.every((r: any) => !r.merchant && !r.original_amount),
+        ).toBe(true);
+        current.draft.lines.forEach((line: any) =>
+          Object.assign(line, {
+            provider_reference: line.provider_transaction_id,
+            provider_transaction_id: null,
+          }),
+        );
+        current.warnings = current.draft.warnings = [];
+        current.row_version++;
+      } else if (path.endsWith("/confirm")) {
+        confirmations++;
+        expect(patches).toBe(1);
+        expect(route.request().postDataJSON().expected_version).toBe(
+          current.row_version,
+        );
+        expect(current.draft.lines.map((r: any) => r.merchant)).toEqual(
+          references.map((r) => "Grab* " + r),
+        );
+        expect(current.draft.lines.map((r: any) => r.original_amount)).toEqual(
+          amounts,
+        );
+        current.status = "committed";
+        current.counts = { create: 7, link: 0, skip: 0 };
+      }
+      await route.fulfill({ json: current });
+    },
+  );
+  await login(page);
+  await page.goto("/#/statement/statement");
+  await expect(
+    page.getByRole("button", { name: "只看待检查 7" }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "确认导入整份账单" }).click();
+  await expect(page.getByRole("heading", { name: "账单已导入" })).toBeVisible();
+  expect(confirmations).toBe(1);
+});

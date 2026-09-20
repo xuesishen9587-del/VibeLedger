@@ -9,6 +9,26 @@ from app.services.statement_document import StatementDocumentParser, MAX_BYTES
 
 
 class StatementDocumentTest(TestCase):
+    def test_pdf_references_preserve_occurrences_and_cannot_claim_unique_ids(self):
+        from app.services.statement_document import _STATEMENT_TRANSPORT_SCHEMA
+        properties=_STATEMENT_TRANSPORT_SCHEMA["properties"]["lines"]["items"]["properties"]
+        self.assertIn("provider_reference",properties)
+        self.assertNotIn("provider_transaction_id",properties)
+        parser=StatementDocumentParser()
+        self.assertIsNone(parser.unique_id_namespace)
+        line={"kind":"expense","merchant":"Grab* A-9MALQB8WWS7EAV",
+            "provider_reference":"A-9MALQB8WWS7EAV","amount":"26.50"}
+        parsed={"lines":[line,line,{**line,"amount":"10.00"}],"processed_pages":[1],"expected_line_count":3,"complete":True}
+        with patch.object(parser,"extract",return_value=parsed):
+            result=parser.parse(self.pdf(),None,{},[])
+            self.assertEqual(len(result["lines"]),3)
+            self.assertEqual([r["merchant"] for r in result["lines"]],[line["merchant"]]*3)
+            self.assertTrue(all("provider_transaction_id" not in r for r in result["lines"]))
+            for field in ("provider_transaction_id","provider_id_namespace"):
+                parsed["lines"]=[{**line,field:"model-cannot-assert-uniqueness"}]
+                with self.assertRaises(HTTPException):
+                    parser.parse(self.pdf(),None,{},[])
+
     def pdf(self,pages=1,password=None):
         writer=pypdf.PdfWriter()
         for _ in range(pages):

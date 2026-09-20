@@ -28,12 +28,26 @@ def account_for_import(conn,actor,identity):
     return account
 
 
-def provider_matches(conn,hh,account_id,provider_id):
-    if not provider_id:
+def provider_matches(conn,hh,account_id,provider_id,namespace):
+    if not provider_id or not namespace:
         return []
     return repo.rows(conn,"SELECT DISTINCT t.* FROM statement_lines l JOIN ingestion_requests r ON r.id=l.request_id AND r.household_id=l.household_id "
         "JOIN transactions t ON t.id=l.applied_transaction_id AND t.household_id=l.household_id WHERE l.household_id=%s AND l.account_id=%s "
-        "AND r.status='committed' AND l.extracted_payload->>'provider_transaction_id'=%s",(hh,account_id,provider_id))
+        "AND r.status='committed' AND l.extracted_payload->>'provider_transaction_id'=%s "
+        "AND l.extracted_payload->>'provider_id_namespace'=%s",(hh,account_id,provider_id,namespace))
+
+
+def provider_evidence(extracted):
+    """Old model-extracted IDs are references, never uniqueness guarantees."""
+    namespace=extracted.get("provider_id_namespace")
+    trusted=isinstance(namespace,str) and bool(namespace.strip())
+    return {"provider_reference":extracted.get("provider_reference") or (extracted.get("provider_transaction_id") if not trusted else None),
+        "provider_transaction_id":extracted.get("provider_transaction_id") if trusted else None,
+        "provider_id_namespace":namespace if trusted else None}
+
+
+def provider_key(line):
+    return (line["provider_id_namespace"],line["provider_transaction_id"])
 
 
 def financial_identity(line):
@@ -63,7 +77,7 @@ def validate_balance(conn,actor,balance):
     return target
 
 
-def prepare(conn,actor,row,data,account,categories,head):
+def prepare(conn,actor,row,data,account,categories,head,namespace=None):
     page_count=data["actual_page_count"]
     extraction=StatementExtraction.model_validate({k:v for k,v in data.items() if k!="actual_page_count"}).model_dump(mode="json")
     selected=match(extraction["account_hint"],[account])
@@ -72,7 +86,11 @@ def prepare(conn,actor,row,data,account,categories,head):
     fallback=next(c for c in categories if c["is_fallback"])
     lines=[]
     for number,extracted in enumerate(extraction["lines"],1):
+        # Document hash reserves one receipt; each row occurrence retains its own
+        # durable UUID, also used as the transaction source_item_key on retries.
         identity=uuid4()
+        if namespace:
+            extracted["provider_id_namespace"]=namespace
         repo.rows(conn,"INSERT INTO statement_lines(id,household_id,request_id,account_id,row_no,extracted_payload) VALUES(%s,%s,%s,%s,%s,%s::jsonb) RETURNING id",
             (identity,actor.household_id,row["id"],account["id"],number,json.dumps(extracted)))
         category=match(extracted["category"],categories)
@@ -85,9 +103,9 @@ def prepare(conn,actor,row,data,account,categories,head):
             "category_id":str(category["id"]),"category_uncertain":uncertain,
             "kind":extracted["kind"],
             "remarks":("账单退款"+(" · "+extracted["merchant"] if extracted["merchant"] else "")) if extracted["kind"]=="refund" else None,
-            "provider_transaction_id":extracted["provider_transaction_id"],"reason":"Not spending: "+extracted["kind"] if excluded else None,
+            **provider_evidence(extracted),"reason":"Not spending: "+extracted["kind"] if excluded else None,
             "requires_review":any(extracted["confidence"][k]<.85 for k in ("amount","currency","date","intent")),"duplicate_ids":[]}
-        targets=provider_matches(conn,actor.household_id,account["id"],line["provider_transaction_id"])
+        targets=provider_matches(conn,actor.household_id,account["id"],line["provider_transaction_id"],line.get("provider_id_namespace"))
         if len(targets)==1 and targets[0]["status"]=="committed" and not excluded:
             try:
                 agrees=identity_agrees(line,targets[0])
@@ -131,15 +149,23 @@ def validate(conn,actor,receipt,proposed,confirming=False):
     except (HTTPException,ValueError,TypeError):
         start=end=None
         warn("STATEMENT_PERIOD_REQUIRED","Correct the statement period bounds.")
+    evidence={str(r["id"]):r["extracted_payload"] for r in repo.rows(conn,
+        "SELECT id,extracted_payload FROM statement_lines WHERE household_id=%s AND request_id=%s",
+        (actor.household_id,receipt["id"]))}
     provider_groups={}
     for line in draft["lines"]:
         rid=line["row_id"]
+        extracted=evidence[rid]
+        line.update(provider_evidence(extracted))
+        # Restore legacy automatic reference links; preserve explicit decisions.
+        if extracted.get("provider_transaction_id") and not line["provider_id_namespace"] and line["action"]=="link_existing" and not line.get("confirm_facts"):
+            line.update(action="create",transaction_id=None,expected_transaction_version=None,explicit_create=False)
         if line["action"]=="skip":
             if not (line.get("reason") or "").strip():
                 warn("SKIP_REASON_REQUIRED","State why this line is excluded.",rid)
             continue
         try:
-            prior=provider_matches(conn,actor.household_id,account["id"],line.get("provider_transaction_id"))
+            prior=provider_matches(conn,actor.household_id,account["id"],line.get("provider_transaction_id"),line.get("provider_id_namespace"))
             if line["action"]=="link_existing":
                 if not line.get("transaction_id") or line.get("expected_transaction_version") is None:
                     fail("IMPORT_CHANGED","Select the target expense and its current version.",409)
@@ -151,7 +177,7 @@ def validate(conn,actor,receipt,proposed,confirming=False):
                 if prior and {str(t["id"]) for t in prior}!={str(target["id"])}:
                     fail("IMPORT_CHANGED","This provider ID already identifies a different transaction.",409)
                 if line.get("provider_transaction_id"):
-                    pid=line["provider_transaction_id"]
+                    pid=provider_key(line)
                     provider_groups.setdefault(pid,[]).append((line,target,str(target["id"])))
                 continue
             if prior:
@@ -172,7 +198,7 @@ def validate(conn,actor,receipt,proposed,confirming=False):
                     fail("INVALID_SCHEDULE","Only expenses bind schedule periods.")
                 schedules.validate_capture_period(conn,actor,line,line)
             if line.get("provider_transaction_id"):
-                provider_groups.setdefault(line["provider_transaction_id"],[]).append((line,line,None))
+                provider_groups.setdefault(provider_key(line),[]).append((line,line,None))
             if line.get("requires_review"):
                 warn("STATEMENT_LINE_UNCERTAIN","Review the amount, currency, business date and spending intent.",rid)
             candidates=repo.rows(conn,"SELECT id FROM transactions WHERE household_id=%s AND status='committed' "
@@ -259,7 +285,10 @@ def upload(factory,actor,account_id,key,content,password,parser):
             return receipts.response(current)
         schema.acquire_household_finance_lock(conn,actor.household_id)
         receipts.authorize(conn,actor)
-        proposed=prepare(conn,actor,current,parsed,account,categories,head)
+        # Server adapter configuration, never a claim from model output.
+        namespace=getattr(parser,"unique_id_namespace",None)
+        namespace=namespace.strip() if isinstance(namespace,str) else None
+        proposed=prepare(conn,actor,current,parsed,account,categories,head,namespace)
         draft,_=validate(conn,actor,current,proposed)
         return receipts.response(receipts.draft(conn,actor,current,draft))
 
@@ -365,13 +394,13 @@ def confirm(factory,actor,identity,version,provider=None):
             for line in draft["lines"]:
                 if line["action"]=="link_existing" and line.get("provider_transaction_id"):
                     active_row_id=line["row_id"]
-                    local_providers[line["provider_transaction_id"]]=spending.require_record(
+                    local_providers[provider_key(line)]=spending.require_record(
                         conn,actor.household_id,line["transaction_id"],line["expected_transaction_version"])
             for line in draft["lines"]:
                 active_row_id=line["row_id"]
                 transaction=None
                 action=line["action"]
-                pid=line.get("provider_transaction_id")
+                pid=provider_key(line) if line.get("provider_transaction_id") else None
                 if action!="skip" and pid and pid in local_providers:
                     prior=local_providers[pid]
                     if action=="link_existing" and str(prior["id"])!=line.get("transaction_id"):

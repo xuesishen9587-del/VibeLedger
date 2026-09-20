@@ -1,4 +1,5 @@
 from uuid import uuid4
+from decimal import Decimal
 from unittest.mock import Mock, patch
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event
@@ -15,6 +16,7 @@ class TestS3StatementDb(BaseDbTestCase):
             cur.execute("UPDATE accounts SET statement_import_enabled=true WHERE id=%s",(self.account["id"],))
         self.conn.commit()
         self.parser=Mock()
+        self.parser.unique_id_namespace="test-bank:guaranteed-v1"
         self.client.app.dependency_overrides[get_statement_parser]=lambda:self.parser
 
     def line(self,**kw):
@@ -439,3 +441,106 @@ class TestS3StatementDb(BaseDbTestCase):
         saved=self.confirm(fixed).json()
         self.assertEqual(saved["status"],"committed")
         self.assertEqual(self.confirm(fixed).json(),saved)
+
+    def mari_rows(self,legacy=False):
+        field="provider_transaction_id" if legacy else "provider_reference"
+        return [self.line(occurred_on=day,currency="SGD",merchant="Grab* "+reference,amount=amount,**{field:reference})
+            for day,reference,amount in [
+                ("2026-08-07","A-9MALQB8WWS7EAV","26.50"),
+                ("2026-08-07","A-9MALQB8WWS7EAV","10.00"),
+                ("2026-08-07","A-9M8VV2DGWQ6LAV","15.30"),
+                ("2026-08-07","A-9M8VV2DGWQ6LAV","2.00"),
+                ("2026-07-31","A-9LC54QKWWS94AV","2.00"),
+                ("2026-07-31","A-9LC54QKWWS94AV","20.00"),
+                # Additional identical-looking legitimate occurrence.
+                ("2026-07-31","A-9LC54QKWWS94AV","20.00")]]
+
+    def test_mari_references_preserve_every_occurrence_and_document_retries(self):
+        self.parser.unique_id_namespace=None
+        lines=self.mari_rows()
+        data=self.extraction(lines,period_start="2026-07-22",period_end="2026-08-21")
+        key=str(uuid4())
+        document=b"%PDF-mari-reference-regression"
+        draft=self.upload(data,key=key,document=document).json()
+        self.assertEqual(draft["warnings"],[])
+        self.assertEqual(self.upload(data,key=key,document=document).json(),draft)
+        self.assertEqual(len({r["row_id"] for r in draft["draft"]["lines"]}),7)
+        self.assertTrue(all(r["provider_transaction_id"] is None for r in draft["draft"]["lines"]))
+        saved=self.confirm(draft).json()
+        self.assertEqual(saved["counts"],{"create":7,"link":0,"skip":0})
+        self.assertEqual(len({r["transaction_id"] for r in saved["lines"]}),7)
+        self.assertEqual(self.confirm(draft).json(),saved)
+        self.assertEqual(self.upload(data,key=key,document=document).json(),saved)
+        repeat=self.upload(data,document=document)
+        self.assertEqual(repeat.status_code,409)
+        self.assertEqual(repeat.json()["error"]["details"]["request_id"],draft["request_id"])
+        self.assertEqual(self.parser.parse.call_count,1)
+        records=repo.rows(self.conn,"SELECT t.*,l.row_no FROM transactions t JOIN statement_lines l ON l.applied_transaction_id=t.id ORDER BY l.row_no")
+        self.assertEqual(len(records),7)
+        for source,record in zip(lines,records):
+            self.assertEqual(record["merchant"],source["merchant"])
+            self.assertEqual(record["original_amount"],Decimal(source["amount"]))
+            self.assertEqual(str(record["occurred_on"]),source["occurred_on"])
+
+    def test_legacy_reference_conflicts_revalidate_without_edits_or_evidence_changes(self):
+        draft=self.upload(self.extraction(self.mari_rows(legacy=True),period_start="2026-07-22",period_end="2026-08-21")).json()
+        self.assertTrue(draft["warnings"])
+        with self.conn.cursor() as cur:
+            cur.execute("UPDATE statement_lines SET extracted_payload=extracted_payload-'provider_id_namespace' WHERE request_id=%s",(draft["request_id"],))
+        self.conn.commit()
+        evidence=repo.rows(self.conn,"SELECT id,row_no,extracted_payload FROM statement_lines ORDER BY row_no")
+        saved=self.confirm(draft).json()
+        self.assertEqual(saved["counts"],{"create":7,"link":0,"skip":0})
+        self.assertEqual(self.confirm(draft).json(),saved)
+        self.assertEqual(repo.rows(self.conn,"SELECT id,row_no,extracted_payload FROM statement_lines ORDER BY row_no"),evidence)
+
+    def test_reference_rows_roll_back_all_writes_then_commit_once(self):
+        from app.domain.spending import fail
+        from app.services.balance_service import history
+        self.parser.unique_id_namespace=None
+        draft=self.upload(self.extraction(self.mari_rows(),period_start="2026-07-22",period_end="2026-08-21")).json()
+        def injected(conn,actor,receipt_id,result,*args,**kw):
+            if result["id"]==draft["draft"]["lines"][-1]["row_id"]:
+                fail("IMPORT_CHANGED","Injected final-row failure",409)
+            return history(conn,actor,receipt_id,result,*args,**kw)
+        with patch("app.services.statement_import.balances.history",side_effect=injected):
+            blocked=self.confirm(draft).json()
+        self.assertEqual(blocked["status"],"needs_confirmation")
+        for table in ("transactions","audit_events"):
+            self.assertEqual(repo.rows(self.conn,f"SELECT count(*) n FROM {table} WHERE source_request_id=%s",(draft["request_id"],))[0]["n"],0)
+        self.assertEqual(repo.rows(self.conn,"SELECT count(*) n FROM statement_lines WHERE final_action IS NOT NULL")[0]["n"],0)
+        fixed=self.edit(blocked)
+        saved=self.confirm(fixed).json()
+        self.assertEqual(saved["counts"],{"create":7,"link":0,"skip":0})
+        self.assertEqual(self.confirm(fixed).json(),saved)
+
+    def test_provider_namespaces_and_untrusted_references_do_not_share_identity(self):
+        first=self.confirm(self.upload(self.extraction([self.line(provider_transaction_id="same")])).json()).json()
+        self.parser.unique_id_namespace="another-bank:guaranteed-v1"
+        other=self.upload(self.extraction([self.line(provider_transaction_id="same",amount="13.00")])).json()
+        self.assertEqual(other["warnings"],[])
+        self.assertEqual(self.confirm(other).json()["counts"]["create"],1)
+        self.parser.unique_id_namespace=None
+        reference=self.upload(self.extraction([self.line(provider_transaction_id="same",amount="14.00")])).json()
+        self.assertEqual(reference["draft"]["lines"][0]["provider_reference"],"same")
+        self.assertEqual(self.confirm(reference).json()["counts"]["create"],1)
+        self.parser.unique_id_namespace="test-bank:guaranteed-v1"
+        matched=self.upload(self.extraction([self.line(provider_transaction_id="same")])).json()
+        self.assertEqual(self.confirm(matched).json()["lines"][0]["transaction_id"],first["lines"][0]["transaction_id"])
+
+    def test_legacy_automatic_reference_link_requires_duplicate_decision(self):
+        first=self.confirm(self.upload(self.extraction([self.line(provider_transaction_id="legacy")])).json()).json()
+        draft=self.upload(self.extraction([self.line(provider_transaction_id="legacy")])).json()
+        self.assertEqual(draft["draft"]["lines"][0]["action"],"link_existing")
+        with self.conn.cursor() as cur:
+            cur.execute("UPDATE statement_lines SET extracted_payload=extracted_payload-'provider_id_namespace'")
+        self.conn.commit()
+        blocked=self.confirm(draft).json()
+        self.assertEqual(blocked["draft"]["lines"][0]["action"],"create")
+        self.assertEqual(blocked["warnings"][0]["code"],"POSSIBLE_DUPLICATE")
+        self.assertEqual(repo.rows(self.conn,"SELECT count(*) n FROM transactions")[0]["n"],1)
+        # An explicit link remains a valid user decision without unique-ID evidence.
+        edited=self.edit(blocked,[{"row_id":blocked["draft"]["lines"][0]["row_id"],"action":"link_existing",
+            "transaction_id":first["lines"][0]["transaction_id"],"expected_transaction_version":0}])
+        self.assertEqual(edited["warnings"],[])
+        self.assertEqual(self.confirm(edited).json()["counts"],{"create":0,"link":1,"skip":0})

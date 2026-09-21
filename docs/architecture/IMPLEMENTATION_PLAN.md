@@ -230,8 +230,14 @@ Prepare a reviewable cutover sheet with exact images/versions, fresh DB/schema,
 secrets configuration, two user identities, devices, starter accounts and rollback
 procedure. Production is not part of this architecture task.
 
-Before switching: export/back up existing environments, verify restore to an isolated
-schema, drain/recover pending keys on the old endpoint, then change endpoint/token
+Owner-approved S6 scope amendment: backup, PITR, disaster recovery, backup
+retention and restore rehearsal are outside this project's scope. No RPO/RTO,
+backup/restore commands or evidence are execution gates or unresolved blockers.
+This supersedes earlier S6 requirements; `psql` remains the operator tool for
+fresh schema/bootstrap SQL. See cutover-sheet section 14.
+
+Before switching: record existing service/configuration references privately,
+drain/recover pending keys on the old endpoint, then change endpoint/token
 together per device. Old keys must not be replayed into the new schema. Introduce
 opening observations by normal balance updates; don't import legacy transactions.
 Check each configured asset and liability, including non-overlap and full card debt.
@@ -320,7 +326,7 @@ upgrade should change the real-device result.
 | SEC-01 | Missing/invalid/revoked device, disabled user, foreign household IDs, guessed draft/alias/refund IDs -> rejected. Device requests scoped to their owner; browser members can review either household member's drafts. No secret/image/model raw response in output/log/audit/receipt. | Unit + API+DB |
 | SEC-02 | Each provisioned user logs in, refreshes, signs out; no cross-session token/client reuse. Wrong issuer/audience/algorithm/expired token rejected; rotated JWKS tested. Public signup/nonmembers have no financial access; Dashboard and publishable key cannot query finance tables directly. | Auth tests + staging |
 | UI-01 | Four pages support balances/risk, schedules with period/count/day preview, statement import, and distinct draft versus saved-record Review sections. Correct both metadata reasons and confirm an estimated gain without re-recording expenses. One Save per edit; no false zero/completeness, SQL secrets, candidate engine UI or token-pasting. | Dashboard tests + household |
-| OPS-01 | Exact target images/probes/private schema work. DB mismatch -> readiness 503; AI outage leaves manual entry/schedules usable. Authenticated daily job retries/catches up without duplication; non-service tokens rejected on internal route, missed-run freshness visible. Backup/restore preserves receipts, statement identities and occurrences. Removed reconciliation routes absent; no hidden engine import. | Container + staging |
+| OPS-01 | Exact target images/probes/private schema work. DB mismatch -> readiness 503; AI outage leaves manual entry/schedules usable. Authenticated daily job retries/catches up without duplication; non-service tokens rejected on internal route, missed-run freshness visible. Preserve receipts, statement identities and occurrences. Historical S5 backup/restore evidence is not an S6 requirement under the owner-approved amendment. Removed reconciliation routes absent; no hidden engine import. | Container + staging |
 
 ### Household acceptance session
 

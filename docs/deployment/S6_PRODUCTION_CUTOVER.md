@@ -23,7 +23,7 @@ Backend currently uses 1 CPU, 512 MiB, concurrency 8, maximum 2 instances, 300-s
 
 Supabase browser issuer is `https://uvecwlcnynfhmtccoagx.supabase.co/auth/v1`, audience `authenticated`, ES256 with remote JWKS. Gemini is `gemini-3.5-flash-lite`. Existing `vibeledger-s34acc-daily` is enabled at `15 0 * * *`, `Asia/Singapore`, with exact backend URL audience and `vibeledger-s34acc-scheduler@vibeledger-staging.iam.gserviceaccount.com`. It remains unchanged.
 
-Accessible project names also include `gen-lang-client-0615238884` and `project-2053a573-f9d8-454a-832`; their presence does not establish the existing Gemini key's billing project. No production-named service was discovered in the inspected project. Private database target/roles, Auth users, phone state and real backups were not inspected. S5 backup evidence is an isolated rehearsal, not a backup of today's hosted data.
+Accessible project names also include `gen-lang-client-0615238884` and `project-2053a573-f9d8-454a-832`; their presence does not establish the existing Gemini key's billing project. No production-named service was discovered in the inspected project. Private database target/roles, Auth users and phone state were not inspected. Historical S5 evidence does not add requirements to the owner-approved S6 scope amendment in section 14.
 
 ## 2. Target production architecture
 
@@ -66,7 +66,7 @@ All snippets use PowerShell 7 from repository root. Check `$LASTEXITCODE` after 
 
 ## 4. Fresh database/schema and migration
 
-G1 requires a privately approved actual Supabase database/project, administrative operator, extension inventory, backup evidence and connection capacity. Use a direct PostgreSQL administrative connection for DDL/backup. Runtime uses a dedicated direct or proven session-pooler connection; do not assume transaction pooling is compatible with session search paths. Pooler custom-role usernames may require `ROLE.PROJECT_REF`. Check the aggregate old/staging/production connection budget.
+G1 requires a privately approved actual Supabase database/project, administrative operator, extension inventory and connection capacity. Use a direct PostgreSQL administrative connection for fresh-schema/bootstrap DDL. Runtime uses a dedicated direct or proven session-pooler connection; do not assume transaction pooling is compatible with session search paths. Pooler custom-role usernames may require `ROLE.PROJECT_REF`. Check the aggregate old/staging/production connection budget.
 
 Configure private `PGSERVICEFILE`/`PGPASSFILE` outside the repository with `vl-prod-admin` and later `vl-prod-runtime`; protect their ACLs. Never put DSNs/passwords in command arguments, transcripts, this sheet or Git. `$ApprovedDatabase` and `$ApprovedOperator` below are private operator-verified values, not defaults.
 
@@ -161,7 +161,7 @@ Duplicate the accepted Shortcut as a clearly named production Shortcut. Keep a s
 
 After G3, enter real current balances through normal Balance Update UI/API with their actual observation times, currencies, account versions and expected prior snapshot IDs. Review extraction drafts before confirmation. Missing accounts remain uninitialized; do not substitute zero. Full liabilities and non-overlapping scope must be checked with the owner. No synthetic opening transactions, old ledger history, copied staging balances or historical statement replay.
 
-**The first committed balance observation is already a financial write**, even if there are zero transactions. It changes which rollback procedure applies. Capture the first receipt and account snapshot IDs privately and take the post-write backup checkpoint.
+**The first committed balance observation is already a financial write**, even if there are zero transactions. It changes which rollback procedure applies. Capture the first receipt and account snapshot IDs privately for request recovery and verification.
 
 ## 9. Exact pre-cutover verification
 
@@ -198,13 +198,13 @@ Run this only in a private non-recorded shell: screenshot facts are sensitive ar
 
 ## 10. Ordered execution sequence
 
-1. **G0:** approve this plan, shared-platform choice, private resource/input manifest and retention/RPO/RTO; record exact preparation commit and image digests.
-2. Export current service revision/configuration references, Scheduler settings and secret-version references privately. Back up each existing database/schema and successfully restore in isolation (section 14). Do not mutate old environments.
+1. **G0:** approve this plan, shared-platform choice, private resource/input manifest; record exact preparation commit and image digests.
+2. Export current service revision/configuration references, Scheduler settings and secret-version references privately. Do not mutate old environments.
 3. **G1:** authorize new resources only. Verify target absent, operator privileges/capacity; run fresh schema then bootstrap; establish new credentials, restricted runtime grants and numeric secret versions.
 4. Deploy backend, freeze URL, configure exact Scheduler audience; deploy web; freeze URL and Auth settings. Create/pause/test new Scheduler with zero schedules. Verify all section 9 gates and create approved account metadata/new devices.
-5. Back up initialized production schema. Review both identities, account scope, app revisions, empty financial state and old pending-key terminal evidence.
+5. Review both identities, account scope, app revisions, empty financial state and old pending-key terminal evidence.
 6. **G2:** authorize client endpoint/token/state transition. Stop use of old capture clients, switch each client as section 7; no screenshot submissions yet. Leave old services/credentials intact.
-7. **G3:** authorize initial real balance observations and one new real expense. Follow sections 8/11; checkpoint backups. Only then create real schedules and resume the new daily job. Confirm its next scheduled run/recovery behavior with receipts, not repeated manual financial tests.
+7. **G3:** authorize initial real balance observations and one new real expense. Follow sections 8/11. Only then create real schedules and resume the new daily job. Confirm its next scheduled run/recovery behavior with receipts, not repeated manual financial tests.
 8. Record production verification and remaining issues. Retain staging/old environments. S6 completion requires a separate execution record, not this preparation document.
 
 ## 11. First real production financial-write acceptance
@@ -221,7 +221,7 @@ First prove there are no financial rows (`transactions`, `account_snapshots`, `i
 
 ## 13. Rollback after first financial write
 
-Pause the new Scheduler and stop production clients. Preserve production data, receipts, keys, audit evidence and image/config references; take a checkpoint. There is no accepted global write-disable switch. If stopping clients does not reliably fence writers, explicitly authorize this **new production role only** fence:
+Pause the new Scheduler and stop production clients. Preserve production data, receipts, keys, audit evidence and image/config references in place. There is no accepted global write-disable switch. If stopping clients does not reliably fence writers, explicitly authorize this **new production role only** fence:
 
 ```sql
 ALTER ROLE vibeledger_prod_runtime NOLOGIN;
@@ -231,37 +231,38 @@ WHERE usename='vibeledger_prod_runtime' AND pid <> pg_backend_pid();
 
 NOLOGIN alone does not stop existing pooled sessions. Do not apply this to a shared/staging/old role. After fixing the incident, deploy a reviewed simplified-schema-compatible image against the preserved schema, verify read-only gates, then explicitly restore LOGIN and recover existing keys before resuming clients/job. A legacy ledger image is never a rollback candidate for this schema.
 
-Returning clients to an old schema after new writes needs a separately approved export/recovery decision covering every new committed/uncertain receipt and financial record. Do not silently discard, dual-write or replay them with new keys. Prefer restoration into an isolated database retaining the same simplified schema and identities, then switch only the new backend's pinned DB secret version after verification. No destructive down migration or whole shared-project restore over staging.
+Returning clients to an old schema after new writes needs a separately approved export/recovery decision covering every new committed/uncertain receipt and financial record. Do not silently discard, dual-write or replay them with new keys. This is incident-specific handling of existing records, not a required disaster-recovery capability or rehearsal. No destructive down migration.
 
-## 14. Backup and restore requirements
+## 14. Explicit owner-approved S6 scope amendment
 
-Before G1/G2, inventory each real old schema/database and obtain consistent custom-format dumps, plus private role/grant, service/secret-version, Auth UUID mapping and Scheduler manifests. Existing staging schedules remain enabled, so backups are timestamped MVCC snapshots, not a claim of quiescence. Use PostgreSQL tooling compatible with the actual server major (S5 rehearsal used 17). Keep encrypted backup storage outside Git, access-controlled, with checksum and timestamp.
+The owner explicitly decides that **VibeLedger does not require backup, PITR,
+disaster recovery, backup retention, or restore rehearsal as part of this project**.
+This intentional product/operational scope decision supersedes earlier S6 backup
+and restore requirements. It is not an unresolved blocker, deferred execution gate,
+or work that future agents should reintroduce. There are no backup commands,
+RPO/RTO targets, provider backup/PITR checks, restore rehearsals or backup-retention
+requirements for S6.
 
-```powershell
-# Repeat with independently verified private service/schema mappings for each old environment.
-pg_dump "service=$OldAdminService" --format=custom --schema=$OldSchema --file=$PrivateOldBackup --no-password
-pg_dump 'service=vl-prod-admin' --format=custom --schema=vibeledger_prod_v1 --file=$PrivateProductionBackup --no-password
-Get-FileHash $PrivateProductionBackup -Algorithm SHA256
-pg_restore --list $PrivateProductionBackup > $PrivateRestoreInventory
-# Destination must be a NEW isolated recovery database, never staging/old/production.
-pg_restore --dbname='service=vl-isolated-restore' --single-transaction --exit-on-error --no-owner --no-privileges $PrivateProductionBackup
-```
+`psql` remains the intended operator tool for the fresh schema and bootstrap SQL
+in sections 4–5. The schema design and application runtime remain unchanged.
+Normal idempotency-key recovery, atomic writes, preserving existing live data and
+receipts after writes, and application rollback boundaries still apply; these do
+not establish a backup or disaster-recovery requirement.
 
-Provision required extensions first. Reapply reviewed ownership/grants in the isolated destination; `--no-owner --no-privileges` deliberately does not prove permission restoration. Schema dumps do not contain Auth users, roles, keys or Secret Manager values. Restore those dependencies by approved private mappings without copying active device credentials into a publicly reachable test service. Fence outbound Scheduler and capture access during rehearsal.
-
-Compare migration checksum, table counts, IDs, financial totals, audit links, receipt terminal states/key identities, document hashes/row occurrence links and balance heads privately. Exercise terminal-key recovery against the isolated restored schema and prove no duplicate write. Do not run real due schedules in a restore rehearsal. Record measured duration and result. Repeat after first real production writes so the restore evidence covers actual production records.
-
-Verify provider backup/PITR entitlement, retention and a working recovery path; do not assume a paid tier. Owner must approve RPO/RTO and recurring backups before launch. Proposed minimum: daily protected backups, a checkpoint before/after cutover and before fixes, and 30-day retention of old environment backups/services after verified production acceptance. Decommission only after successful production restore, no unresolved old keys, confirmed client transition and separate owner approval. No deletion/revocation is authorized here.
+Preserve accepted staging and old services until production is verified. Later
+decommission requires confirmed client transition, no unresolved old keys and
+separate owner authorization. No fixed backup/service retention period is required
+by this amendment, and no deletion or credential revocation is authorized here.
 
 ## 15. Explicit operator authorization points
 
 | Gate | Concrete approval |
 |---|---|
-| G0 | Reviewed plan/artifacts/private manifest; shared project/Auth/DB choice; backup/RPO/RTO/retention |
+| G0 | Reviewed plan/artifacts/private manifest; shared project/Auth/DB choice |
 | G1 | Create only new production resources, operator DDL/bootstrap, auth additions and metadata/device provisioning |
 | G2 | Switch each client's endpoint, new token and isolated pending-state storage after old-key recovery |
 | G3 | First real balance/expense writes; resume new Scheduler only after accepted results |
-| Incident | Any write fence, DB-secret switch, restore or cross-schema recovery after writes |
+| Incident | Any write fence, DB-secret switch or cross-schema record handling after writes |
 | Later | Old environment decommission or credential/key revocation, separately authorized |
 
 The current request authorizes preparation and repository changes only. None of these execution gates has been granted by preparing this file.
@@ -270,10 +271,10 @@ The current request authorizes preparation and repository changes only. None of 
 
 - Owner approval of proposed production names and shared-platform boundaries; actual production database host/project/operator and target absence.
 - Private verified Auth identities and membership roles; approved account/scope list, start date and reporting currency; phone/Shortcut versions and pending-state inventory.
-- Effective DB role privileges (including PUBLIC), extensions, provider connection budget, backup/PITR entitlement, measured real restore, chosen RPO/RTO and retention.
+- Effective DB role privileges (including PUBLIC), extensions, provider connection budget.
 - Approved Gemini billing/quota project/key, production secret numeric versions, deploy/IAM permissions and image availability at execution time.
 - New service URLs/revisions and Auth redirect configuration, which cannot be known until G1 deployment; freeze and review before G2.
-- Old-key drainage and real backup evidence, live no-write checks, first-write/restore acceptance and execution authorizations remain outstanding.
+- Old-key drainage, live no-write checks, first-write acceptance and execution authorizations remain outstanding.
 
 ## 17. Readiness
 
@@ -286,6 +287,6 @@ ai-ledger-backend/.venv/Scripts/python.exe -X utf8 ai-ledger-backend/scripts/smo
 git diff --check
 ```
 
-The rehearsal creates and removes its own disposable Docker container and accepts no hosted DSN. These results do not prove Supabase administrative privileges, production capacity or actual backup/restore. No production mutation or live financial acceptance was performed. Backend/Web application CI was not rerun for this preparation-only documentation/operator-SQL change; no runtime, migration baseline or frontend behavior changed.
+The rehearsal creates and removes its own disposable Docker container and accepts no hosted DSN. These results do not prove Supabase administrative privileges or production capacity. No production mutation or live financial acceptance was performed. Backend/Web application CI was not rerun for this preparation-only documentation/operator-SQL change; no runtime, migration baseline or frontend behavior changed.
 
 Platform references checked while preparing: [Cloud Run immutable deployments](https://docs.cloud.google.com/run/docs/deploying), [secret bindings](https://docs.cloud.google.com/run/docs/configuring/services/secrets), [Scheduler OIDC](https://docs.cloud.google.com/scheduler/docs/http-target-auth), [Supabase connection modes](https://supabase.com/docs/guides/database/connecting-to-postgres), [pooling limits](https://supabase.com/docs/guides/database/connecting-to-postgres/pooling-and-limits), [custom schema exposure](https://supabase.com/docs/guides/api/using-custom-schemas). Recheck effective configuration before execution; documentation does not establish this project's private state.

@@ -426,8 +426,10 @@ record changes, not every read or successful retry. Change and history commit
 together. No event replay to rebuild financial records; normal tables are truth.
 
 Receipts and minimal financial history are retained with the household data; no
-short TTL that allows old pending keys to create expenses again. Safe schema
-backup/restore includes receipts. Large temporary AI/image content is never stored.
+short TTL that allows old pending keys to create expenses again. Large temporary
+AI/image content is never stored. The owner-approved S6 scope amendment excludes
+backup, PITR, disaster recovery, backup retention and restore rehearsal; these are
+not project requirements or execution gates. See IMPLEMENTATION_PLAN.md, S6.
 
 ### Indexes and transaction boundaries
 
@@ -858,7 +860,7 @@ for the service account/OIDC configuration. No queue/worker service. Standalone
 daily materialization uses actor_scope=system:<household_id>,
 a deterministic key schedule:<schedule_id>:<period_no>, and the schedule's creator
 as authorizing user. Audit actor_type=system (add this field), not a claimed manual
-user action. Preserve per-period receipts/identity on backup; never drop/recreate
+user action. Preserve per-period receipts/identity with the household data; never drop/recreate
 expenses because a cron request retries. A schedule is a standing household instruction
 until a member pauses/cancels it; retain its creator as historical provenance even
 if that user's login is later disabled. Disabled households are never processed.

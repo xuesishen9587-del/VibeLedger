@@ -16,6 +16,47 @@ from tests.support.db_helper import BaseDbTestCase
 
 
 class TestS2SpendingDb(BaseDbTestCase):
+    def test_daily_interruption_retries_and_reads_do_not_materialize(self):
+        from app.services import spending_schedules as schedules
+        self.schedule(today=date(2026, 1, 1))
+        real = schedules.materialize_period
+        def interrupted(conn, actor, rid, schedule, number, day):
+            if number == 2:
+                raise RuntimeError("simulated outage between periods")
+            return real(conn, actor, rid, schedule, number, day)
+        with patch.object(schedules, "local_today", return_value=date(2026, 3, 31)):
+            # Read-only reports expose missed-run freshness without writing.
+            for path in ("/api/v1/reports/spending?from=2026-01-01&to=2026-03-31", "/api/v1/review"):
+                response = self.client.get(path)
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertEqual(response.json()["schedules_current_through"], "2026-01-30")
+            self.assertEqual(repo.rows(self.conn, "SELECT count(*) n FROM schedule_occurrences")[0]["n"], 0)
+            self.conn.commit()
+            with patch.object(schedules, "materialize_period", side_effect=interrupted), self.assertRaises(RuntimeError):
+                schedules.run_due(lambda: get_connection(self.test_schema))
+            self.assertEqual(schedules.run_due(lambda: get_connection(self.test_schema)), {"processed": 2})
+            self.assertEqual(schedules.run_due(lambda: get_connection(self.test_schema)), {"processed": 0})
+        self.assertEqual(repo.rows(self.conn, "SELECT count(*) n FROM transactions")[0]["n"], 3)
+        self.assertEqual(repo.rows(self.conn, "SELECT count(*) n FROM ingestion_requests WHERE actor_scope LIKE 'system:%%'")[0]["n"], 3)
+
+    def test_daily_uses_household_local_date_at_month_boundary(self):
+        from datetime import datetime, timezone
+        from app.services import spending_schedules as schedules
+        from app.domain.spending import local_today
+        self.schedule(today=date(2026, 1, 1), day_of_month=1, start_month="2026-02-01")
+        with patch("app.domain.spending.datetime") as clock:
+            clock.now.return_value = datetime(2026, 1, 31, 16, 30, tzinfo=timezone.utc)
+            self.assertEqual(local_today({"timezone": "Asia/Singapore"}), date(2026, 2, 1))
+            self.assertEqual(local_today({"timezone": "America/Los_Angeles"}), date(2026, 1, 31))
+            with self.conn.cursor() as cur:
+                cur.execute("UPDATE households SET timezone='America/Los_Angeles' WHERE id=%s", (self.hh,))
+            self.conn.commit()
+            self.assertEqual(schedules.run_due(lambda: get_connection(self.test_schema)), {"processed": 0})
+            with self.conn.cursor() as cur:
+                cur.execute("UPDATE households SET timezone='Asia/Singapore' WHERE id=%s", (self.hh,))
+            self.conn.commit()
+            self.assertEqual(schedules.run_due(lambda: get_connection(self.test_schema)), {"processed": 1})
+
     def seed_test_data(self):
         self.hh = uuid4()
         self.user = uuid4()

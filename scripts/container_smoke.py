@@ -6,6 +6,7 @@ No source mounts, real credentials, hosted database, or model requests are used.
 import subprocess
 import time
 import uuid
+from pathlib import Path
 
 
 BACKEND = "vibeledger-backend:readiness"
@@ -59,6 +60,23 @@ def main():
                 f"assert data == {expected!r}, data; print(data)"
             )
             wait_for("exec", backend, "python", "-c", code)
+        docker("exec", backend, "python", "-c", "import importlib,pkgutil; import app; "
+               "[importlib.import_module(m.name) for m in pkgutil.walk_packages(app.__path__, 'app.')]; "
+               "from pathlib import Path; assert not Path('main.py').exists(); "
+               "assert not Path('app/services/ledger_service.py').exists(); "
+               "from app.main import app; assert not any('reconciliation' in p for p in app.openapi()['paths'])")
+        fixture = Path(__file__).with_name("s5_restore_fixture.py").read_text(encoding="utf-8")
+        before = docker("exec", "-i", backend, "python", "-", input=fixture, capture_output=True).stdout.strip()
+        backup = docker("exec", postgres, "pg_dump", "-U", "postgres", "-d", "vibeledger_ci",
+                        "--no-owner", "--no-privileges", capture_output=True).stdout
+        docker("exec", postgres, "createdb", "-U", "postgres", "vibeledger_restore")
+        docker("exec", "-i", postgres, "psql", "-U", "postgres", "-d", "vibeledger_restore",
+               "-v", "ON_ERROR_STOP=1", input=backup, capture_output=True)
+        restored = docker("exec", "-i", "-e", "OPS_RESTORE_VERIFY=1", "-e",
+                          f"DATABASE_URL=postgresql://postgres:smoke@{postgres}:5432/vibeledger_restore",
+                          backend, "python", "-", input=fixture, capture_output=True).stdout.strip()
+        assert before == restored, "Backup/restore evidence fingerprints differ"
+        print("OPS-01 backup/restore: receipts, statement evidence, occurrences, transactions and audit preserved; replay unchanged.", flush=True)
         docker("run", "-d", "--name", dashboard, "--network", prefix, DASHBOARD)
         wait_for("exec", dashboard, "python", "-c",
                  "import urllib.request; "

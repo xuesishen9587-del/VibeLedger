@@ -20,6 +20,7 @@ import { ApiError } from "./lib/errors";
 import { AppContext, navigate, useResource } from "./lib/context";
 import { Button, Field, ErrorBox, Loading, ActionForm } from "./components/ui";
 import { Recovery } from "./components/Recovery";
+import { ScheduleCatchUp } from "./components/ScheduleCatchUp";
 const Home = lazy(() =>
   import("./pages/Home").then((m) => ({ default: m.Home })),
 );
@@ -257,11 +258,11 @@ function Shell({
               {route.startsWith("/statement") ? (
                 <StatementPage identity={route.split("/")[2]} />
               ) : route.startsWith("/spending") ? (
-                <SpendingPage />
+                <ScheduleCatchUp key="spending"><SpendingPage /></ScheduleCatchUp>
               ) : route.startsWith("/wealth") ? (
                 <WealthPage />
               ) : route.startsWith("/review") ? (
-                <ReviewPage identity={route.split("/")[2]} />
+                <ScheduleCatchUp key="review"><ReviewPage identity={route.split("/")[2]} /></ScheduleCatchUp>
               ) : route.startsWith("/settings") ? (
                 <SettingsPage onLogout={logout} />
               ) : (

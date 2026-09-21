@@ -44,7 +44,7 @@ class TestDeviceManagementApiDb(BaseDbTestCase):
             household_id=self.household_id,
             name="Household One",
             reporting_currency="CNY",
-            ledger_start_date=date(2026, 1, 1),
+            started_on=date(2026, 1, 1),
             status="active"
         )
 

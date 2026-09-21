@@ -38,6 +38,7 @@ jobs:
       - name: Run Unit Tests
         working-directory: ai-ledger-backend
         run: |
+          python scripts/export_openapi.py --check
           python -m unittest discover -s tests/unit -p "test_*.py" -v
 
       - name: Summary
@@ -204,7 +205,7 @@ jobs:
           python-version: "3.13"
 
       - name: Build backend target image
-        run: docker build -f ai-ledger-backend/Dockerfile.target -t vibeledger-backend:readiness ai-ledger-backend
+        run: docker build -f ai-ledger-backend/Dockerfile -t vibeledger-backend:readiness ai-ledger-backend
 
       - name: Build Dashboard image
         run: docker build -t vibeledger-dashboard:readiness ai-ledger-dashboard

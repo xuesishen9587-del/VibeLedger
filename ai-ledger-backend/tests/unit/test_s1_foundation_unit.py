@@ -91,7 +91,9 @@ class TestS1DatabaseBaselineAndLineage(unittest.TestCase):
 
     def test_legacy_migrations_preserved_byte_for_byte(self):
         """Verify legacy migrations 0001..0009 remain in migrations/ directory."""
-        legacy_files = get_migration_files(lineage=LINEAGE_LEGACY)
+        legacy_files = sorted(LEGACY_MIGRATION_FILES)
+        with self.assertRaises(ValueError):
+            get_migration_files(lineage=LINEAGE_LEGACY)
         self.assertEqual(len(legacy_files), 9)
         self.assertEqual(legacy_files[0], "0001_extensions.sql")
         self.assertEqual(legacy_files[-1], "0009_indexes.sql")

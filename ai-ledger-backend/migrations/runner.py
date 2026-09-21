@@ -37,14 +37,9 @@ class LegacyMigrationLineageDetectedError(Exception):
     pass
 
 def get_migration_dir(lineage: str = LINEAGE_SIMPLIFIED, migrations_dir: Optional[str] = None) -> str:
-    if migrations_dir:
-        return migrations_dir
-    if lineage == LINEAGE_SIMPLIFIED:
-        return MIGRATIONS_SIMPLIFIED_DIR
-    elif lineage == LINEAGE_LEGACY:
-        return MIGRATIONS_LEGACY_DIR
-    else:
-        raise ValueError(f"Unknown migration lineage: '{lineage}'. Supported: '{LINEAGE_SIMPLIFIED}', '{LINEAGE_LEGACY}'.")
+    if lineage != LINEAGE_SIMPLIFIED:
+        raise ValueError("Only the simplified migration lineage is executable. Legacy SQL is historical evidence.")
+    return migrations_dir or MIGRATIONS_SIMPLIFIED_DIR
 
 def get_migration_files(lineage: str = LINEAGE_SIMPLIFIED, migrations_dir: Optional[str] = None) -> List[str]:
     """

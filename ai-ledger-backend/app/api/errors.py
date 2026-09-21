@@ -15,56 +15,10 @@ from app.domain.auth import (
     DeviceNotFoundError,
 )
 from app.domain.transactions import (
-    LedgerDomainError,
-    IdempotencyKeyReuseError,
-    RequestNotFoundError,
-    DeviceAuthenticationError,
-    DeviceRevokedError,
-    HouseholdMismatchError,
-    AccountNotFoundError,
-    CategoryNotFoundError,
-    TransactionNotFoundError,
-    AccountInactiveError,
-    CategoryMismatchError,
-    CurrencyMismatchError,
-    InvalidAmountError,
-    SameAccountTransferError,
-    InvalidTransactionShapeError,
-    RefundExceedsOriginalError,
-    TransactionAlreadyVoidedError,
-    AmbiguousAccountError,
-    InvalidImagePayloadError,
-    FxRateUnavailableError,
-    FxProviderUnavailableError,
-    GeminiDependencyError,
-    InvalidRequestStateError,
-    InvalidPaymentModeError,
-    ResourceNotFoundError,
-    AccountResourceNotFoundError,
-    CategoryResourceNotFoundError,
-    TransactionResourceNotFoundError,
-    InstallmentPlanResourceNotFoundError,
-    AliasResourceNotFoundError,
-    RowVersionConflictError,
-    AccountNameConflictError,
-    CategoryNameConflictError,
-    AccountAliasConflictError,
-    AccountTypeMismatchError,
-    CurrencyImmutableError,
-    AccountTypeImmutableError,
-    UserNotInHouseholdError,
-    LinkedAccountInvalidError,
-    BatchResourceNotFoundError,
-    BatchNotFoundError,
-    BatchVersionConflictError,
-    CandidateResourceNotFoundError,
-    StatementParseFailedError,
-    StatementPasswordRequiredError,
-    StatementPasswordInvalidError,
-    DependencyUnavailableError,
-    InvalidSnapshotError,
-    InvalidBatchStateError
+    LedgerDomainError, IdempotencyKeyReuseError, RowVersionConflictError,
+    ResourceNotFoundError, FxProviderUnavailableError, GeminiDependencyError,
 )
+
 
 def build_error_response(
     status_code: int,
@@ -107,26 +61,14 @@ def extract_error_details(exc: Exception) -> Tuple[int, str, Dict[str, Any]]:
         return status_code, code, payload
 
     if isinstance(exc, LedgerDomainError):
-        if isinstance(exc, BatchVersionConflictError):
-            status_code, code, retryable = 409, exc.code, True
-        elif isinstance(exc, (IdempotencyKeyReuseError, RowVersionConflictError, TransactionAlreadyVoidedError)):
+        if isinstance(exc, (IdempotencyKeyReuseError, RowVersionConflictError)):
             status_code, code, retryable = 409, exc.code, False
-        elif isinstance(exc, (RequestNotFoundError, ResourceNotFoundError)):
-            status_code, code, retryable = 404, exc.code, isinstance(exc, RequestNotFoundError)
-        elif isinstance(exc, (DeviceAuthenticationError, DeviceRevokedError)):
-            status_code, code, retryable = 401, exc.code, False
-        elif isinstance(exc, HouseholdMismatchError):
-            status_code, code, retryable = 403, exc.code, False
-        elif isinstance(exc, (FxProviderUnavailableError, GeminiDependencyError, DependencyUnavailableError)):
+        elif isinstance(exc, ResourceNotFoundError):
+            status_code, code, retryable = 404, exc.code, False
+        elif isinstance(exc, (FxProviderUnavailableError, GeminiDependencyError)):
             status_code, code, retryable = 503, exc.code, True
-        elif isinstance(exc, (StatementPasswordRequiredError, StatementPasswordInvalidError, StatementParseFailedError)):
-            status_code, code, retryable = 400, exc.code, False
-        elif isinstance(exc, (AccountNotFoundError, CategoryNotFoundError, TransactionNotFoundError)):
-            status_code, code, retryable = 422, exc.code, False
-        elif isinstance(exc, (AccountNameConflictError, CategoryNameConflictError, AccountAliasConflictError)):
-            status_code, code, retryable = 422, exc.code, False
         else:
-            status_code, code, retryable = 422, getattr(exc, "code", "VALIDATION_ERROR"), False
+            status_code, code, retryable = 422, exc.code, False
 
         msg = exc.message if hasattr(exc, "message") else str(exc)
         details = getattr(exc, "details", {}) or {}

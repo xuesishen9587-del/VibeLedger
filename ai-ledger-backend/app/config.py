@@ -36,14 +36,6 @@ class Settings(BaseSettings):
         None,
         description="API key for Gemini client."
     )
-    MAX_EXPENSE_IMAGE_BYTES: int = Field(
-        10 * 1024 * 1024,
-        description="Maximum allowed decoded image size in bytes (default: 10MB)."
-    )
-    MAX_STATEMENT_PDF_BYTES: int = Field(
-        20 * 1024 * 1024,
-        description="Maximum allowed Statement PDF file size in bytes (default: 20MB)."
-    )
     FX_API_BASE_URL: str = Field(
         "https://api.frankfurter.app",
         description="Base URL for public reference FX rates provider."
@@ -72,6 +64,8 @@ class Settings(BaseSettings):
         None,
         description="Pinned HTTPS JWKS URL matching AUTH_ISSUER; asymmetric verification uses bounded public-key caching."
     )
+    SCHEDULER_AUDIENCE: Optional[str] = None
+    SCHEDULER_SERVICE_ACCOUNT: Optional[str] = None
 
     # Use SettingsConfigDict for Pydantic v2 Settings configuration
     model_config = SettingsConfigDict(

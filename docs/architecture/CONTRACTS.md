@@ -874,3 +874,24 @@ Readiness must not make paid Gemini requests or expose DSNs/secrets. Emit struct
 request ID, duration, outcome, dependency error code and model version; never payloads.
 Report capture latency and draft/error counts through existing Cloud Run logging;
 no observability platform project is needed.
+
+
+## S5 deployed runtime and operational boundary
+
+The accepted active frontend is React with a same-origin proxy; the existing
+Streamlit service is retained as a fallback and is not redeployed in S5.
+`ai-ledger-backend/Dockerfile` is the only backend image entry point (`app.main:app`).
+Only the simplified migration lineage can execute. Immutable legacy SQL remains in
+Git for historical checksums and is excluded from the image. The generated contract
+is `docs/api/openapi.json`; Backend CI rejects drift.
+
+`POST /internal/spending-schedules/run` accepts no household/date/query input.
+It requires a Google-signed RS256 OIDC token, exact configured audience and dedicated
+service-account email, verified email, subject, valid expiry and Google issuer.
+Browser/device authentication never authorizes this endpoint. Each due period uses
+`system:<household>` and `schedule:<schedule-id>:<period-no>` for its durable receipt;
+period, transaction and audit commit together. Retries resume incomplete runs.
+Household timezone determines today; skipped/voided periods never regenerate.
+The frontend attempts the durable materialize command before mounting Spending or
+Review, recovers uncertain commands with their original key, shows failure/retry,
+and checks again after a local date change. All report/review GETs stay read-only.

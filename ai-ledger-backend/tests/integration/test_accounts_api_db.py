@@ -10,7 +10,6 @@ from app.main import create_app
 from app.api.deps import get_db_connection
 from app.repositories import accounts as accounts_repo
 from app.repositories import devices as devices_repo
-from app.repositories import transactions as tx_repo
 from app.repositories import audit as audit_repo
 from app.repositories import categories as categories_repo
 

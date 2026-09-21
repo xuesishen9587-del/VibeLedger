@@ -33,14 +33,13 @@ def bootstrap_staging_environment(
     seed_data: Dict[str, Any],
     started_on: Optional[date] = None,
     owner_auth_subject: str = "",
-    ledger_start_date: Optional[date] = None,
 ) -> Dict[str, Any]:
     """
     Idempotently sets up initial staging configuration using household-scoped natural keys.
     Conforms to the Astra-simplified 16-table architecture (no legacy account_state table).
     Validates strict consistency if an entity already exists and raises BootstrapConsistencyError on conflict.
     """
-    effective_started_on = started_on or ledger_start_date or date(2026, 1, 1)
+    effective_started_on = started_on or date(2026, 1, 1)
 
     summary: Dict[str, Any] = {
         "household_id": None,
@@ -80,7 +79,7 @@ def bootstrap_staging_environment(
             )
         if db_started_on != effective_started_on:
             raise BootstrapConsistencyError(
-                f"Household '{hh_name}' exists but started_on/ledger_start_date mismatch: "
+                f"Household '{hh_name}' exists but started_on mismatch: "
                 f"existing '{db_started_on}' != expected '{effective_started_on}'"
             )
         if db_currency != reporting_currency:

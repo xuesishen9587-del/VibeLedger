@@ -17,13 +17,12 @@ def create_household(
     name: str,
     reporting_currency: str = 'CNY',
     started_on: Optional[date] = None,
-    ledger_start_date: Optional[date] = None,
     tz_name: str = 'Asia/Singapore',
     status: str = 'active'
 ) -> Dict[str, Any]:
     return repo_household_members.create_household(
         conn, household_id, name, reporting_currency,
-        started_on=started_on, ledger_start_date=ledger_start_date,
+        started_on=started_on,
         tz_name=tz_name, status=status
     )
 
@@ -40,33 +39,19 @@ def get_household(conn, household_id: UUID) -> Optional[Dict[str, Any]]:
         row = cur.fetchone()
         if not row:
             return None
-        if len(row) >= 10:
-            return {
-                "id": row[0],
-                "name": row[1],
-                "reporting_currency": row[2],
-                "started_on": row[3],
-                "ledger_start_date": row[3],  # alias
-                "timezone": row[4],
-                "investment_review_change_ratio": row[5],
-                "status": row[6],
-                "row_version": row[7],
-                "created_at": row[8],
-                "updated_at": row[9]
-            }
         return {
             "id": row[0],
             "name": row[1],
             "reporting_currency": row[2],
-            "started_on": None,
-            "ledger_start_date": None,
-            "timezone": "Asia/Singapore",
-            "investment_review_change_ratio": Decimal("0.2000"),
-            "status": row[3] if len(row) > 3 else "active",
-            "row_version": row[4] if len(row) > 4 else 0,
-            "created_at": row[5] if len(row) > 5 else None,
-            "updated_at": row[6] if len(row) > 6 else None
+            "started_on": row[3],
+            "timezone": row[4],
+            "investment_review_change_ratio": row[5],
+            "status": row[6],
+            "row_version": row[7],
+            "created_at": row[8],
+            "updated_at": row[9]
         }
+
 
 def create_user(
     conn,
@@ -139,7 +124,7 @@ def create_account(
 ) -> Dict[str, Any]:
     """
     Creates an account record matching the simplified schema.
-    Does NOT create account_state, opening transactions, or snapshots.
+    Creates account configuration without financial observations or transactions.
     """
     if account_id is None:
         account_id = uuid4()

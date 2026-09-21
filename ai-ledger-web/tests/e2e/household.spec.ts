@@ -240,6 +240,8 @@ async function setup(
           newest_observation_at: "2026-09-15",
         },
       };
+    else if (path === "/spending-schedules/materialize")
+      data = { schedules_current_through: "2026-09-20", occurrence_counts: {} };
     else if (path === "/reports/spending")
       data = {
         ...totals,
@@ -984,4 +986,35 @@ test("legacy repeated PDF references revalidate and import every row without mer
   await page.getByRole("button", { name: "确认导入整份账单" }).click();
   await expect(page.getByRole("heading", { name: "账单已导入" })).toBeVisible();
   expect(confirmations).toBe(1);
+});
+
+
+test("schedule catch-up gates spending and exposes recoverable failure", async ({ page }) => {
+  await setup(page);
+  await login(page);
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const keys: string[] = [];
+  let attempts = 0;
+  let reportReads = 0;
+  page.on("request", r => { if (new URL(r.url()).pathname === "/api/v1/reports/spending") reportReads++; });
+  await page.route("**/api/v1/spending-schedules/materialize", async r => {
+    keys.push(r.request().headers()["idempotency-key"]);
+    attempts++;
+    if (attempts === 1) {
+      await gate;
+      await r.fulfill({ status: 503, json: { error: { code: "UNAVAILABLE" } } });
+    } else await r.fulfill({ json: { schedules_current_through: "2026-09-20" } });
+  });
+  await page.getByRole("link", { name: "日常支出" }).click();
+  await expect(page.getByText("正在补记到期月度支出，请稍候…")).toBeVisible();
+  expect(reportReads).toBe(0);
+  release();
+  await expect(page.getByText("月度计划补记未完成，以下支出可能不完整。")).toBeVisible();
+  await expect.poll(() => reportReads).toBe(1);
+  await page.getByRole("button", { name: "重试补记" }).click();
+  await expect(page.getByText("月度计划已检查至 2026-09-20")).toBeVisible();
+  expect(keys[1]).toBe(keys[0]);
+  expect(keys[2]).not.toBe(keys[0]);
+  await expect(page.getByText("月度计划补记未完成，以下支出可能不完整。")).toHaveCount(0);
 });

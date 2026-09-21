@@ -1,7 +1,7 @@
 # VibeLedger architecture
 
 The **simplified target, revised 2026-09-06**, replaces the previous Phase 12.5 design.
-Implementation has not yet been changed to match it. The accepted staging backend,
+S1–S4 are accepted; S5 removes the superseded runtime and verifies isolated staging. The accepted staging backend,
 REST Dashboard and real iPhone expense experience provide the implementation base.
 
 There are three canonical documents, each with one responsibility:
@@ -18,7 +18,7 @@ makes them concrete; the plan orders delivery. Resolve contradictions by updatin
 these documents together, not by adding another parallel “freeze” specification.
 [PROJECT_CONTEXT](../../PROJECT_CONTEXT.md) is the short status handoff, not another
 domain contract. [The staging runbook](../deployment/STAGING_DEPLOYMENT.md) records
-the previous accepted deployment and is not yet the simplified deployment procedure.
+the current simplified deployment procedure.
 Implementation slice S0 evidence (sanitized wire fixtures and Shortcut compatibility baseline)
 is recorded in [SHORTCUT_COMPATIBILITY_BOUNDARY](SHORTCUT_COMPATIBILITY_BOUNDARY.md); it is
 implementation evidence for S0, not a fourth canonical specification.
@@ -30,7 +30,7 @@ Missing accounts and uncertain Other categories remain saved and easy to review.
 Missing investment flows default to zero for estimated gains; unusual estimates
 appear in Review, and user-confirmed gains remain distinct. There is no projected
 account balance, general reconciliation engine, or monthly close.
-Keep FastAPI, Streamlit, PostgreSQL, device idempotency, Decimal math and household auth.
+Keep FastAPI, the accepted React Dashboard, PostgreSQL, device idempotency, Decimal math and household auth.
 
 ## Documentation consolidation
 

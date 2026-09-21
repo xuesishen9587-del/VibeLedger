@@ -4,7 +4,6 @@ import unittest
 import app.services.balance_extractor as balance_extractor
 import app.services.gemini_service as gemini_service
 import app.services.statement_document as statement_document
-import app.services.statement_parser as statement_parser
 
 
 class GeminiTransportContractTests(unittest.TestCase):
@@ -65,7 +64,6 @@ class GeminiTransportContractTests(unittest.TestCase):
             balance_extractor,
             gemini_service,
             statement_document,
-            statement_parser,
         ]
 
         combined = "\n".join(self._source(m) for m in modules)

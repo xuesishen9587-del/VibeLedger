@@ -1,65 +1,45 @@
-# Deployment Readiness checkpoint
+# S5 isolated staging readiness
 
-This bounded checkpoint prepares `experiment/astra-simplified` for isolated hosted
-and real-device acceptance, starting from
-`9ef170ca8d9383834e7f64184743108c22b2d902`. S1/S2 remain accepted; S3/S4 implementation
-is substantially complete but hosted acceptance remains pending. S5 has not begun.
+Scope: `experiment/astra-simplified`, PR #17. S6/production cutover and merge are not authorized.
+The accepted functional baseline is `278f143ab3fa4ab24f5a543a11f8405fce051ebf`.
 
-## Packaging and verification
+## Acceptance boundary
 
-Both backend Dockerfiles, the Dashboard image and every GitHub CI job use Python
-3.13. Deploy the simplified backend with **Dockerfile.target** (`app.main:app`).
-The root backend Dockerfile retains its legacy entry point; changing or removing
-that entry point is outside this checkpoint.
+The owner attests to live expense, balance and statement Gemini acceptance,
+MariBank 88-row statement import, investments, Owner UI, negative authentication,
+device lifecycle, iPhone Shortcut and ES256 JWKS rotation/re-login. Manual sampling
+was one person and one clear expense screenshot, plus the PDF. On 2026-09-20 the
+owner explicitly declined further samples/second-user testing and accepted that
+limit. These are user-attested results, not new S5 reruns. Exact Shortcut build/version
+was not supplied; S5 does not change its API contract.
 
-Dashboard packaging copies the complete application directory, with a Docker ignore
-file excluding local credentials, virtual environments, caches and tests. This
-includes modules loaded only after login and when changing pages.
+## S5 verification
 
-From the repository root, with Docker available:
+- DB-01 / SEC-01 / SEC-02 / HIST-01: unchanged private schema, scoped commands,
+  migration checksums, auth/device lifecycle, new Google OIDC boundary.
+- CAP-01–05 / SPEND / SCHED-01–02 / STMT-01–02 / BAL / WEALTH / INV:
+  retained S1–S4 integration, concurrency and browser suites protect accepted behavior.
+- UI-01: catch-up precedes page reads; explicit failure/retry and current-through date.
+- OPS-01: built-image import/probes, absent retired routes, AI-independent schedules,
+  actual PostgreSQL dump/restore plus receipt/statement/occurrence replay fingerprints.
 
-```text
-docker build -f ai-ledger-backend/Dockerfile.target -t vibeledger-backend:readiness ai-ledger-backend
-docker build -t vibeledger-dashboard:readiness ai-ledger-dashboard
-python scripts/container_smoke.py
-```
+Local results and exact deployed digests/revisions are recorded in
+[S5 acceptance](S5_ACCEPTANCE.md). Backend CI also runs generated OpenAPI drift,
+unit, PostgreSQL integration, migration, concurrency, fallback Dashboard and container
+restore smoke. Web CI runs build, unit/server, browser and real API/database acceptance.
 
-The smoke check uses the built images without mounting application source. It
-creates an isolated Docker network and PostgreSQL 17 container, applies the current
-simplified migrations to a disposable test schema, starts the default backend and
-Dashboard entry points, and verifies:
+## Retired runtime and replacement coverage
 
-- Backend `/health` returns the expected service identity.
-- Backend `/ready` returns HTTP 200 and `database: ok` against the migrated schema.
-- Dashboard `/_stcore/health` returns `ok`.
-- Every packaged top-level Dashboard runtime module imports, and a Streamlit
-  AppTest session executes the packaged `app.py` and renders the login fields.
-- Both running containers use Python 3.13 and remain running after the checks.
+| Retired | Replacement invariant coverage |
+|---|---|
+| Reconciliation routes/engine/candidates/work queue | S3 statement atomic import, duplicate evidence, S2 saved metadata review |
+| Ledger projection/account-state/billing/installment-plan runtime | S2 spending and monthly schedules; S3 dated observations/wealth |
+| Old investment snapshot/P&L service | S4 investment estimates, explicit flow confirmation, pair invalidation |
+| Old ingestion/transaction/snapshot repositories and root prototype entry point | Simplified S1–S4 services, receipts and concurrency suites |
+| Old future_slices/legacy_regression tests and matching obsolete unit/UI tests | Current S1–S4 DB suites; image validation/Gemini transport tests; current browser/UI tests |
+| Old Dashboard client reconciliation/correction/work-queue methods | Current request client plus current spending/balance/statement/investment controllers |
 
-The check deliberately supplies no Gemini credential: readiness must report
-`status: degraded` and `gemini: unavailable`. This validates packaging and database
-readiness without claiming a live Gemini test. Fake public Auth configuration is
-used only to render the login form; no sign-in or external model call occurs.
-Disposable containers and the network are removed on success or failure.
-
-GitHub's required aggregate check includes this container job alongside all five
-existing test suites: backend unit, PostgreSQL integration, migration, concurrency
-and Dashboard. A failed, cancelled or skipped container job fails the aggregate.
-
-## Isolated hosted acceptance prerequisites
-
-Local checkpoint verification passed with Python **3.13.15** in both images:
-255 backend unit, 185 integration, 5 migration, 9 concurrency and 99 Dashboard
-tests (553 total), plus both image builds and the complete container smoke check.
-No Python 3.13 dependency incompatibility was found.
-
-Use separate hosted services and a fresh simplified schema, with runtime secrets
-outside Git. Configure the backend database/schema, Gemini key and Supabase
-issuer/audience/asymmetric algorithms/JWKS URL, and configure the Dashboard backend
-URL and Supabase URL/publishable key. Provision household membership and device
-credentials through the existing setup procedures. Verify hosted `/ready`, then
-exercise login/refresh, household pages, real screenshots/statements, Gemini and
-the iPhone Shortcut against those isolated services.
-
-This checkpoint does not deploy services, provision real credentials, grant S3/S4
-acceptance, perform production cutover, or begin S5 feature/removal work.
+Retained intentionally: immutable old migration SQL in the repository (not executable
+or shipped), Git history, the accepted Shortcut wire boundary, and the existing
+Streamlit fallback with supported current-domain pages. Existing old hosted services
+are preserved. No data reset, historical migration rewrite or new schema baseline.

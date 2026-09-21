@@ -1,54 +1,37 @@
----
-title: Ai Ledger Backend
-emoji: 📉
-colorFrom: pink
-colorTo: indigo
-sdk: docker
-pinned: false
-license: mit
----
+# VibeLedger backend
 
-# VibeLedger Backend
+FastAPI spending, monthly schedules, dated balances, whole-statement imports and
+investment estimates. Product rules: [target](../TARGET_DOMAIN_MODEL.md),
+[contracts](../docs/architecture/CONTRACTS.md),
+[acceptance plan](../docs/architecture/IMPLEMENTATION_PLAN.md).
 
-VibeLedger Backend implements `/api/v1/*`, `/health`, `/ready`, Gemini expense capture,
-and the previous architecture's ledger, synchronous statement/reconciliation and
-reporting workflows. The simplified architecture revised on 2026-09-06 is pending
-implementation; it retains the expense interface, adds monthly spending schedules,
-and refactors statement import into batch spending plus an optional dated balance.
-It replaces ledger reconciliation and distinguishes estimated from confirmed gains.
+## Runtime
 
----
+Install `requirements.txt` with Python 3.13. Set ENVIRONMENT, DATABASE_URL and DB_SCHEMA
+explicitly through protected configuration. Run `python -m migrations.runner` for
+the selected simplified schema, then `uvicorn app.main:app --port 7860`.
+`Dockerfile` is the sole backend image definition. The root prototype and superseded
+reconciliation/ledger runtime have been removed; historical migration SQL remains
+in Git but is neither executable via lineage selection nor copied into the image.
 
-## Target FastAPI Application
+`/health` is liveness. `/ready` verifies DB connectivity and exact baseline checksum;
+missing Gemini configuration yields degraded readiness while manual workflows work.
+Gemini defaults to `gemini-3.5-flash-lite`; all transports use bounded JSON schemas
+and strict local validation. No raw prompts/responses or secrets in logs.
 
-The target backend application is implemented in `app/` and exposed via `app.main:app`:
-- **API Version**: `v1` (`/api/v1/*`)
-- **Probes**:
-  - `GET /health` — Service identity and status (`vibeledger-api`)
-  - `GET /ready` — Database connection, schema migration status, SHA256 checksum verification, and Gemini client status
-- **Container Definition**: `Dockerfile.target` (`uvicorn app.main:app --host 0.0.0.0 --port 7860`)
+Browser auth uses the accepted Supabase ES256/JWKS setup. Device auth and original
+Shortcut request-key recovery remain supported. The daily internal schedule endpoint
+has a separate exact Google OIDC service identity, not browser/device authorization.
+See [staging runbook](../docs/deployment/STAGING_DEPLOYMENT.md).
 
-> **Legacy runtime**: `Dockerfile` and root `main.py` serve the old `/api/record`
-> prototype. The implemented staging application is `app.main:app` using
-> `Dockerfile.target`. Do not confuse either current implementation with the pending
-> simplified schema. Removal/cutover follows S0–S6 in the current implementation plan.
+## Checks
 
----
+- `python -m unittest discover -s tests/unit -p "test_*.py"`
+- `python scripts/run_integration_tests.py` (disposable PostgreSQL, ENVIRONMENT=test)
+- `python -m unittest discover -s tests/migration -p "test_*.py"`
+- `python -m unittest discover -s tests/concurrency -p "test_*.py"`
+- `python scripts/export_openapi.py --check`
 
-## Deployment & Staging Runbook
-
-For the previous accepted staging setup and its historical runtime evidence, refer to
-the following runbook. Update it during simplified implementation before using it
-for the new schema; do not run it as a simplified deployment procedure:
-- [`docs/deployment/STAGING_DEPLOYMENT.md`](../docs/deployment/STAGING_DEPLOYMENT.md)
-
----
-
-## Target Architecture References
-
-For target business rules, schemas, API contracts, and implementation sequencing, refer to:
-- [`TARGET_DOMAIN_MODEL.md`](../TARGET_DOMAIN_MODEL.md) — Household workflows and reporting meaning
-- [`CONTRACTS.md`](../docs/architecture/CONTRACTS.md) — Simplified database, APIs, retry, auth and runtime contract
-- [`IMPLEMENTATION_PLAN.md`](../docs/architecture/IMPLEMENTATION_PLAN.md) — Code assessment, transition slices and acceptance matrix
-
-For historical prototype documentation, see [`docs/legacy/`](../docs/legacy/README.md).
+Regenerate `docs/api/openapi.json` by omitting `--check`. Backend CI also builds the
+image and runs actual backup/restore replay proof with synthetic records. Never run
+integration cleanup against accepted staging or a shared/system schema.

@@ -1,20 +1,20 @@
 # VibeLedger
 
-2026-09-15: a new [React frontend candidate](ai-ledger-web/README.md) and
-[complete redesign plan](docs/architecture/FRONTEND_REDESIGN.md) are available.
-See [implementation progress and remaining acceptance](docs/architecture/FRONTEND_PROGRESS.md)
-before switching the hosted Dashboard. Existing Streamlit remains available.
+The accepted hosted frontend is [React](ai-ledger-web/README.md); the existing
+Streamlit service remains available as a fallback. S1–S4 are accepted. S5 removes
+superseded runtime and completes isolated staging operations; production cutover
+has not happened. See [S5 evidence](docs/deployment/S5_ACCEPTANCE.md).
 
 A personal finance system for a two-person household: capture everyday expenses
 with an iPhone Shortcut, periodically update account balances, and see household
 assets, debts, net worth, investment gains and risk distribution.
 
-The FastAPI backend, PostgreSQL data layer and Streamlit REST Dashboard already
+The FastAPI backend, PostgreSQL data layer and React REST Dashboard already
 exist. Staging runtime and the real iPhone Expense Shortcut have passed acceptance,
 as reported in the household handoff. Production fresh cutover has not happened.
 
 The **simplified architecture revised on 2026-09-06 is being implemented: S1/S2
-are accepted and S3 remains in progress**.
+and S3/S4 are accepted; S5 is under final operational validation**.
 It keeps the working one-request expense experience and replaces projected account
 balances and general reconciliation with dated balance observations. Spending and
 wealth are independent. Monthly spending schedules and selected-account statement
@@ -29,10 +29,10 @@ and [implementation and acceptance](docs/architecture/IMPLEMENTATION_PLAN.md).
 
 | Directory | Contents |
 |---|---|
-| [ai-ledger-backend](ai-ledger-backend/README.md) | Implemented FastAPI app in app/; previous architecture's migrations/tests; legacy root entry point retained pending replacement |
+| [ai-ledger-backend](ai-ledger-backend/README.md) | Single FastAPI runtime in app/; simplified migrations and invariant tests |
 | [ai-ledger-dashboard](ai-ledger-dashboard/README.md) | Implemented Streamlit app and authenticated REST client |
 | [docs/architecture](docs/architecture/README.md) | Current simplified target and transition/testing contract |
-| [docs/deployment](docs/deployment/STAGING_DEPLOYMENT.md) | Historical accepted staging setup; must be updated during simplified implementation |
+| [docs/deployment](docs/deployment/STAGING_DEPLOYMENT.md) | Current isolated staging operation and recovery runbook |
 | [docs/legacy](docs/legacy/README.md) | Prototype history, not target requirements |
 
 Keep Cloud Run backend/Dashboard services in asia-southeast1 and Supabase PostgreSQL.

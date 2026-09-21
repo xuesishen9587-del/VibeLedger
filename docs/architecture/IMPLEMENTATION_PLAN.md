@@ -1,8 +1,15 @@
 # Transition and acceptance
 
-Status: **Implementation-ready plan, revised 2026-09-06. No deployment is authorized by this
-document alone.** The architecture review changes documentation only. Production
-fresh cutover remains future work after the household accepts the simplified system.
+Status: **S1–S4 accepted; S5 implementation and isolated staging acceptance in progress. S6 is not authorized.**
+
+Acceptance amendment (2026-09-20, explicit owner decision): household manual
+acceptance is limited to one user, one clear expense screenshot through the iPhone
+Shortcut, and the real MariBank 88-row statement. The owner declines additional
+manual samples and a second-user sign-off and accepts fixing later-discovered
+issues. The original two-user/20-capture targets below remain the intended broader
+confidence targets, not claims of completed testing or blockers under this amendment.
+S5 automated integrity, authentication, recovery and operational gates still apply.
+
 
 Read [product rules](../../TARGET_DOMAIN_MODEL.md) and [CONTRACTS](CONTRACTS.md) first.
 This plan replaces the previous Phase 0–14 and Phase 12.5 implementation/test plans.
@@ -63,9 +70,8 @@ Paths below are relative to `ai-ledger-backend/` unless prefixed otherwise.
 | Backend root `main.py`, `database.py`, `db_migration.py`, legacy `Dockerfile`; Dashboard `src/streamlit_app.py` | Legacy runtime entry points; exclude from simplified image, remove from active tree after replacement acceptance. Git preserves history. |
 | `test_client.py`, `test_idempotency.py`, backend root legacy tests | Never run against inherited remote credentials. Retire with legacy runtime; do not count them as target tests. |
 
-The existing untracked `ai-ledger-backend/cloudbuild.phase12.yaml` is user workspace
-content. The architecture review leaves it untouched. A future implementer must
-inspect ownership/purpose before modifying or adopting it.
+S5 inspected the now-tracked Cloud Build configuration and renamed it to
+`ai-ledger-backend/cloudbuild.yaml`, using the single current Dockerfile.
 
 ## 2. Transition strategy: fresh schema and isolated staging
 

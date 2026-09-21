@@ -45,7 +45,7 @@ class TestHouseholdAuthorizationDb(BaseDbTestCase):
             household_id=self.household_a_id,
             name="Household A",
             reporting_currency="CNY",
-            ledger_start_date=date(2026, 1, 1),
+            started_on=date(2026, 1, 1),
             status="active"
         )
         self.user_a_id = uuid4()
@@ -88,7 +88,7 @@ class TestHouseholdAuthorizationDb(BaseDbTestCase):
             household_id=self.household_b_id,
             name="Household B",
             reporting_currency="USD",
-            ledger_start_date=date(2026, 1, 1),
+            started_on=date(2026, 1, 1),
             status="active"
         )
         self.user_b_id = uuid4()

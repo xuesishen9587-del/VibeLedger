@@ -229,7 +229,7 @@ def freshness(conn, household_id):
 
 
 def run_due(factory, provider=None):
-    """Trusted internal daily entry point. HTTP/OIDC wiring is a separate S5 concern."""
+    """Daily OIDC command: retry-safe per-period commits in household local time."""
     from app.services.capture_receipts import session
     from app.services.spending_reports import prime_quote
     class PeriodNoLongerDue(Exception):

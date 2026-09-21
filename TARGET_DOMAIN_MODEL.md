@@ -32,7 +32,7 @@ spending and a dated balance, without making one determine the other.
 ```mermaid
 flowchart LR
     Phone[Expense Shortcut] --> API[FastAPI]
-    UI[Streamlit Dashboard] --> API
+    UI[React Dashboard] --> API
     API --> AI[Gemini: extract proposed facts]
     AI --> API
     API --> Spending[Spending records]
@@ -383,7 +383,8 @@ records and qualify partial totals. CONTRACTS defines retries and permitted quot
 
 ## 4. Dashboard and operations
 
-Keep Streamlit and its REST client. Four pages suffice:
+The accepted hosted Dashboard uses React and a same-origin REST proxy. The existing
+Streamlit deployment remains a retained fallback. Four workflow groups suffice:
 
 | Page | Contents and actions |
 |---|---|
@@ -401,7 +402,7 @@ accounts, per-session login/refresh/logout, and backend JWT verification. Reuse
 verified-subject-to-user mapping. Device authentication stays. Credentials and setup
 are operator work, not open product decisions; HMAC test tokens remain staging-only.
 
-Keep one FastAPI service, one Streamlit service in Cloud Run asia-southeast1, and
+Keep one FastAPI service and one active React web service in Cloud Run asia-southeast1, and
 Supabase PostgreSQL. Dashboard has no database credentials; private financial tables
 are not exposed through the browser Data API. No worker, queue broker, Redis, event
 bus, scheduled reconciliation, or portfolio service. AI runs inside HTTP handling,

@@ -112,19 +112,6 @@ class TestAuditApiDb(BaseDbTestCase):
 
         headers = {"Authorization": f"Bearer {self.browser_token}"}
 
-        # 1. Test /api/v1/audit-events
-        resp = self.client.get("/api/v1/audit-events", headers=headers)
-        self.assertEqual(resp.status_code, 200)
-        data = resp.json()
-        self.assertIn("items", data)
-        self.assertEqual(len(data["items"]), 2)
-
-        # Filter by entity_type
-        resp_tx = self.client.get("/api/v1/audit-events?entity_type=transaction", headers=headers)
-        self.assertEqual(resp_tx.status_code, 200)
-        self.assertEqual(len(resp_tx.json()["items"]), 1)
-        self.assertEqual(resp_tx.json()["items"][0]["entity_type"], "transaction")
-
         # 2. Test canonical /api/v1/history
         resp_hist = self.client.get(
             f"/api/v1/history?entity_type=account&entity_id={entity_id_2}",

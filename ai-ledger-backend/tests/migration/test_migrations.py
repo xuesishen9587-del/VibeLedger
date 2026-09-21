@@ -83,19 +83,8 @@ class TestMigrations(unittest.TestCase):
             conn.close()
 
     def test_run_legacy_migrations_isolated(self):
-        # Verify legacy migrations 0001..0009 apply cleanly when lineage is explicitly legacy
-        runner.run_migrations(self.test_schema, lineage=runner.LINEAGE_LEGACY)
-
-        conn = get_connection(self.test_schema)
-        try:
-            with conn.cursor() as cur:
-                cur.execute("SELECT migration_name, checksum_sha256 FROM schema_migrations ORDER BY migration_name;")
-                rows = cur.fetchall()
-                self.assertEqual(len(rows), 9)
-                self.assertTrue(rows[0][0].startswith("0001_"))
-                self.assertTrue(rows[8][0].startswith("0009_"))
-        finally:
-            conn.close()
+        with self.assertRaises(ValueError):
+            runner.run_migrations(self.test_schema, lineage=runner.LINEAGE_LEGACY)
 
     def test_migration_checksum_drift_protection(self):
         # 1. Apply all migrations

@@ -1,3 +1,0 @@
-﻿"""
-Reconciliation Domain Package
-"""

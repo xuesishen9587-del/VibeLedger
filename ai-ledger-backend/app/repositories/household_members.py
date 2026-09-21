@@ -81,14 +81,13 @@ def create_household(
     name: str,
     reporting_currency: str = "CNY",
     started_on: Optional[date] = None,
-    ledger_start_date: Optional[date] = None,
     tz_name: str = "Asia/Singapore",
     status: str = "active",
 ) -> Dict[str, Any]:
     """
     Creates a household record matching the simplified schema.
     """
-    start_date = started_on or ledger_start_date or date(2026, 1, 1)
+    start_date = started_on or date(2026, 1, 1)
     with conn.cursor() as cur:
         cur.execute(
             """

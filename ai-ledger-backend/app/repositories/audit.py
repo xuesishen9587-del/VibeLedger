@@ -24,7 +24,6 @@ def insert_audit_event(
     after_data: Optional[Dict[str, Any]] = None,
     reason: Optional[str] = None,
     metadata: Optional[Dict[str, Any]] = None,  # Backward compatibility ignored
-    reconciliation_batch_id: Optional[UUID] = None,  # Backward compatibility ignored
 ) -> None:
     """
     Inserts an immutable audit event matching the simplified schema.

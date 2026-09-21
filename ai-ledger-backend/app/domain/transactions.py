@@ -1,93 +1,16 @@
-from decimal import Decimal
-from typing import Optional, Dict, Any, List
+"""Shared errors for the simplified household runtime."""
 from uuid import UUID
-from datetime import date, datetime
-from app.domain.money import parse_decimal, validate_currency_code, quantize_money, validate_fx_rate
-
-# --- Domain Exceptions ---
 
 class LedgerDomainError(Exception):
-    """Base domain exception for VibeLedger Core Ledger."""
+    """Base error for household commands and provider boundaries."""
     def __init__(self, message: str, code: str = "LEDGER_DOMAIN_ERROR"):
         super().__init__(message)
         self.code = code
         self.message = message
 
-class HouseholdMismatchError(LedgerDomainError):
-    def __init__(self, message: str = "Resource does not belong to the specified household."):
-        super().__init__(message, code="HOUSEHOLD_MISMATCH")
-
-class AccountNotFoundError(LedgerDomainError):
-    def __init__(self, account_id: UUID):
-        super().__init__(f"Account {account_id} not found.", code="ACCOUNT_NOT_FOUND")
-
-class AccountInactiveError(LedgerDomainError):
-    def __init__(self, account_id: UUID):
-        super().__init__(f"Account {account_id} is inactive.", code="ACCOUNT_INACTIVE")
-
-class CategoryNotFoundError(LedgerDomainError):
-    def __init__(self, category_id: UUID):
-        super().__init__(f"Category {category_id} not found.", code="CATEGORY_NOT_FOUND")
-
-class CategoryMismatchError(LedgerDomainError):
-    def __init__(self, message: str = "Category type or household does not match transaction requirements."):
-        super().__init__(message, code="CATEGORY_MISMATCH")
-
-class CurrencyMismatchError(LedgerDomainError):
-    def __init__(self, message: str = "Transaction currency does not match account currency."):
-        super().__init__(message, code="CURRENCY_MISMATCH")
-
-class InvalidAmountError(LedgerDomainError):
-    def __init__(self, message: str = "Transaction amounts must be strictly positive."):
-        super().__init__(message, code="INVALID_AMOUNT")
-
-class SameAccountTransferError(LedgerDomainError):
-    def __init__(self, message: str = "Source and destination accounts in a transfer must be different."):
-        super().__init__(message, code="SAME_ACCOUNT_TRANSFER")
-
-class CrossCurrencyMissingLegError(LedgerDomainError):
-    def __init__(self, message: str = "Cross-currency transfer requires explicit from_amount and to_amount legs."):
-        super().__init__(message, code="CROSS_CURRENCY_MISSING_LEG")
-
-class RefundExceedsOriginalError(LedgerDomainError):
-    def __init__(self, message: str = "Total refund amount exceeds original refundable amount."):
-        super().__init__(message, code="REFUND_EXCEEDS_ORIGINAL")
-
-class TransactionNotFoundError(LedgerDomainError):
-    def __init__(self, transaction_id: UUID):
-        super().__init__(f"Transaction {transaction_id} not found.", code="TRANSACTION_NOT_FOUND")
-
-class TransactionAlreadyVoidedError(LedgerDomainError):
-    def __init__(self, transaction_id: UUID):
-        super().__init__(f"Transaction {transaction_id} is already voided.", code="TRANSACTION_ALREADY_VOIDED")
-
-class InvalidTransactionShapeError(LedgerDomainError):
-    def __init__(self, message: str):
-        super().__init__(message, code="INVALID_TRANSACTION_SHAPE")
-
 class IdempotencyKeyReuseError(LedgerDomainError):
     def __init__(self, message: str = "This idempotency key was already used for different content."):
         super().__init__(message, code="IDEMPOTENCY_KEY_REUSE")
-
-class DeviceAuthenticationError(LedgerDomainError):
-    def __init__(self, message: str = "Invalid or missing device authentication token."):
-        super().__init__(message, code="UNAUTHORIZED")
-
-class DeviceRevokedError(LedgerDomainError):
-    def __init__(self, message: str = "Device token is revoked or inactive."):
-        super().__init__(message, code="DEVICE_REVOKED")
-
-class RequestNotFoundError(LedgerDomainError):
-    def __init__(self, message: str = "The request was not received by the server."):
-        super().__init__(message, code="REQUEST_NOT_FOUND")
-
-class AmbiguousAccountError(LedgerDomainError):
-    def __init__(self, message: str = "Multiple plausible account candidates match the reference."):
-        super().__init__(message, code="AMBIGUOUS_ACCOUNT")
-
-class InvalidImagePayloadError(LedgerDomainError):
-    def __init__(self, message: str = "Invalid image payload or unsupported format."):
-        super().__init__(message, code="INVALID_IMAGE_PAYLOAD")
 
 class FxRateUnavailableError(LedgerDomainError):
     def __init__(self, message: str = "No reference FX rate available for the specified currencies."):
@@ -101,18 +24,6 @@ class GeminiDependencyError(LedgerDomainError):
     def __init__(self, message: str = "AI extraction service is temporarily unavailable."):
         super().__init__(message, code="GEMINI_SERVICE_UNAVAILABLE")
 
-class InvalidRequestStateError(LedgerDomainError):
-    def __init__(self, message: str = "The ingestion request is not in a valid state for this operation."):
-        super().__init__(message, code="INVALID_REQUEST_STATE")
-
-class InvalidPaymentModeError(LedgerDomainError):
-    def __init__(self, message: str = "Invalid or unsupported payment mode."):
-        super().__init__(message, code="INVALID_PAYMENT_MODE")
-
-class InvalidInstallmentPeriodsError(LedgerDomainError):
-    def __init__(self, message: str = "Installment total_periods must be between 2 and 120."):
-        super().__init__(message, code="INVALID_INSTALLMENT_PERIODS")
-
 class ResourceNotFoundError(LedgerDomainError):
     def __init__(self, message: str = "Resource not found.", code: str = "NOT_FOUND"):
         super().__init__(message, code=code)
@@ -125,64 +36,13 @@ class CategoryResourceNotFoundError(ResourceNotFoundError):
     def __init__(self, category_id: UUID):
         super().__init__(f"Category {category_id} not found.", code="CATEGORY_NOT_FOUND")
 
-class TransactionResourceNotFoundError(ResourceNotFoundError):
-    def __init__(self, transaction_id: UUID):
-        super().__init__(f"Transaction {transaction_id} not found.", code="TRANSACTION_NOT_FOUND")
-
-class InstallmentPlanResourceNotFoundError(ResourceNotFoundError):
-    def __init__(self, plan_id: UUID):
-        super().__init__(f"Installment plan {plan_id} not found.", code="INSTALLMENT_PLAN_NOT_FOUND")
-
 class AliasResourceNotFoundError(ResourceNotFoundError):
     def __init__(self, alias_id: UUID):
         super().__init__(f"Account alias {alias_id} not found.", code="ALIAS_NOT_FOUND")
 
-class BatchResourceNotFoundError(ResourceNotFoundError):
-    def __init__(self, batch_id: UUID):
-        super().__init__(f"Reconciliation batch {batch_id} not found.", code="BATCH_NOT_FOUND")
-
-class BatchNotFoundError(BatchResourceNotFoundError):
-    pass
-
-class CandidateResourceNotFoundError(ResourceNotFoundError):
-    def __init__(self, candidate_id: UUID):
-        super().__init__(f"Reconciliation candidate {candidate_id} not found.", code="CANDIDATE_NOT_FOUND")
-
-class StatementParseFailedError(LedgerDomainError):
-    def __init__(self, message: str = "Failed to parse statement document."):
-        super().__init__(message, code="STATEMENT_PARSE_FAILED")
-
-class StatementPasswordRequiredError(LedgerDomainError):
-    def __init__(self, message: str = "Statement PDF is encrypted and requires a password."):
-        super().__init__(message, code="STATEMENT_PASSWORD_REQUIRED")
-
-class StatementPasswordInvalidError(LedgerDomainError):
-    def __init__(self, message: str = "Invalid password for encrypted statement PDF."):
-        super().__init__(message, code="STATEMENT_PASSWORD_INVALID")
-
-class DependencyUnavailableError(LedgerDomainError):
-    def __init__(self, message: str = "External dependency or AI service is temporarily unavailable."):
-        super().__init__(message, code="DEPENDENCY_UNAVAILABLE")
-
-class InvalidCandidateStateError(LedgerDomainError):
-    def __init__(self, message: str = "Reconciliation candidate is not in a valid state for this operation."):
-        super().__init__(message, code="INVALID_CANDIDATE_STATE")
-
-class InvalidCandidatePayloadError(LedgerDomainError):
-    def __init__(self, message: str = "Candidate edit payload validation failed."):
-        super().__init__(message, code="INVALID_CANDIDATE_PAYLOAD")
-
-class IncompatibleTargetTransactionError(LedgerDomainError):
-    def __init__(self, message: str = "Selected target transaction is incompatible with this statement candidate."):
-        super().__init__(message, code="INCOMPATIBLE_TARGET_TRANSACTION")
-
 class RowVersionConflictError(LedgerDomainError):
     def __init__(self, message: str = "The resource has been modified concurrently. Reload before updating.", code: str = "ROW_VERSION_CONFLICT"):
         super().__init__(message, code=code)
-
-class BatchVersionConflictError(RowVersionConflictError):
-    def __init__(self, message: str = "Reconciliation batch was concurrently modified. Reload before updating."):
-        super().__init__(message, code="BATCH_VERSION_CONFLICT")
 
 class AccountNameConflictError(LedgerDomainError):
     def __init__(self, name: str):
@@ -195,10 +55,6 @@ class CategoryNameConflictError(LedgerDomainError):
 class AccountAliasConflictError(LedgerDomainError):
     def __init__(self, alias: str):
         super().__init__(f"An active alias '{alias}' already exists on this account.", code="ACCOUNT_ALIAS_CONFLICT")
-
-class AccountTypeMismatchError(LedgerDomainError):
-    def __init__(self, message: str = "Account type is not valid for this operation."):
-        super().__init__(message, code="ACCOUNT_TYPE_MISMATCH")
 
 class CurrencyImmutableError(LedgerDomainError):
     def __init__(self, message: str = "Account currency cannot be modified once financial history exists."):
@@ -215,79 +71,3 @@ class UserNotInHouseholdError(LedgerDomainError):
 class LinkedAccountInvalidError(LedgerDomainError):
     def __init__(self, message: str = "Linked cash account must be an active cash account in the same household."):
         super().__init__(message, code="LINKED_ACCOUNT_INVALID")
-
-class InvalidCursorError(LedgerDomainError):
-    def __init__(self, message: str = "Invalid pagination cursor provided."):
-        super().__init__(message, code="INVALID_REQUEST")
-
-class InvalidSnapshotError(LedgerDomainError):
-    def __init__(self, message: str = "Invalid account snapshot payload."):
-        super().__init__(message, code="INVALID_REQUEST")
-
-class InvalidBatchStateError(LedgerDomainError):
-    def __init__(self, message: str = "Reconciliation batch is in an invalid state for this operation."):
-        super().__init__(message, code="INVALID_REQUEST")
-
-class InvalidRequestError(LedgerDomainError):
-    def __init__(self, message: str = "Invalid request."):
-        super().__init__(message, code="INVALID_REQUEST")
-
-
-
-# --- Projection Calculation ---
-
-def calculate_projection_deltas(
-    transaction_type: str,
-    from_account_id: Optional[UUID],
-    to_account_id: Optional[UUID],
-    from_amount: Optional[Decimal],
-    to_amount: Optional[Decimal]
-) -> Dict[UUID, Decimal]:
-    """
-    Computes universal signed balance changes for affected accounts.
-    Universal ledger algebra:
-      from_account leg: ledger_balance -= from_amount
-      to_account leg:   ledger_balance += to_amount
-    All leg amounts must be positive Decimal numbers.
-    """
-    deltas: Dict[UUID, Decimal] = {}
-
-    if transaction_type in ("expense", "fee"):
-        if not from_account_id or from_amount is None or from_amount <= 0:
-            raise InvalidTransactionShapeError(f"{transaction_type} requires valid from_account_id and positive from_amount.")
-        deltas[from_account_id] = -from_amount
-
-    elif transaction_type in ("cash_income", "refund"):
-        if not to_account_id or to_amount is None or to_amount <= 0:
-            raise InvalidTransactionShapeError(f"{transaction_type} requires valid to_account_id and positive to_amount.")
-        deltas[to_account_id] = to_amount
-
-    elif transaction_type == "transfer":
-        if not from_account_id or from_amount is None or from_amount <= 0:
-            raise InvalidTransactionShapeError("transfer requires valid from_account_id and positive from_amount.")
-        if not to_account_id or to_amount is None or to_amount <= 0:
-            raise InvalidTransactionShapeError("transfer requires valid to_account_id and positive to_amount.")
-        if from_account_id == to_account_id:
-            raise SameAccountTransferError("transfer source and destination accounts must be distinct.")
-        deltas[from_account_id] = -from_amount
-        deltas[to_account_id] = to_amount
-
-    elif transaction_type in ("opening_balance", "reconciliation_adjustment"):
-        if from_account_id and to_account_id:
-            raise InvalidTransactionShapeError(f"{transaction_type} must specify exactly one account leg, not both.")
-        if not from_account_id and not to_account_id:
-            raise InvalidTransactionShapeError(f"{transaction_type} must specify either from_account_id or to_account_id.")
-
-        if to_account_id:
-            if to_amount is None or to_amount <= 0:
-                raise InvalidTransactionShapeError(f"Positive {transaction_type} requires positive to_amount.")
-            deltas[to_account_id] = to_amount
-        else:
-            if from_amount is None or from_amount <= 0:
-                raise InvalidTransactionShapeError(f"Negative {transaction_type} requires positive from_amount.")
-            deltas[from_account_id] = -from_amount
-
-    else:
-        raise InvalidTransactionShapeError(f"Unsupported transaction type: {transaction_type}")
-
-    return deltas

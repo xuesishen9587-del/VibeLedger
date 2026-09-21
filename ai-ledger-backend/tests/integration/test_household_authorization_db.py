@@ -45,7 +45,7 @@ class TestHouseholdAuthorizationDb(BaseDbTestCase):
             household_id=self.household_a_id,
             name="Household A",
             reporting_currency="CNY",
-            ledger_start_date=date(2026, 1, 1),
+            started_on=date(2026, 1, 1),
             status="active"
         )
         self.user_a_id = uuid4()
@@ -88,7 +88,7 @@ class TestHouseholdAuthorizationDb(BaseDbTestCase):
             household_id=self.household_b_id,
             name="Household B",
             reporting_currency="USD",
-            ledger_start_date=date(2026, 1, 1),
+            started_on=date(2026, 1, 1),
             status="active"
         )
         self.user_b_id = uuid4()
@@ -160,10 +160,13 @@ class TestHouseholdAuthorizationDb(BaseDbTestCase):
         # User A attempts to modify User B's account
         res = self.client.patch(
             f"/api/v1/accounts/{self.account_b_id}",
-            headers={"Authorization": f"Bearer {self.jwt_user_a}"},
+            headers={
+                "Authorization": f"Bearer {self.jwt_user_a}",
+                "Idempotency-Key": "key-cross-household-patch-01"
+            },
             json={
                 "name": "Hacked Account Name",
-                "row_version": 0
+                "expected_version": 0
             }
         )
         self.assertEqual(res.status_code, 404)
@@ -172,8 +175,14 @@ class TestHouseholdAuthorizationDb(BaseDbTestCase):
         # User A attempts to modify User B's category
         res = self.client.patch(
             f"/api/v1/categories/{self.category_b_id}",
-            headers={"Authorization": f"Bearer {self.jwt_user_a}"},
-            json={"name": "Hacked Category"}
+            headers={
+                "Authorization": f"Bearer {self.jwt_user_a}",
+                "Idempotency-Key": "key-cross-household-cat-01"
+            },
+            json={
+                "name": "Hacked Category",
+                "expected_version": 0
+            }
         )
         self.assertEqual(res.status_code, 404)
 

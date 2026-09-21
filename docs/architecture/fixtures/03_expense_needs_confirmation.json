@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "flow_id": "03_expense_needs_confirmation",
+  "description": "Expense capture with ambiguous account/category or low field confidence, returning draft requiring user review.",
+  "request": {
+    "method": "POST",
+    "path": "/api/v1/expenses",
+    "headers": {
+      "Authorization": "Bearer vbl_dev_sample_token_sanitized",
+      "Content-Type": "application/json"
+    },
+    "body": {
+      "idempotency_key": "ad1b8f3c-7e4f-4a5c-1b3d-9c0e1f2a3b4c",
+      "captured_at": "2026-09-06T18:45:00+08:00",
+      "client_version": "expense-shortcut-v2",
+      "image": {
+        "mime_type": "image/jpeg",
+        "base64": "/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////wgALCAABAAEBAREA/8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABPxA="
+      },
+      "note": null
+    }
+  },
+  "response": {
+    "http_status": 200,
+    "headers": {
+      "Content-Type": "application/json"
+    },
+    "body": {
+      "status": "needs_confirmation",
+      "request_id": "5bc07186-7939-4784-d51e-4eb85188c1c8",
+      "draft": {
+        "occurred_on": "2026-09-06",
+        "merchant": "未知商户",
+        "original_amount": "56.00",
+        "original_currency": "CNY",
+        "from_account": null,
+        "category": {
+          "id": "e9c0d1f2-3456-4789-01cd-ef0123456789",
+          "name": "餐饮美食"
+        },
+        "payment_mode": "one_off",
+        "total_periods": null,
+        "remarks": null
+      },
+      "warnings": [
+        {
+          "code": "ACCOUNT_UNRESOLVED",
+          "message": "未能识别支付账户，请手动选择。"
+        }
+      ],
+      "display_summary": "⚠️ 请确认\n56.00 CNY · 未知商户\n未知账户 · 餐饮美食"
+    }
+  },
+  "shortcut_consumed_fields": [
+    "status",
+    "request_id",
+    "draft",
+    "warnings",
+    "display_summary"
+  ]
+}

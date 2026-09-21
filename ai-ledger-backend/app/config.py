@@ -36,14 +36,6 @@ class Settings(BaseSettings):
         None,
         description="API key for Gemini client."
     )
-    MAX_EXPENSE_IMAGE_BYTES: int = Field(
-        10 * 1024 * 1024,
-        description="Maximum allowed decoded image size in bytes (default: 10MB)."
-    )
-    MAX_STATEMENT_PDF_BYTES: int = Field(
-        20 * 1024 * 1024,
-        description="Maximum allowed Statement PDF file size in bytes (default: 20MB)."
-    )
     FX_API_BASE_URL: str = Field(
         "https://api.frankfurter.app",
         description="Base URL for public reference FX rates provider."
@@ -70,8 +62,10 @@ class Settings(BaseSettings):
     )
     AUTH_JWKS_URL: Optional[str] = Field(
         None,
-        description="Optional JWKS URL for external identity provider (disabled/mocked in tests)."
+        description="Pinned HTTPS JWKS URL matching AUTH_ISSUER; asymmetric verification uses bounded public-key caching."
     )
+    SCHEDULER_AUDIENCE: Optional[str] = None
+    SCHEDULER_SERVICE_ACCOUNT: Optional[str] = None
 
     # Use SettingsConfigDict for Pydantic v2 Settings configuration
     model_config = SettingsConfigDict(
@@ -123,6 +117,13 @@ def validate_safety() -> None:
     if not schema or schema in FORBIDDEN_TARGET_SCHEMAS:
         raise PermissionError(f"Safety violation: Execution schema cannot be empty or a shared/system schema ('{schema}').")
 
+    if current_settings.ENVIRONMENT == "test":
+        db_url = getattr(current_settings, "DATABASE_URL", None)
+        if db_url and isinstance(db_url, str):
+            db_url_lower = db_url.lower()
+            if "supabase.co" in db_url_lower or "supabase.com" in db_url_lower:
+                raise PermissionError("Safety violation: Remote Supabase database cannot be used when ENVIRONMENT='test'.")
+
 def validate_schema(schema: str) -> None:
     """
     Verifies that the provided schema identifier is safe and explicitly not a shared or system schema.
@@ -136,10 +137,18 @@ def validate_schema(schema: str) -> None:
 def is_safe_for_testing() -> bool:
     """
     Returns True if we are in a safe 'test' environment to allow destructive test schema operations.
+    Requires ENVIRONMENT == 'test' and DATABASE_URL not pointing to remote Supabase endpoints.
     """
     try:
         current_settings = get_settings()
-        return current_settings.ENVIRONMENT == "test"
+        if current_settings.ENVIRONMENT != "test":
+            return False
+        db_url = getattr(current_settings, "DATABASE_URL", None)
+        if db_url and isinstance(db_url, str):
+            db_url_lower = db_url.lower()
+            if "supabase.co" in db_url_lower or "supabase.com" in db_url_lower:
+                return False
+        return True
     except Exception:
         return False
 

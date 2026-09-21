@@ -30,3 +30,11 @@ __pycache__/
 .pytest_cache/
 .coverage
 htmlcov/
+
+# Only runtime and explicit operator tooling ship in the target image.
+tests/
+*.log
+*.local.*
+README.md
+cloudbuild*.yaml
+docker-compose*.yml

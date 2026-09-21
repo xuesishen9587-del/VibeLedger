@@ -193,31 +193,9 @@ class ApiClient:
 
     # --- Dashboard Overview & Aggregations ---
 
-    def get_overview(self) -> Dict[str, Any]:
-        """GET /api/v1/dashboard/overview"""
-        return self.request("GET", "/api/v1/dashboard/overview")
 
-    def get_cash_flow(self, from_date: Optional[str] = None, to_date: Optional[str] = None) -> Dict[str, Any]:
-        """GET /api/v1/dashboard/cash-flow"""
-        params = {}
-        if from_date:
-            params["from"] = from_date
-        if to_date:
-            params["to"] = to_date
-        return self.request("GET", "/api/v1/dashboard/cash-flow", params=params)
 
-    def get_investments(self, from_date: Optional[str] = None, to_date: Optional[str] = None) -> Dict[str, Any]:
-        """GET /api/v1/dashboard/investments"""
-        params = {}
-        if from_date:
-            params["from"] = from_date
-        if to_date:
-            params["to"] = to_date
-        return self.request("GET", "/api/v1/dashboard/investments", params=params)
 
-    def get_account_freshness(self) -> Dict[str, Any]:
-        """GET /api/v1/dashboard/account-freshness"""
-        return self.request("GET", "/api/v1/dashboard/account-freshness")
 
     # --- Accounts ---
 
@@ -240,46 +218,60 @@ class ApiClient:
     def create_account(
         self,
         name: str,
-        institution: str,
+        balance_scope: str,
         account_type: str,
         currency: str,
+        idempotency_key: str,
         owner_user_id: Optional[str] = None,
-        billing_day: Optional[int] = None,
-        due_day: Optional[int] = None,
-        linked_cash_account_id: Optional[str] = None
+        risk_level: Optional[str] = None,
+        opened_on: Optional[str] = None,
+        statement_import_enabled: bool = False
     ) -> Dict[str, Any]:
         """POST /api/v1/accounts"""
-        payload = {
+        if not idempotency_key:
+            raise ValueError("idempotency_key is required for create_account")
+        payload: Dict[str, Any] = {
             "name": name,
-            "institution": institution,
+            "balance_scope": balance_scope,
             "account_type": account_type,
             "currency": currency,
-            "owner_user_id": owner_user_id,
-            "billing_day": billing_day,
-            "due_day": due_day,
-            "linked_cash_account_id": linked_cash_account_id
+            "statement_import_enabled": statement_import_enabled
         }
-        return self.request("POST", "/api/v1/accounts", json_data=payload)
+        if owner_user_id:
+            payload["owner_user_id"] = owner_user_id
+        if risk_level:
+            payload["risk_level"] = risk_level
+        if opened_on:
+            payload["opened_on"] = opened_on
+        headers = {"Idempotency-Key": idempotency_key}
+        return self.request("POST", "/api/v1/accounts", json_data=payload, headers=headers)
 
-    def update_account(self, account_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    def update_account(self, account_id: str, payload: Dict[str, Any], idempotency_key: str) -> Dict[str, Any]:
         """PATCH /api/v1/accounts/{account_id}"""
-        return self.request("PATCH", f"/api/v1/accounts/{account_id}", json_data=payload)
-
-    def deactivate_account(self, account_id: str) -> Dict[str, Any]:
-        """POST /api/v1/accounts/{account_id}/deactivate"""
-        return self.request("POST", f"/api/v1/accounts/{account_id}/deactivate")
+        if not idempotency_key:
+            raise ValueError("idempotency_key is required for update_account")
+        headers = {"Idempotency-Key": idempotency_key}
+        return self.request("PATCH", f"/api/v1/accounts/{account_id}", json_data=payload, headers=headers)
 
     def list_account_aliases(self, account_id: str) -> Dict[str, Any]:
         """GET /api/v1/accounts/{account_id}/aliases"""
         return self.request("GET", f"/api/v1/accounts/{account_id}/aliases")
 
-    def create_account_alias(self, account_id: str, alias: str) -> Dict[str, Any]:
+    def create_account_alias(self, account_id: str, alias: str, idempotency_key: str) -> Dict[str, Any]:
         """POST /api/v1/accounts/{account_id}/aliases"""
-        return self.request("POST", f"/api/v1/accounts/{account_id}/aliases", json_data={"alias": alias})
+        if not idempotency_key:
+            raise ValueError("idempotency_key is required for create_account_alias")
+        headers = {"Idempotency-Key": idempotency_key}
+        return self.request("POST", f"/api/v1/accounts/{account_id}/aliases", json_data={"alias": alias}, headers=headers)
 
-    def delete_account_alias(self, account_id: str, alias_id: str) -> Dict[str, Any]:
-        """DELETE /api/v1/accounts/{account_id}/aliases/{alias_id}"""
-        return self.request("DELETE", f"/api/v1/accounts/{account_id}/aliases/{alias_id}")
+    def update_account_alias(
+        self, account_id: str, alias_id: str, payload: Dict[str, Any], idempotency_key: str
+    ) -> Dict[str, Any]:
+        """PATCH /api/v1/accounts/{account_id}/aliases/{alias_id}"""
+        if not idempotency_key:
+            raise ValueError("idempotency_key is required for update_account_alias")
+        headers = {"Idempotency-Key": idempotency_key}
+        return self.request("PATCH", f"/api/v1/accounts/{account_id}/aliases/{alias_id}", json_data=payload, headers=headers)
 
     # --- Categories ---
 
@@ -292,336 +284,65 @@ class ApiClient:
             params["status"] = status
         return self.request("GET", "/api/v1/categories", params=params)
 
-    def create_category(self, name: str, category_type: str) -> Dict[str, Any]:
+    def create_category(
+        self, name: str, category_type: str, idempotency_key: str, description: Optional[str] = None
+    ) -> Dict[str, Any]:
         """POST /api/v1/categories"""
-        payload = {"name": name, "type": category_type}
-        return self.request("POST", "/api/v1/categories", json_data=payload)
+        if not idempotency_key:
+            raise ValueError("idempotency_key is required for create_category")
+        payload: Dict[str, Any] = {"name": name, "type": category_type}
+        if description:
+            payload["description"] = description
+        headers = {"Idempotency-Key": idempotency_key}
+        return self.request("POST", "/api/v1/categories", json_data=payload, headers=headers)
 
-    def update_category(self, category_id: str, name: str) -> Dict[str, Any]:
+    def update_category(self, category_id: str, payload: Dict[str, Any], idempotency_key: str) -> Dict[str, Any]:
         """PATCH /api/v1/categories/{category_id}"""
-        return self.request("PATCH", f"/api/v1/categories/{category_id}", json_data={"name": name})
-
-    def deactivate_category(self, category_id: str) -> Dict[str, Any]:
-        """POST /api/v1/categories/{category_id}/deactivate"""
-        return self.request("POST", f"/api/v1/categories/{category_id}/deactivate")
+        if not idempotency_key:
+            raise ValueError("idempotency_key is required for update_category")
+        headers = {"Idempotency-Key": idempotency_key}
+        return self.request("PATCH", f"/api/v1/categories/{category_id}", json_data=payload, headers=headers)
 
     # --- Credit Cards & Installments ---
 
-    def get_credit_card_state(self, account_id: str) -> Dict[str, Any]:
-        """GET /api/v1/credit-cards/{account_id}/state"""
-        return self.request("GET", f"/api/v1/credit-cards/{account_id}/state")
 
-    def list_installment_plans(self) -> Dict[str, Any]:
-        """GET /api/v1/installments"""
-        return self.request("GET", "/api/v1/installments")
 
-    def get_installment_plan(self, plan_id: str) -> Dict[str, Any]:
-        """GET /api/v1/installments/{plan_id}"""
-        return self.request("GET", f"/api/v1/installments/{plan_id}")
 
     # --- Snapshots & Manual Calibration ---
 
-    def create_account_snapshot(
-        self,
-        account_id: str,
-        balance: Union[str, Decimal, float],
-        as_of: Optional[str] = None,
-        currency: Optional[str] = None,
-        idempotency_key: Optional[str] = None
-    ) -> Dict[str, Any]:
-        """
-        POST /api/v1/accounts/{account_id}/snapshots
-        Authoritative observation timestamp requires timezone-aware ISO string.
-        """
-        iso_as_of = as_of or format_iso_timestamp()
-        payload: Dict[str, Any] = {
-            "balance": f"{Decimal(str(balance)):.2f}",
-            "as_of": iso_as_of,
-            "source": "dashboard_manual"
-        }
-        if currency:
-            payload["currency"] = currency
-        if idempotency_key:
-            payload["idempotency_key"] = idempotency_key
 
-        return self.request("POST", f"/api/v1/accounts/{account_id}/snapshots", json_data=payload)
 
-    def create_investment_snapshot(
-        self,
-        account_id: str,
-        total_asset_value: Union[str, Decimal, float],
-        currency: str,
-        as_of: Optional[str] = None,
-        source: str = "dashboard_manual",
-        idempotency_key: Optional[str] = None
-    ) -> Dict[str, Any]:
-        """
-        POST /api/v1/investment-accounts/{account_id}/snapshots
-        Conforms strictly to backend contract: total_asset_value, currency, as_of (timezone-aware), source.
-        """
-        iso_as_of = as_of or format_iso_timestamp()
-        payload: Dict[str, Any] = {
-            "total_asset_value": f"{Decimal(str(total_asset_value)):.2f}",
-            "currency": currency,
-            "as_of": iso_as_of,
-            "source": source
-        }
-        if idempotency_key:
-            payload["idempotency_key"] = idempotency_key
-
-        return self.request("POST", f"/api/v1/investment-accounts/{account_id}/snapshots", json_data=payload)
-
-    def get_investment_performance(
-        self,
-        account_id: str,
-        from_date: Optional[str] = None,
-        to_date: Optional[str] = None
-    ) -> Dict[str, Any]:
-        """GET /api/v1/investment-accounts/{account_id}/performance"""
-        params = {}
-        if from_date:
-            params["from"] = from_date
-        if to_date:
-            params["to"] = to_date
-        return self.request("GET", f"/api/v1/investment-accounts/{account_id}/performance", params=params)
 
     # --- Statements & Reconciliation Review ---
 
-    def upload_statement(
-        self,
-        account_id: str,
-        file_bytes: bytes,
-        filename: str = "statement.pdf",
-        password: Optional[str] = None
-    ) -> Dict[str, Any]:
-        """POST /api/v1/accounts/{account_id}/statements (Multipart)"""
-        files = {"file": (filename, file_bytes, "application/pdf")}
-        data = {}
-        if password:
-            data["password"] = password
-        return self.request("POST", f"/api/v1/accounts/{account_id}/statements", files=files, data=data)
 
-    def get_reconciliation_batch(self, batch_id: str) -> Dict[str, Any]:
-        """GET /api/v1/reconciliation-batches/{batch_id}"""
-        return self.request("GET", f"/api/v1/reconciliation-batches/{batch_id}")
 
-    def get_reconciliation_preview(self, batch_id: str) -> Dict[str, Any]:
-        """GET /api/v1/reconciliation-batches/{batch_id}/preview"""
-        return self.request("GET", f"/api/v1/reconciliation-batches/{batch_id}/preview")
 
-    def get_statement_lines(
-        self,
-        batch_id: str,
-        match_status: Optional[str] = None,
-        line_type: Optional[str] = None
-    ) -> Dict[str, Any]:
-        """GET /api/v1/reconciliation-batches/{batch_id}/statement-lines"""
-        params = {}
-        if match_status:
-            params["match_status"] = match_status
-        if line_type:
-            params["line_type"] = line_type
-        return self.request("GET", f"/api/v1/reconciliation-batches/{batch_id}/statement-lines", params=params)
 
-    def commit_reconciliation_batch(self, batch_id: str, row_version: Optional[int] = None) -> Dict[str, Any]:
-        """POST /api/v1/reconciliation-batches/{batch_id}/commit"""
-        payload = {}
-        if row_version is not None:
-            payload["row_version"] = row_version
-        return self.request("POST", f"/api/v1/reconciliation-batches/{batch_id}/commit", json_data=payload)
 
-    def accept_reconciliation_candidate(
-        self,
-        candidate_id: str,
-        target_transaction_id: Optional[str] = None
-    ) -> Dict[str, Any]:
-        """POST /api/v1/reconciliation-candidates/{candidate_id}/accept"""
-        payload = {}
-        if target_transaction_id:
-            payload["target_transaction_id"] = target_transaction_id
-        return self.request("POST", f"/api/v1/reconciliation-candidates/{candidate_id}/accept", json_data=payload)
 
-    def resolve_reconciliation_candidate(
-        self,
-        candidate_id: str,
-        resolution_type: str,
-        category_id: Optional[str] = None,
-        original_expense_id: Optional[str] = None,
-        counter_account_id: Optional[str] = None,
-        counter_amount: Optional[Union[str, Decimal, float]] = None,
-        target_transaction_id: Optional[str] = None
-    ) -> Dict[str, Any]:
-        """POST /api/v1/reconciliation-candidates/{candidate_id}/resolve"""
-        payload: Dict[str, Any] = {"resolution_type": resolution_type}
-        if category_id:
-            payload["category_id"] = category_id
-        if original_expense_id:
-            payload["original_expense_id"] = original_expense_id
-        if counter_account_id:
-            payload["counter_account_id"] = counter_account_id
-        if counter_amount is not None:
-            payload["counter_amount"] = str(counter_amount)
-        if target_transaction_id:
-            payload["target_transaction_id"] = target_transaction_id
-        return self.request("POST", f"/api/v1/reconciliation-candidates/{candidate_id}/resolve", json_data=payload)
 
-    def patch_reconciliation_candidate(self, candidate_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """PATCH /api/v1/reconciliation-candidates/{candidate_id}"""
-        return self.request("PATCH", f"/api/v1/reconciliation-candidates/{candidate_id}", json_data={"payload": payload})
 
-    def reject_reconciliation_candidate(self, candidate_id: str, reason: Optional[str] = None) -> Dict[str, Any]:
-        """POST /api/v1/reconciliation-candidates/{candidate_id}/reject"""
-        payload = {}
-        if reason:
-            payload["reason"] = reason
-        return self.request("POST", f"/api/v1/reconciliation-candidates/{candidate_id}/reject", json_data=payload)
 
     # --- Work Queue ---
 
-    def get_work_queue(self, type_filter: Optional[str] = None) -> Dict[str, Any]:
-        """GET /api/v1/work-queue"""
-        params = {}
-        if type_filter:
-            params["type"] = type_filter
-        return self.request("GET", "/api/v1/work-queue", params=params)
 
     # --- Ingestion Confirmation & Revision ---
 
-    def get_ingestion_request(self, idempotency_key: str) -> Dict[str, Any]:
-        """GET /api/v1/ingestion-requests/by-key/{idempotency_key}"""
-        return self.request("GET", f"/api/v1/ingestion-requests/by-key/{idempotency_key}")
 
-    def confirm_ingestion_request(self, request_id: str) -> Dict[str, Any]:
-        """POST /api/v1/ingestion-requests/{request_id}/confirm"""
-        return self.request("POST", f"/api/v1/ingestion-requests/{request_id}/confirm")
 
-    def revise_ingestion_request(self, request_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """POST /api/v1/ingestion-requests/{request_id}/revise"""
-        return self.request("POST", f"/api/v1/ingestion-requests/{request_id}/revise", json_data=payload)
 
-    def reject_ingestion_request(self, request_id: str, reason: Optional[str] = None) -> Dict[str, Any]:
-        """POST /api/v1/ingestion-requests/{request_id}/reject"""
-        payload = {}
-        if reason:
-            payload["reason"] = reason
-        return self.request("POST", f"/api/v1/ingestion-requests/{request_id}/reject", json_data=payload)
 
     # --- Transactions & History ---
 
-    def list_transactions(
-        self,
-        from_date: Optional[str] = None,
-        to_date: Optional[str] = None,
-        account_id: Optional[str] = None,
-        transaction_type: Optional[str] = None,
-        category_id: Optional[str] = None,
-        currency: Optional[str] = None,
-        verification_status: Optional[str] = None,
-        limit: int = 50,
-        cursor: Optional[str] = None
-    ) -> Dict[str, Any]:
-        """GET /api/v1/transactions"""
-        params: Dict[str, Any] = {"limit": limit}
-        if from_date:
-            params["from"] = from_date
-        if to_date:
-            params["to"] = to_date
-        if account_id:
-            params["account_id"] = account_id
-        if transaction_type:
-            params["transaction_type"] = transaction_type
-        if category_id:
-            params["category_id"] = category_id
-        if currency:
-            params["currency"] = currency
-        if verification_status:
-            params["verification_status"] = verification_status
-        if cursor:
-            params["cursor"] = cursor
-        return self.request("GET", "/api/v1/transactions", params=params)
 
-    def get_transaction(self, transaction_id: str) -> Dict[str, Any]:
-        """GET /api/v1/transactions/{transaction_id}"""
-        return self.request("GET", f"/api/v1/transactions/{transaction_id}")
 
-    def preview_transaction_correction(self, transaction_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """POST /api/v1/transactions/{transaction_id}/corrections/preview"""
-        return self.request("POST", f"/api/v1/transactions/{transaction_id}/corrections/preview", json_data=payload)
 
-    def commit_transaction_correction(
-        self,
-        transaction_id: str,
-        expected_version: int,
-        changes: Dict[str, Any],
-        reason: Optional[str] = None
-    ) -> Dict[str, Any]:
-        """POST /api/v1/transactions/{transaction_id}/corrections/commit"""
-        payload = {
-            "expected_version": expected_version,
-            "changes": changes,
-            "reason": reason
-        }
-        return self.request("POST", f"/api/v1/transactions/{transaction_id}/corrections/commit", json_data=payload)
 
-    def void_transaction(
-        self,
-        transaction_id: str,
-        delete_reason: str,
-        expected_version: int
-    ) -> Dict[str, Any]:
-        """POST /api/v1/transactions/{transaction_id}/void (expected_version is required)"""
-        payload = {
-            "delete_reason": delete_reason,
-            "expected_version": expected_version
-        }
-        return self.request("POST", f"/api/v1/transactions/{transaction_id}/void", json_data=payload)
 
-    def refund_transaction(
-        self,
-        transaction_id: str,
-        amount: Union[str, Decimal, float],
-        currency: str,
-        to_account_id: str,
-        occurred_on: str,
-        remarks: Optional[str] = None
-    ) -> Dict[str, Any]:
-        """POST /api/v1/transactions/{transaction_id}/refunds"""
-        payload = {
-            "amount": f"{Decimal(str(amount)):.2f}",
-            "currency": currency,
-            "to_account_id": to_account_id,
-            "occurred_on": occurred_on,
-            "remarks": remarks
-        }
-        return self.request("POST", f"/api/v1/transactions/{transaction_id}/refunds", json_data=payload)
 
     # --- Audit Events ---
 
-    def list_audit_events(
-        self,
-        entity_type: Optional[str] = None,
-        entity_id: Optional[str] = None,
-        from_date: Optional[str] = None,
-        to_date: Optional[str] = None,
-        actor_user_id: Optional[str] = None,
-        limit: int = 50,
-        cursor: Optional[str] = None
-    ) -> Dict[str, Any]:
-        """GET /api/v1/audit-events"""
-        params: Dict[str, Any] = {"limit": limit}
-        if entity_type:
-            params["entity_type"] = entity_type
-        if entity_id:
-            params["entity_id"] = entity_id
-        if from_date:
-            params["from"] = from_date
-        if to_date:
-            params["to"] = to_date
-        if actor_user_id:
-            params["actor_user_id"] = actor_user_id
-        if cursor:
-            params["cursor"] = cursor
-        return self.request("GET", "/api/v1/audit-events", params=params)
 
     # --- Devices Management ---
 
@@ -638,6 +359,9 @@ class ApiClient:
         }
         return self.request("POST", "/api/v1/devices", json_data=payload)
 
-    def revoke_device(self, device_id: str) -> Dict[str, Any]:
+    def revoke_device(self, device_id: str, idempotency_key: str) -> Dict[str, Any]:
         """POST /api/v1/devices/{device_id}/revoke"""
-        return self.request("POST", f"/api/v1/devices/{device_id}/revoke")
+        if not idempotency_key:
+            raise ValueError("idempotency_key is required for revoke_device")
+        headers = {"Idempotency-Key": idempotency_key}
+        return self.request("POST", f"/api/v1/devices/{device_id}/revoke", headers=headers)

@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "flow_id": "07_expense_reject",
+  "description": "User abandonment/rejection of a pending needs_confirmation request, producing zero financial effects.",
+  "request": {
+    "method": "POST",
+    "path": "/api/v1/ingestion-requests/5bc07186-7939-4784-d51e-4eb85188c1c8/reject",
+    "headers": {
+      "Authorization": "Bearer vbl_dev_sample_token_sanitized",
+      "Content-Type": "application/json"
+    },
+    "body": {
+      "reason": "用户取消记账"
+    }
+  },
+  "response": {
+    "http_status": 200,
+    "headers": {
+      "Content-Type": "application/json"
+    },
+    "body": {
+      "status": "rejected",
+      "request_id": "5bc07186-7939-4784-d51e-4eb85188c1c8",
+      "display_summary": "已放弃记账: 用户取消记账"
+    }
+  },
+  "shortcut_consumed_fields": [
+    "status",
+    "request_id",
+    "display_summary"
+  ]
+}

@@ -5,7 +5,10 @@ os.environ.setdefault("DB_SCHEMA", "vibeledger_test_runner")
 
 import unittest
 import hashlib
-from app.services.expense_service import compute_request_hash
+from app.services.durable_commands import compute_command_hash
+
+def compute_request_hash(payload):
+    return compute_command_hash("POST /api/v1/expenses", payload)
 
 class TestHashingAndAuth(unittest.TestCase):
     def test_request_hash_determinism_and_canonicalization(self):
@@ -33,7 +36,7 @@ class TestHashingAndAuth(unittest.TestCase):
         hash1 = compute_request_hash(payload1)
         hash2 = compute_request_hash(payload2)
         
-        self.assertEqual(len(hash1), 32)
+        self.assertEqual(len(hash1), 64)
         self.assertEqual(hash1, hash2)
 
     def test_request_hash_sensitivity_to_changes(self):

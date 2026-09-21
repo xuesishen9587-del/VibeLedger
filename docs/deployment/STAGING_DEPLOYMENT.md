@@ -1,5 +1,8 @@
 # Isolated S34 staging runbook
 
+Current S6 preparation: [production cutover sheet](S6_PRODUCTION_CUTOVER.md).
+The S5 record below is historical; production execution remains unauthorized.
+
 ## Authorized target
 
 Project `vibeledger-staging`, region `asia-southeast1`.

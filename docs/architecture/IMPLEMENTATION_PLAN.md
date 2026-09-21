@@ -1,6 +1,6 @@
 # Transition and acceptance
 
-Status: **S1–S4 accepted; S5 completed against isolated staging under the owner-approved manual acceptance amendment below. S6 is not authorized.**
+Status: **S1–S4 accepted; S5 completed against isolated staging under the owner-approved manual acceptance amendment below. S6 preparation is authorized; production execution is not authorized.**
 
 Acceptance amendment (2026-09-20, explicit owner decision): household manual
 acceptance is limited to one user, one clear expense screenshot through the iPhone
@@ -222,6 +222,9 @@ failure, current architecture matches generated OpenAPI/migrations, and both peo
 can complete the household flows without developer assistance.
 
 ### S6 — Later, separately authorized production fresh cutover
+
+Preparation sheet: [S6 production cutover](../deployment/S6_PRODUCTION_CUTOVER.md).
+This sheet does not authorize execution or mark S6 complete.
 
 Prepare a reviewable cutover sheet with exact images/versions, fresh DB/schema,
 secrets configuration, two user identities, devices, starter accounts and rollback

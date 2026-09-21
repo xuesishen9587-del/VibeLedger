@@ -1,13 +1,15 @@
 # VibeLedger current handoff
 
-Branch: `experiment/astra-simplified`; PR #17 open. Accepted baseline:
-`278f143ab3fa4ab24f5a543a11f8405fce051ebf`.
+Current merged main: `e5f3cbd7c14c6d7fb430b59e5090b41a5bc02cc3`.
+Accepted S5 head: `a6aa1f660d5aa0e6393547be5fe1eb277e1d28bb`.
 
-S1–S4 and real hosted Expense/Balance/Statement Gemini flows are user-accepted.
-S5 is complete under the amended manual acceptance scope: retire superseded runtime, add authenticated daily schedule
-execution and visible browser catch-up, align packaging/contracts/runbooks, and
-accepted only `vibeledger-s34acc-backend` / `vibeledger-s34acc-web` staging.
-S6, production fresh cutover and PR merge remain unauthorized.
+S1–S5 are complete under the owner-approved acceptance scope. Accepted staging is
+`vibeledger-s34acc-backend` / `vibeledger-s34acc-web`, schema
+`vibeledger_s34acc_20260914`. Old services remain preserved.
+
+S6 preparation is authorized; production execution/client cutover is not.
+See the [reviewable S6 sheet](docs/deployment/S6_PRODUCTION_CUTOVER.md) for proposed
+resources, operator SQL, approval gates and unresolved private inputs. S6 is not complete.
 
 The owner's 2026-09-20 instruction adjusts manual acceptance to the testing already
 done: one user, one clear expense Shortcut capture, and an 88-row MariBank PDF.

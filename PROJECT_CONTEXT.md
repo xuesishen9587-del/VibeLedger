@@ -11,6 +11,13 @@ S6 preparation is authorized; production execution/client cutover is not.
 See the [reviewable S6 sheet](docs/deployment/S6_PRODUCTION_CUTOVER.md) for proposed
 resources, operator SQL, approval gates and unresolved private inputs. S6 is not complete.
 
+Explicit owner-approved S6 scope amendment: VibeLedger does not require backup,
+PITR, disaster recovery, backup retention or restore rehearsal as part of this
+project. Remove these from S6 gates; they are not unresolved blockers. No RPO/RTO
+or provider backup checks are required. `psql` remains the fresh-schema/bootstrap
+operator tool. Preserve normal request recovery, live data/receipts and rollback
+boundaries. This amendment does not authorize production execution.
+
 The owner's 2026-09-20 instruction adjusts manual acceptance to the testing already
 done: one user, one clear expense Shortcut capture, and an 88-row MariBank PDF.
 Do not ask for more manual samples or a second-user sign-off. Record this limitation

@@ -58,21 +58,12 @@ Streamlit is a fallback and is not redeployed here.
 OIDC implementation follows [Google's HTTP target authentication guidance](https://docs.cloud.google.com/scheduler/docs/http-target-auth)
 and [Google Auth token verification](https://google-auth.readthedocs.io/en/latest/reference/google.oauth2.id_token.html).
 
-## Backup/restore and rollback
+## Historical S5 evidence and application rollback
 
-Use the database provider's protected backup/PITR, or PostgreSQL 17 `pg_dump` with
-credentials supplied through a protected environment/secret mechanism. Scope to
-the selected private schema when sharing a database. Keep backups encrypted with
-restricted access; never put dumps, connection strings or command output containing
-financial records in Git/CI logs. Record timestamp and baseline checksum separately.
-
-Restore into a **new isolated database**, never over the accepted schema. Install
-required extensions, restore schema/data/constraints/triggers, verify migration
-checksum and counts/identities for ingestion_requests, statement_lines,
-schedule_occurrences, transactions and audit_events. Check stored response payloads,
-actor/key scopes, document hashes, period numbers and statement transaction links.
-Replay original keys/import confirmations and the daily job; counts/identities must
-stay unchanged. Do not reset receipts or regenerate IDs to make restore succeed.
+Owner-approved S6 scope amendment: backup, PITR, disaster recovery, backup
+retention and restore rehearsal are outside this project's scope. No backup or
+restore procedure, RPO/RTO or provider entitlement check is an S6 gate. The
+following existing automated S5 evidence is historical, not an ongoing obligation.
 
 `scripts/container_smoke.py` automates an actual PostgreSQL dump/restore on disposable
 containers using `scripts/s5_restore_fixture.py`. It compares full-row fingerprints
@@ -83,5 +74,5 @@ synthetic data; it is not a claim that a production backup was taken.
 For application rollback, pause the daily Scheduler job first and route the two
 selected services back to the recorded prior accepted revisions. No schema changes
 are required by S5. Preserve newly created receipts/data. Investigate with read-only
-queries and restore into a separate recovery candidate if needed. Never drop the
+queries against the preserved data. Never drop the
 accepted schema or modify the old hosted services as a rollback shortcut.

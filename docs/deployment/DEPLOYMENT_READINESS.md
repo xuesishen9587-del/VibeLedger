@@ -8,6 +8,11 @@ only S6 production execution still requires separate authorization.
 The S5 record below is historical. Its scope was `experiment/astra-simplified`,
 PR #17, with accepted functional baseline `278f143ab3fa4ab24f5a543a11f8405fce051ebf`.
 
+Owner-approved S6 scope amendment: backup, PITR, disaster recovery, backup
+retention and restore rehearsal are outside project scope. Historical S5 checks
+below do not create S6 gates; no RPO/RTO or backup/restore evidence is required.
+`psql` remains the fresh-schema/bootstrap operator tool.
+
 ## Acceptance boundary
 
 The owner attests to live expense, balance and statement Gemini acceptance,

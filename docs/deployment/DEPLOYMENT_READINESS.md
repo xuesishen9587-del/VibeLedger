@@ -1,10 +1,12 @@
 # S5 isolated staging readiness
 
 Current S6 preparation: [production cutover sheet](S6_PRODUCTION_CUTOVER.md).
-The S5 record below is historical; production execution remains unauthorized.
+Current status: S1–S5 are merged into `main` through PR #17 at
+`e5f3cbd7c14c6d7fb430b59e5090b41a5bc02cc3`. S6 preparation is authorized;
+only S6 production execution still requires separate authorization.
 
-Scope: `experiment/astra-simplified`, PR #17. S6/production cutover and merge are not authorized.
-The accepted functional baseline is `278f143ab3fa4ab24f5a543a11f8405fce051ebf`.
+The S5 record below is historical. Its scope was `experiment/astra-simplified`,
+PR #17, with accepted functional baseline `278f143ab3fa4ab24f5a543a11f8405fce051ebf`.
 
 ## Acceptance boundary
 

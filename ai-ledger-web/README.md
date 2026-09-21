@@ -1,6 +1,6 @@
 # VibeLedger Web
 
-React/TypeScript 家庭账本前端，继续使用现有 FastAPI `/api/v1/*`。这是新的候选入口；原 Streamlit Dashboard 保留，尚未切换托管服务。
+React/TypeScript 家庭账本前端，继续使用现有 FastAPI `/api/v1/*`。已通过用户托管验收，当前运行于隔离 S34 staging；原 Streamlit Dashboard 保留。
 
 完整设计见 [前端重设计方案](../docs/architecture/FRONTEND_REDESIGN.md)，已完成范围、验证与剩余问题见 [本次进度](../docs/architecture/FRONTEND_PROGRESS.md)。
 

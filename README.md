@@ -2,7 +2,7 @@
 
 The accepted hosted frontend is [React](ai-ledger-web/README.md); the existing
 Streamlit service remains available as a fallback. S1–S4 are accepted. S5 removes
-superseded runtime and completes isolated staging operations; production cutover
+superseded runtime and provides accepted isolated staging operations; production cutover
 has not happened. See [S5 evidence](docs/deployment/S5_ACCEPTANCE.md).
 
 A personal finance system for a two-person household: capture everyday expenses
@@ -14,7 +14,7 @@ exist. Staging runtime and the real iPhone Expense Shortcut have passed acceptan
 as reported in the household handoff. Production fresh cutover has not happened.
 
 The **simplified architecture revised on 2026-09-06 is being implemented: S1/S2
-and S3/S4 are accepted; S5 is under final operational validation**.
+and S3/S4 are accepted; S5 has completed isolated staging acceptance**.
 It keeps the working one-request expense experience and replaces projected account
 balances and general reconciliation with dated balance observations. Spending and
 wealth are independent. Monthly spending schedules and selected-account statement

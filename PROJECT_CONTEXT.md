@@ -4,9 +4,9 @@ Branch: `experiment/astra-simplified`; PR #17 open. Accepted baseline:
 `278f143ab3fa4ab24f5a543a11f8405fce051ebf`.
 
 S1–S4 and real hosted Expense/Balance/Statement Gemini flows are user-accepted.
-Current work is S5: retire superseded runtime, add authenticated daily schedule
+S5 is complete under the amended manual acceptance scope: retire superseded runtime, add authenticated daily schedule
 execution and visible browser catch-up, align packaging/contracts/runbooks, and
-accept only `vibeledger-s34acc-backend` / `vibeledger-s34acc-web` staging.
+accepted only `vibeledger-s34acc-backend` / `vibeledger-s34acc-web` staging.
 S6, production fresh cutover and PR merge remain unauthorized.
 
 The owner's 2026-09-20 instruction adjusts manual acceptance to the testing already

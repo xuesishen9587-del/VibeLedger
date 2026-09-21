@@ -1,6 +1,6 @@
 # Transition and acceptance
 
-Status: **S1–S4 accepted; S5 implementation and isolated staging acceptance in progress. S6 is not authorized.**
+Status: **S1–S4 accepted; S5 completed against isolated staging under the owner-approved manual acceptance amendment below. S6 is not authorized.**
 
 Acceptance amendment (2026-09-20, explicit owner decision): household manual
 acceptance is limited to one user, one clear expense screenshot through the iPhone

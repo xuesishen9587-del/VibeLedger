@@ -60,6 +60,10 @@ def main():
                 f"assert data == {expected!r}, data; print(data)"
             )
             wait_for("exec", backend, "python", "-c", code)
+        docker("exec", "-e", "DB_SCHEMA=vibeledger_test_missing", backend, "python", "-c",
+               "from fastapi.testclient import TestClient; from app.main import app; "
+               "r=TestClient(app).get('/ready'); assert r.status_code == 503, r.text; "
+               "print('Wrong-schema readiness: 503')")
         docker("exec", backend, "python", "-c", "import importlib,pkgutil; import app; "
                "[importlib.import_module(m.name) for m in pkgutil.walk_packages(app.__path__, 'app.')]; "
                "from pathlib import Path; assert not Path('main.py').exists(); "

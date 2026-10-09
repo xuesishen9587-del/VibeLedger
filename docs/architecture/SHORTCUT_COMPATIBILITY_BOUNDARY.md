@@ -1,248 +1,55 @@
-# VibeLedger S0: Expense Shortcut Compatibility Boundary & Baseline
+# 实际 iPhone Shortcut 与后端核对
 
-Status: **Authoritative S0 Baseline (Revised 2026-09-06)**.  
-Reference specifications: [TARGET_DOMAIN_MODEL](../../TARGET_DOMAIN_MODEL.md), [CONTRACTS](CONTRACTS.md), [IMPLEMENTATION_PLAN](IMPLEMENTATION_PLAN.md).
+生产导出为 `E:\VibeLedger_V2\shortcut\VibeLedger_Production_unsigned.shortcut`（从仓库根目录为 `../shortcut/VibeLedger_Production_unsigned.shortcut`）。用户已确认这是当前生产版本，两位家庭成员使用完全相同的逻辑，只维护这一份；各自手机本地保存不同设备 token，以区分设备身份。2026-10-09 的解析针对该文件，没有读取 token 文件，也没有将导出／解包内容／私有 endpoint／凭据提交到仓库。
 
----
+## 解析依据
 
-## 1. Executive Summary
+文件不是直接可读 plist，而是 AEA 签名容器。使用本地 AEA 解码器及 Python plistlib，在内存中完成嵌入公钥签名、内部完整性校验、解包和 plist 解析，得到 **176 个动作**。这是文件结构与完整性检查，不是 Apple 签名证书信任链认证，也不代替实际 iOS 运行。
 
-This document freezes and characterizes the accepted iOS Expense Shortcut wire boundary and establishes a safe, reproducible runnable baseline for the Astra-simplified VibeLedger architecture.
+下列为动作表直接证实的行为，不根据后端反推手机操作：
 
-Key principles established in S0:
-1. **Zero Runtime Disruption**: S0 introduces no schema migrations, no changes to accepted staging services, and no changes to legacy production environments.
-2. **One-Request Normal Path**: The physically accepted real-iPhone expense capture flow relies on a single `POST /api/v1/expenses` without preflights.
-3. **Strict Boundary Characterization**: We document the exact fields currently consumed by the iPhone Shortcut and distinguish between **currently accepted Shortcut behavior** and **target cancellation contract behavior**.
+1. 从配置的本地 File Provider 文件读取 `device-token.txt` 为 DEVICE_TOKEN；BASE_URL 为导出中的固定 HTTPS origin。没有输出两者的值。
+2. 检查本地 pending-key 文件。存在时先 GET 按键回执：needs_confirmation 取 request_id；committed／rejected／failed 展示 display_summary 并删除 pending 文件。
+3. 查回执得到 REQUEST_NOT_FOUND 时，POST 按键 cancel；只有收到上述终态才删文件，否则展示响应并退出。其他恢复错误同样保留文件。
+4. 无 pending 时，用 `yyyyMMdd-HHmmss` 时间和六位随机数构造新键，**先写 pending 文件**，再截当前屏幕。不是从分享输入选图，也不是 UUID 键。
+5. captured_at 用 `yyyy-MM-dd'T'HH:mm:ssXXX`，包含时区偏移；图缩至宽 640，转 JPEG（质量约 0.655，关闭元数据），base64 无换行。
+6. 新请求 POST /expenses，提交 idempotency_key、captured_at、client_version、image.mime_type=image/jpeg、image.base64。**没有初始备注提问，也没有 note 字段。**
+7. needs_confirmation 仅取 request_id，然后进入确认／自然语言修订／拒绝菜单。**在菜单之前没有展示 draft、金额、币种、日期、账户、分类或 warnings 的动作。**
+8. 确认／拒绝为无 JSON body 的 POST；符合目标终态才展示摘要并删 pending 文件，否则展示响应、保留键退出。
+9. 修订菜单询问 correction_note，POST /revise，直接 Quick Look 展示返回字典并退出；没有当次循环确认。pending 保留，下次运行 GET 恢复该草稿。
 
----
+## 协议对照
 
-## 2. iPhone Shortcut Wire Boundary
+所有请求使用 Bearer DEVICE_TOKEN；以下路径均相对 `/api/v1`。
 
-### 2.1 Device-Local Storage Contract
+| 动作 | 仓库后端 | 核对结果 |
+| --- | --- | --- |
+| POST /expenses | 设备消费截图捕获 | 字段形状、JPEG/base64、带偏移 captured_at 匹配；note 可选但手机未发送 |
+| GET /ingestion-requests/by-key/{key} | 原 actor 范围恢复 | 匹配 |
+| POST /ingestion-requests/by-key/{key}/cancel | 原键取消／not-found tombstone | 导出已有此动作，旧文档“手机没有取消”不准确 |
+| POST /ingestion-requests/{id}/confirm | 兼容设备无 body | 同设备为最后编辑者时匹配；浏览器改过草稿会 DRAFT_CHANGED |
+| POST /ingestion-requests/{id}/revise | correction_note | 字段匹配；设备不带 expected_version，服务端只检查识别期间草稿是否再变化 |
+| POST /ingestion-requests/{id}/reject | 兼容设备无 body | 匹配；不撤销已 committed 结果 |
 
-The iPhone Shortcut uses Apple Files app local storage (`On My iPhone`):
-* Directory: `On My iPhone/VibeLedger/` (never iCloud Drive)
-* `device-token.txt`: Contains the high-entropy opaque bearer token provisioned via `POST /api/v1/devices`. Sent as `Authorization: Bearer <token>`.
-* `pending-key.txt`: Plain-text file containing an 8–200 character client-generated idempotency key (typically UUID v4). **Must never be stored as JSON**.
+动作直接取用的是 `status`、`request_id`、`display_summary`、`error.code`；其余主要通过 Quick Look 显示整个返回字典。不能将旧文档中的 transaction_id／warnings／预填金融字段对话框写成实际消费行为。
 
-### 2.2 Normal Fast-Path Request (`POST /api/v1/expenses`)
+后端的 8–200 字符键接受此时间加随机数格式，不要求 UUID。正常无 pending 捕获只有一次 POST，没有额外预检。GET 恢复和 404 后 cancel 是恢复分支。
 
-The normal high-confidence capture path consists of exactly **one backend request**:
+## 已知限制
 
-```json
-{
-  "idempotency_key": "8b9e6f1a-5c2d-4e3a-9f1b-7a8c9d0e1f2a",
-  "captured_at": "2026-09-06T12:30:00+08:00",
-  "client_version": "expense-shortcut-v2",
-  "image": {
-    "mime_type": "image/jpeg",
-    "base64": "<base64_encoded_jpeg_bytes>"
-  },
-  "note": null
-}
-```
+- **接口路径和字段匹配不等于完整交互匹配。** 待确认金融事实未在确认菜单前展示，用户不能在该步骤核对低置信金额／日期；自然语言修订也不是初始交易备注。
+- 没有显式网络 try/catch、HTTP 状态读取、自动轮询或重试。processing 返回字典时展示后退出，保留键；没有给 processing 的主动取消菜单，现有 cancel 只在 not-found 分支。
+- 4xx／5xx 是否被 iOS “获取 URL 内容”动作作为字典交给后续步骤，仍需实际设备证据。如果系统动作先中止，404 后的 cancel 分支可能不可达；文件结构本身不能证明它能运行。
+- 浏览器改过草稿后的无版本 confirm／reject 会返回 409 并保留键；设备 revise 可在当前草稿上修订并重新成为最后编辑者，随后无 body confirm 可以通过。这是既有兼容策略，不是已证明的授权漏洞；实际手机菜单缺少修订后金融事实的结构化核对，仍有误确认风险。复现依据见 [约束复核](CONTRACTS.md#10-复核依据与最小复现)。
+- 一个本地 pending 文件，无显式运行锁；同时启动或手动删除／改写文件可能破坏手机恢复纪律。后台幂等只保护同 actor 同键，不能证明不同新键绝不重复。
+- 640 像素压缩是实测导出配置，复杂小字截图的识别效果未由解析验证。也未向导出中的 URL 发请求，不能证明线上版本和仓库一致。
 
-#### Request Field Specifications
-| Field | Type | Required | Description / Invariants |
-| :--- | :--- | :--- | :--- |
-| `idempotency_key` | `string` | Yes | 8..200 chars, device-scoped unique key generated before POST. |
-| `captured_at` | `string` | Yes | ISO 8601 with explicit timezone offset (e.g. `+08:00`). Non-timezone-aware dates are rejected with 422. |
-| `client_version` | `string` | No | Client identifier, e.g. `expense-shortcut-v2`. |
-| `image.mime_type` | `string` | Yes | Supported formats: `image/jpeg`, `image/png`. |
-| `image.base64` | `string` | Yes | Valid base64 encoding. Max decoded size: 10 MiB. Validated by Pillow `verify()`. |
-| `note` | `string` | No | Optional user annotation or hint. |
+## 验证边界与恢复复核
 
----
+生产版本与两人共用逻辑已由用户确认，无需再次导出。仍未验证 iOS 的 HTTP 错误行为，也未读取线上 commit／镜像；字段匹配仅针对仓库后端。
 
-### 2.3 Response Contracts & Fields Consumed by Shortcut
+最小设备复核可在独立测试环境使用虚构键：保留 pending 文件 → GET 返回 404 JSON／REQUEST_NOT_FOUND → 观察是否进入 cancel 并在 rejected 后清除。若“获取 URL 内容”直接中止，该分支才可判定不可达；目前仅解析到动作，不能认定已有网络恢复故障。记录 iOS 版本和脱敏动作结果即可，无需令牌或真实截图。
 
-#### A. High-Confidence Committed Response (HTTP 200)
+另一条路径是 POST 发出后中断 → 重跑按原键 GET：committed 展示并清除，needs_confirmation 恢复菜单，processing 保留文件退出。后端 tombstone、迟到识别与重复确认已有集成测试；本轮未运行数据库测试，且这些测试不覆盖 iOS 动作。
 
-```json
-{
-  "status": "committed",
-  "request_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
-  "transaction_id": "c7a8b9d0-1234-4567-89ab-cdef01234567",
-  "payment_mode": "one_off",
-  "display_summary": "¥28.50 · 瑞幸咖啡\n招商银行储蓄卡 · 餐饮美食\n2026-09-06"
-}
-```
-
-*Foreign-card additions (backward-compatible additive fields):*
-```json
-{
-  "status": "committed",
-  "request_id": "4ab96075-6828-4673-c40d-3da74077b0b7",
-  "transaction_id": "d8b9c0e1-2345-4678-90bc-def012345678",
-  "payment_mode": "one_off",
-  "original_amount": "20.00",
-  "original_currency": "USD",
-  "from_amount": "144.00",
-  "from_currency": "CNY",
-  "account_leg_status": "estimated",
-  "display_summary": "20.00 USD (est. ¥144.00) · OpenAI\n招商银行全币种信用卡 · 教育培训\n2026-09-06"
-}
-```
-
-> [!NOTE]
-> **Legacy Fields vs Target Contract Invariants**:
-> Legacy response fields captured in S0 fixtures (such as `from_amount`, `from_currency`, and `account_leg_status` in foreign-card fixture `02`) represent compatibility evidence characterizing the accepted current staging runtime. They are **not** automatically requirements of the Astra-simplified target architecture unless the canonical `CONTRACTS.md` explicitly retains them.
-> Specifically, per `CONTRACTS.md` §4, foreign-currency capture in the simplified target commits original amount/currency and frozen reference reporting conversion data, and no longer promises `from_amount` or estimated card settlement legs.
-
-#### B. Needs Confirmation Response (HTTP 200)
-
-```json
-{
-  "status": "needs_confirmation",
-  "request_id": "5bc07186-7939-4784-d51e-4eb85188c1c8",
-  "draft": {
-    "occurred_on": "2026-09-06",
-    "merchant": "未知商户",
-    "original_amount": "56.00",
-    "original_currency": "CNY",
-    "from_account": null,
-    "category": {
-      "id": "e9c0d1f2-3456-4789-01cd-ef0123456789",
-      "name": "餐饮美食"
-    },
-    "payment_mode": "one_off",
-    "total_periods": null,
-    "remarks": null
-  },
-  "warnings": [
-    {
-      "code": "ACCOUNT_UNRESOLVED",
-      "message": "未能识别支付账户，请手动选择。"
-    }
-  ],
-  "display_summary": "⚠️ 请确认\n56.00 CNY · 未知商户\n未知账户 · 餐饮美食"
-}
-```
-
-#### C. Exact Field Dependency Map for Current iPhone Shortcut
-
-| Response Field | Shortcut Dependency / Usage |
-| :--- | :--- |
-| `status` | **Critical branching gate**: Shortcut checks whether `status == "committed"`, `"needs_confirmation"`, `"rejected"`, or `"failed"`. |
-| `display_summary` | **Primary UI output**: Shortcut presents this formatted string directly in iOS banner notifications or interactive alert dialogs. |
-| `request_id` | **Action identifier**: Used by Shortcut to target follow-up requests (`/confirm`, `/revise`, `/reject`). |
-| `transaction_id` | **Audit reference**: Displayed or logged when committed. |
-| `warnings` | **Review context**: Array of `{code, message}` explaining why confirmation is required. |
-| `draft` | **Draft payload**: Contains current candidate values for prompt dialog prefill. |
-
----
-
-## 3. Pending-Key Recovery: Existing vs Target Contract
-
-```mermaid
-sequenceDiagram
-    autonumber
-    actor User
-    participant Phone as iPhone Shortcut
-    participant Local as On My iPhone/VibeLedger
-    participant API as FastAPI Backend
-
-    Note over Phone,API: Flow A: Normal Captured Flow
-    Phone->>Local: Write pending-key.txt (uuid)
-    Phone->>API: POST /api/v1/expenses (idempotency_key=uuid)
-    API-->>Phone: HTTP 200 committed (display_summary)
-    Phone->>Local: Clear pending-key.txt
-    Phone->>User: Display summary notification
-
-    Note over Phone,API: Flow B: Interrupted Recovery (Existing Accepted)
-    User->>Phone: Run Shortcut
-    Phone->>Local: Read pending-key.txt -> Found uuid
-    Phone->>API: GET /api/v1/ingestion-requests/by-key/{uuid}
-    alt Ingestion Request Found
-        API-->>Phone: Replay response_payload (committed/draft)
-        Phone->>Local: Clear pending-key.txt (if committed)
-    else 404 REQUEST_NOT_FOUND
-        API-->>Phone: HTTP 404 REQUEST_NOT_FOUND
-    end
-
-    Note over Phone,API: Flow C: Target Interrupted Safety (CONTRACTS.md - Target S2)
-    Note right of Phone: On 404, delayed original POST might still arrive!
-    Phone->>API: POST /api/v1/ingestion-requests/by-key/{uuid}/cancel
-    API-->>Phone: HTTP 200 rejected (Tombstone created)
-    Phone->>Local: Safe to clear pending-key.txt & recapture!
-    Note right of API: If delayed POST arrives later, collides with tombstone -> Replayed rejected, 0 money records.
-```
-
-### 3.1 Current Accepted Shortcut Recovery Behavior
-1. At startup, the Shortcut inspects `On My iPhone/VibeLedger/pending-key.txt`.
-2. If absent: generates new key, writes to `pending-key.txt`, and executes `POST /api/v1/expenses`.
-3. If present: invokes `GET /api/v1/ingestion-requests/by-key/{idempotency_key}`.
-   - If committed: displays `display_summary` and clears `pending-key.txt`.
-   - If `needs_confirmation`: presents user review options (Confirm, Revise, Reject).
-   - If `rejected` / `failed`: shows rejection/error and clears `pending-key.txt`.
-   - If 404: current Shortcut alerts user or clears key.
-
-### 3.2 Target Interrupted-Request Safety Contract (Target Specification for S2)
-
-> [!WARNING]
-> **Important Distinction**: The cancel-before-recapture contract (`POST /by-key/{key}/cancel`) is a **target architecture specification** defined in `CONTRACTS.md` Section 3. It is **NOT** currently implemented in the iOS Shortcut export. S0 documents and tests this behavior as target contract requirements without falsely claiming it is already deployed in the current Shortcut.
-
-#### The Delayed-Original-POST-After-404 Race Condition:
-1. iPhone sends `POST /api/v1/expenses` over slow or cellular network.
-2. Network timeout occurs client-side, but the request was buffered in transit or cloud proxies.
-3. User re-triggers Shortcut -> finds `pending-key.txt`.
-4. Shortcut queries `GET /api/v1/ingestion-requests/by-key/{key}` -> Backend has not received POST yet, returns `404 REQUEST_NOT_FOUND`.
-5. **Vulnerability in old design**: If client blindly deletes `pending-key.txt` and captures again, the delayed POST arrives 10 seconds later, processes via Gemini, and commits a duplicate transaction!
-6. **Target S2 Contract**:
-   - The Shortcut must issue `POST /api/v1/ingestion-requests/by-key/{key}/cancel` before clearing `pending-key.txt`.
-   - If the request has not arrived, the server atomically creates a `rejected` tombstone (`request_kind=command`, `operation=cancel`, null `request_hash`, `status=rejected`).
-   - When the delayed original POST eventually arrives with that key, the database key uniqueness `(household_id, actor_scope, idempotency_key)` collides with the tombstone.
-   - The server replays the tombstone's `rejected` outcome, preventing any AI processing or financial ledger mutation.
-   - If the original request had already committed before the cancel arrived, cancel returns the already committed response (it never voids or deletes committed transactions).
-
----
-
-## 4. Migration Lineage & Integrity Checksums
-
-The existing accepted runtime is anchored on migration files `0001_extensions.sql` through `0009_indexes.sql`. In accordance with S0 and S1 requirements, these migration files are strictly immutable.
-
-| Migration File | SHA-256 Checksum | Content Scope |
-| :--- | :--- | :--- |
-| `0001_extensions.sql` | `f9f875811be9c5569e8d3250399033960ad440d0e9e3eb43e79df933c7df2a4f` | Extension discovery & schema isolation |
-| `0002_identity_accounts.sql` | `5c84f2372c5eb6cd4fa9b25936455252f37f8b55cbc78325333e26d8234af6a7` | Households, users, accounts, aliases, categories |
-| `0003_ingestion_batches.sql` | `be45afc3d78b6774f64f7353283169a5b1c81bac5d5e7d5af72e8dd0580b53be` | Ingestion requests, batches, receipts |
-| `0004_transactions.sql` | `5ddc2e1690885d4ebfb6c915f4a64ef023960dc57224dd06cded03450aa7143e` | Financial transactions, links, account_state |
-| `0005_snapshots_invest.sql` | `61bd0185c2482f98e2d904e832aa8600a44266326e1c4def7024f94d0d159492` | Account snapshots, investment P&L |
-| `0006_statement_candidates.sql` | `91434d62e1ac5a2b996b6db0e30d7bb9e16e3d837daf6d7b403ed9bd4b205401` | Statements, lines, reconciliation candidates |
-| `0007_installments.sql` | `0ac357c8793c875d113fdb049df88d258855dba015dc28efebed00bb8ec24f79` | Installment plans and periods |
-| `0008_audit_events.sql` | `656f61bc223114bc54443a2356859b36effddd0bef940d4fec72ed31d7ad143d` | Append-only financial audit events |
-| `0009_indexes.sql` | `88cd86ac0c1c7f42aa84f9dca5e7e0ffd476a1ea06d9ef22c858193a1441be72` | Foreign keys, performance indexes |
-
-*Lineage Invariant for S1*: S1 will introduce `migrations/simplified/0001_simplified.sql` as a distinct lineage. The runner will explicitly select the simplified lineage and reject the legacy 0001–0009 lineage.
-
----
-
-## 5. Local Runnable Baseline & Test Verification
-
-### 5.1 Test Execution Baseline
-
-| Test Suite | Directory | Command | Result |
-| :--- | :--- | :--- | :--- |
-| **Backend Unit Tests** | `ai-ledger-backend/tests/unit` | `python -m unittest discover -s tests/unit -p "test_*.py"` | **191 Passed** (180 baseline + 11 S0 boundary, 0 failures, 0 errors) |
-| **Dashboard Unit/Flow Tests** | `ai-ledger-dashboard/tests` | `python -m unittest discover -s tests -p "test_*.py"` | **36 Passed** (0 failures, 0 errors) |
-| **S0 Boundary & Safety Suite** | `ai-ledger-backend/tests/unit` | `python -m unittest tests/unit/test_expense_shortcut_boundary_unit.py` | **11 Passed** (0 failures, 0 errors) |
-
-### 5.2 Test Isolation & Database Safety Invariant
-
-1. **Remote Credential Protection**: Tests must NEVER load inherited credentials from `.env` or connect to remote Supabase instances.
-2. **Deterministic Mocks**: All S0 boundary and contract tests execute with zero database dependency using typed mock services (`MockGeminiService`, mocked repository functions, and deterministic test clients).
-
----
-
-## 6. S0 Artifact Inventory
-
-All S0 fixtures are maintained under `docs/architecture/fixtures/`:
-1. `01_expense_clear_high_confidence.json`
-2. `02_expense_foreign_card_high_confidence.json`
-3. `03_expense_needs_confirmation.json`
-4. `04_expense_confirm_request_response.json`
-5. `05_expense_revise_natural_language.json`
-6. `06_expense_revise_structured.json`
-7. `07_expense_reject.json`
-8. `08_expense_by_key_replay.json`
-9. `09_target_delayed_post_race_cancellation.json`
+pending 文件仅保存键，没有原始图像／请求正文；不能据此重构同一 POST。换环境时 endpoint、token 和 pending-state 文件命名空间必须成组迁移；先解决原环境未确定键，不能只改 URL。

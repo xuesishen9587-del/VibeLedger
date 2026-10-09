@@ -13,6 +13,7 @@ Proves:
 9. Adversarial: Two-command proxy (zero void calls, exactly one schedule-create mutation).
 """
 import unittest
+from datetime import date
 from unittest.mock import MagicMock
 from streamlit.testing.v1 import AppTest
 
@@ -90,6 +91,8 @@ _schedules(client, save, categories, accounts)
         next(s for s in app.selectbox if s.label.startswith("选择要转换的已记录支出")).select("tx-full-99")
         app.text_input[2].input("100.00")  # 每期金额
         app.text_input[3].input("Apple Store")  # 商户
+        # Keep the contract fixture independent of the current-month default.
+        next(d for d in app.date_input if d.label == "起始月份").set_value(date(2026, 9, 1))
 
         # Preview
         next(b for b in app.button if b.label == "预览日期和金额").click().run()

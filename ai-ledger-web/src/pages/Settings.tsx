@@ -27,7 +27,14 @@ import {
   Empty,
   Tag,
 } from "../components/ui";
-import type { Account, Category, Page, Review, Snapshot } from "../types";
+import type {
+  Account,
+  Category,
+  HouseholdMember,
+  Page,
+  Review,
+  Snapshot,
+} from "../types";
 type Device = {
   device_id: string;
   device_name: string;
@@ -36,13 +43,16 @@ type Device = {
 };
 function AccountEditor({
   item,
+  members,
   onClose,
 }: {
   item?: Account;
+  members?: HouseholdMember[];
   onClose: () => void;
 }) {
   const { api, timezone, notify, refresh } = useApp();
   const [type, setType] = useState(item?.account_type || "savings");
+  const [owner, setOwner] = useState(item?.owner_user_id || "");
   const aliases = useResource<
     Page<{ id: string; alias: string; status: string; row_version: number }>
   >(item ? `/accounts/${item.id}/aliases` : null);
@@ -56,6 +66,8 @@ function AccountEditor({
             risk_level:
               type === "credit" ? null : String(f.get("risk")) || null,
             statement_import_enabled: f.get("statement") === "on",
+            // A failed member read must never clear existing ownership.
+            ...(members ? { owner_user_id: owner || null } : {}),
           };
           await api.command(
             item ? "/accounts/" + item.id : "/accounts",
@@ -110,6 +122,38 @@ function AccountEditor({
             </select>
           </Field>
         </div>
+        <Field
+          label="账户归属"
+          hint={
+            members
+              ? "仅用于标记归属，家庭成员仍可共同查看。未确认时可保留未设置。"
+              : "成员信息暂未加载，保存其他设置时会保留原归属。"
+          }
+        >
+          <select
+            name="owner"
+            value={owner}
+            disabled={!members}
+            onChange={(e) => setOwner(e.target.value)}
+          >
+            <option value="">未设置归属</option>
+            {owner && !members?.some((m) => m.user_id === owner) && (
+              <option value={owner} disabled>
+                原归属成员暂不可用（保持不变）
+              </option>
+            )}
+            {members?.map((m) => (
+              <option
+                key={m.user_id}
+                value={m.user_id}
+                disabled={m.status !== "active"}
+              >
+                {m.display_name.trim() || "未设置姓名的家庭成员"}
+                {m.status !== "active" ? "（已停用）" : ""}
+              </option>
+            ))}
+          </select>
+        </Field>
         <Field
           label="这个余额包含什么？"
           hint="比如：仅活期存款，不含同一家银行的理财。避免不同账户重复统计。"
@@ -415,6 +459,9 @@ export function SettingsPage({ onLogout }: { onLogout: () => Promise<void> }) {
   const devices = useResource<Page<Device>>(
     tab === "devices" ? "/devices" : null,
   );
+  const members = useResource<Page<HouseholdMember>>(
+    tab === "accounts" ? "/household-members" : null,
+  );
   const settings = useResource<Review>(
     tab === "preferences" ? "/review" : null,
   );
@@ -453,6 +500,14 @@ export function SettingsPage({ onLogout }: { onLogout: () => Promise<void> }) {
                 </Button>
               }
             >
+              <ErrorBox error={members.error} retry={members.reload} />
+              {members.data &&
+                members.data.items.filter((m) => m.status === "active").length <
+                  2 && (
+                  <p className="notice">
+                    当前可选家庭成员不足两人。如需分别归属，请先确认另一位成员的配置。
+                  </p>
+                )}
               {accounts.map((a) => (
                 <div key={a.id} className="list-row">
                   <div>
@@ -460,6 +515,16 @@ export function SettingsPage({ onLogout }: { onLogout: () => Promise<void> }) {
                     <small>
                       {accountLabel[a.account_type]} · {a.currency} ·{" "}
                       {a.balance_scope}
+                    </small>
+                    <small>
+                      归属：
+                      {!a.owner_user_id
+                        ? "未设置归属"
+                        : !members.data
+                          ? "成员信息暂未加载"
+                          : members.data.items
+                              .find((m) => m.user_id === a.owner_user_id)
+                              ?.display_name.trim() || "原归属成员暂不可用"}
                     </small>
                   </div>
                   <Tag>
@@ -592,6 +657,7 @@ export function SettingsPage({ onLogout }: { onLogout: () => Promise<void> }) {
       {account && (
         <AccountEditor
           item={account === true ? undefined : account}
+          members={members.data?.items}
           onClose={() => setAccount(null)}
         />
       )}{" "}

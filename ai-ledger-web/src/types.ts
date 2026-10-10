@@ -1,4 +1,9 @@
 export type Page<T> = { items: T[]; next_cursor: string | null };
+export type HouseholdMember = {
+  user_id: string;
+  display_name: string;
+  status: "active" | "disabled";
+};
 export type Category = {
   id: string;
   name: string;

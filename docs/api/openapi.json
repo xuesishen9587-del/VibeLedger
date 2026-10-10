@@ -820,6 +820,54 @@
         "title": "HTTPValidationError",
         "type": "object"
       },
+      "HouseholdMember": {
+        "properties": {
+          "display_name": {
+            "title": "Display Name",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "active",
+              "disabled"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "user_id": {
+            "format": "uuid",
+            "title": "User Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "user_id",
+          "display_name",
+          "status"
+        ],
+        "title": "HouseholdMember",
+        "type": "object"
+      },
+      "HouseholdMemberList": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/HouseholdMember"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "next_cursor": {
+            "title": "Next Cursor",
+            "type": "null"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "title": "HouseholdMemberList",
+        "type": "object"
+      },
       "ImagePayload": {
         "additionalProperties": false,
         "properties": {
@@ -4256,6 +4304,55 @@
         "summary": "Get Entity Change History",
         "tags": [
           "History"
+        ]
+      }
+    },
+    "/api/v1/household-members": {
+      "get": {
+        "operationId": "members_api_v1_household_members_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HouseholdMemberList"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Current Household Members",
+        "tags": [
+          "Household members"
         ]
       }
     },

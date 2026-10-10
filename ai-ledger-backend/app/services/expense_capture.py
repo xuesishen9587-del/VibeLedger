@@ -18,11 +18,19 @@ from app.services.durable_commands import compute_command_hash
 from app.services.spending_reports import prime_quote
 
 
-def references(conn, household_id):
+def references(conn, household_id, *, uploader_user_id=None):
     accounts = schema.list_accounts(conn, household_id, status="active")
     aliases = repo.rows(conn, "SELECT account_id,alias_text FROM account_aliases WHERE household_id=%s AND status='active'", (household_id,))
     for account in accounts:
         account["aliases"] = [a["alias_text"] for a in aliases if a["account_id"] == account["id"]]
+    if uploader_user_id is not None:
+        members = schema.list_household_members(conn, household_id)
+        names = {str(m["user_id"]): m["display_name"] for m in members}
+        for account in accounts:
+            owner = account.get("owner_user_id")
+            account["owner_name"] = names.get(str(owner)) if owner else None
+            account["ownership"] = ("unassigned" if not owner else
+                "uploader" if str(owner) == str(uploader_user_id) else "other_member")
     return accounts, schema.list_categories(conn, household_id, category_type="expense", status="active")
 
 
@@ -35,6 +43,40 @@ def match(value, records):
     return matches[0] if len(matches) == 1 else None
 
 
+def match_account(value, accounts, uploader_user_id=None, candidates=None):
+    """Evidence first; ownership breaks a tie only among compatible accounts."""
+    normalized = str(value).strip().casefold() if value else None
+    # A generic visible label can be one account's name and another's alias.
+    evidence = [a for a in accounts if normalized and normalized in
+                (str(a["id"]).casefold(), a["name"].casefold(),
+                 *(alias.casefold() for alias in a.get("aliases", [])))]
+    if candidates is None:
+        matches = evidence
+    else:
+        # Gemini lists canonical names supported by the screenshot, not an owner default.
+        matches = []
+        for name in candidates:
+            found = [a for a in accounts if str(name).strip().casefold() in
+                     (str(a["id"]).casefold(), a["name"].casefold())]
+            if len(found) != 1:
+                return None
+            if found[0] not in matches:
+                matches.append(found[0])
+        if len(evidence) > 1 and any(a not in matches for a in evidence):
+            # A truncated candidate list cannot make a known shared label unique.
+            return None
+        if evidence:
+            matches = [a for a in matches if a in evidence]
+    if len(matches) == 1:
+        return matches[0]
+    if uploader_user_id is not None:
+        owned = [a for a in matches if a.get("owner_user_id") is not None
+                 and str(a["owner_user_id"]) == str(uploader_user_id)]
+        if len(owned) == 1:
+            return owned[0]
+    return None
+
+
 def confidence(draft, name):
     if name in draft.get("user_fields", []):
         return True
@@ -42,9 +84,9 @@ def confidence(draft, name):
     return isinstance(value, (float, int)) and math.isfinite(value) and .85 <= value <= 1
 
 
-def initial_draft(result, captured_at, household, accounts, categories):
+def initial_draft(result, captured_at, household, accounts, categories, uploader_user_id=None):
     data = result.model_dump(mode="json", exclude={"raw_response"})
-    account = match(data.get("from_account"), accounts)
+    account = match_account(data.get("from_account"), accounts, uploader_user_id, data.get("account_candidates"))
     category = match(data.get("category"), categories)
     observed_date = data.get("occurred_on")
     date_source = "receipt"
@@ -177,13 +219,13 @@ def process(factory, actor, payload, model, fx_provider=None):
         row, inserted = receipts.reserve(conn, actor, payload["idempotency_key"], request_hash, digest, captured_at, payload.get("client_version"))
         if not inserted:
             return receipts.response(row)
-        accounts, categories = references(conn, actor.household_id)
+        accounts, categories = references(conn, actor.household_id, uploader_user_id=actor.user_id)
         household = schema.get_household(conn, actor.household_id)
     try:
         # No database connection is alive here. The SDK has a 40s timeout and no retry.
         with request_context(row["id"]):
             result = model.extract_expense(raw, mime, payload.get("note"), accounts, categories, captured_at=captured_at)
-        proposed = initial_draft(result, captured_at, household, accounts, categories)
+        proposed = initial_draft(result, captured_at, household, accounts, categories, actor.user_id)
         if time.monotonic() - started >= 45:
             with request_context(row["id"]):
                 log_failure("expense_extract", "capture_deadline", TimeoutError())

@@ -119,8 +119,8 @@ async function setup(
   } = {},
 ) {
   const accounts = multipleAccounts
-    ? [account, { ...account, id: "second-account", name: "备用信用卡" }]
-    : [account];
+    ? [{ ...account }, { ...account, id: "second-account", name: "备用信用卡" }]
+    : [{ ...account }];
   let receipt = statement(count, uncertain);
   if (mixedReview) {
     receipt.draft.lines[0].requires_review = true;
@@ -200,7 +200,30 @@ async function setup(
     const body = method === "GET" ? null : r.request().postDataJSON();
     if (method !== "GET") writes.push({ path, body });
     let data: unknown = { items: [], next_cursor: null };
-    if (path === "/accounts") data = { items: accounts, next_cursor: null };
+    if (path === "/household-members")
+      data = {
+        items: [
+          { user_id: "member-one", display_name: "小林", status: "active" },
+          { user_id: "member-two", display_name: "小夏", status: "active" },
+        ],
+        next_cursor: null,
+      };
+    else if (path === "/accounts" && method === "POST") {
+      const created = {
+        ...account,
+        ...body,
+        id: "created-account",
+        row_version: 0,
+      };
+      accounts.push(created);
+      data = created;
+    } else if (path.startsWith("/accounts/") && method === "PATCH") {
+      const target = accounts.find((a) => path === `/accounts/${a.id}`)!;
+      expect(body.expected_version).toBe(target.row_version);
+      Object.assign(target, body, { row_version: target.row_version + 1 });
+      data = target;
+    } else if (path === "/accounts")
+      data = { items: accounts, next_cursor: null };
     else if (path === "/categories")
       data = { items: categories, next_cursor: null };
     else if (path === "/reports/wealth")
@@ -339,6 +362,93 @@ async function login(page: Page) {
   await page.getByRole("button", { name: "登录" }).click();
   await expect(page.getByRole("heading", { name: "总览" })).toBeVisible();
 }
+test("account ownership uses household names, persists, and can be explicitly cleared", async ({
+  page,
+}) => {
+  const fixture = await setup(page);
+  await login(page);
+  await page.goto("/#/settings");
+  const row = page
+    .locator(".list-row")
+    .filter({ has: page.getByText("家庭信用卡", { exact: true }) });
+  await expect(
+    row.getByText("归属：未设置归属", { exact: true }),
+  ).toBeVisible();
+  await row.getByRole("button", { name: "设置", exact: true }).click();
+  const dialog = page.getByRole("dialog");
+  const owner = dialog.getByRole("combobox", { name: /^账户归属/ });
+  await expect(owner).toBeEnabled();
+  await expect(owner).toHaveValue("");
+  await owner.selectOption({ label: "小夏" });
+  await dialog.getByRole("button", { name: "保存", exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  await expect(row.getByText("归属：小夏", { exact: true })).toBeVisible();
+  expect(fixture.writes).toEqual([
+    {
+      path: "/accounts/account",
+      body: expect.objectContaining({
+        owner_user_id: "member-two",
+        expected_version: 1,
+      }),
+    },
+  ]);
+  await page.reload();
+  await expect(row.getByText("归属：小夏", { exact: true })).toBeVisible();
+  await row.getByRole("button", { name: "设置", exact: true }).click();
+  await expect(owner).toHaveValue("member-two");
+  await owner.selectOption("");
+  await dialog.getByRole("button", { name: "保存", exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  await expect(
+    row.getByText("归属：未设置归属", { exact: true }),
+  ).toBeVisible();
+  expect(fixture.writes[1]).toEqual({
+    path: "/accounts/account",
+    body: expect.objectContaining({ owner_user_id: null, expected_version: 2 }),
+  });
+});
+
+test("mobile account creation offers real members without assigning the logged-in user", async ({
+  page,
+}, testInfo) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const fixture = await setup(page);
+  await login(page);
+  await page.goto("/#/settings");
+  await page.getByRole("button", { name: "添加账户", exact: true }).click();
+  const dialog = page.getByRole("dialog");
+  const owner = dialog.getByRole("combobox", { name: /^账户归属/ });
+  await expect(owner).toBeEnabled();
+  await expect(owner).toHaveValue("");
+  await dialog.getByLabel("账户名称", { exact: true }).fill("家庭储蓄");
+  await dialog.getByLabel(/^这个余额包含什么/).fill("仅活期存款");
+  await owner.selectOption({ label: "小林" });
+  await page.screenshot({
+    path: testInfo.outputPath("account-ownership.png"),
+    fullPage: true,
+  });
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= innerWidth + 1,
+    ),
+  ).toBe(true);
+  await dialog.getByRole("button", { name: "保存", exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  const row = page
+    .locator(".list-row")
+    .filter({ has: page.getByText("家庭储蓄", { exact: true }) });
+  await expect(row.getByText("归属：小林", { exact: true })).toBeVisible();
+  expect(fixture.writes).toEqual([
+    {
+      path: "/accounts",
+      body: expect.objectContaining({
+        name: "家庭储蓄",
+        owner_user_id: "member-one",
+      }),
+    },
+  ]);
+});
+
 test("persistent login, desktop homepage and deep-link restore, logout clears session", async ({
   page,
 }) => {
@@ -988,33 +1098,46 @@ test("legacy repeated PDF references revalidate and import every row without mer
   expect(confirmations).toBe(1);
 });
 
-
-test("schedule catch-up gates spending and exposes recoverable failure", async ({ page }) => {
+test("schedule catch-up gates spending and exposes recoverable failure", async ({
+  page,
+}) => {
   await setup(page);
   await login(page);
   let release!: () => void;
-  const gate = new Promise<void>(resolve => { release = resolve; });
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
   const keys: string[] = [];
   let attempts = 0;
   let reportReads = 0;
-  page.on("request", r => { if (new URL(r.url()).pathname === "/api/v1/reports/spending") reportReads++; });
-  await page.route("**/api/v1/spending-schedules/materialize", async r => {
+  page.on("request", (r) => {
+    if (new URL(r.url()).pathname === "/api/v1/reports/spending") reportReads++;
+  });
+  await page.route("**/api/v1/spending-schedules/materialize", async (r) => {
     keys.push(r.request().headers()["idempotency-key"]);
     attempts++;
     if (attempts === 1) {
       await gate;
-      await r.fulfill({ status: 503, json: { error: { code: "UNAVAILABLE" } } });
-    } else await r.fulfill({ json: { schedules_current_through: "2026-09-20" } });
+      await r.fulfill({
+        status: 503,
+        json: { error: { code: "UNAVAILABLE" } },
+      });
+    } else
+      await r.fulfill({ json: { schedules_current_through: "2026-09-20" } });
   });
   await page.getByRole("link", { name: "日常支出" }).click();
   await expect(page.getByText("正在补记到期月度支出，请稍候…")).toBeVisible();
   expect(reportReads).toBe(0);
   release();
-  await expect(page.getByText("月度计划补记未完成，以下支出可能不完整。")).toBeVisible();
+  await expect(
+    page.getByText("月度计划补记未完成，以下支出可能不完整。"),
+  ).toBeVisible();
   await expect.poll(() => reportReads).toBe(1);
   await page.getByRole("button", { name: "重试补记" }).click();
   await expect(page.getByText("月度计划已检查至 2026-09-20")).toBeVisible();
   expect(keys[1]).toBe(keys[0]);
   expect(keys[2]).not.toBe(keys[0]);
-  await expect(page.getByText("月度计划补记未完成，以下支出可能不完整。")).toHaveCount(0);
+  await expect(
+    page.getByText("月度计划补记未完成，以下支出可能不完整。"),
+  ).toHaveCount(0);
 });

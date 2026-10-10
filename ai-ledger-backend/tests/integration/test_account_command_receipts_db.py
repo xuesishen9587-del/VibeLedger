@@ -93,6 +93,98 @@ class TestAccountCommandReceiptsDb(BaseDbTestCase):
 
         self.conn.commit()
 
+    def test_household_owner_assignment_preserves_shared_access_and_financial_history(self):
+        member_id, other_household, foreign_id = uuid4(), uuid4(), uuid4()
+        member_subject = f"member-{uuid4()}"
+        schema_repo.create_user(self.conn, user_id=member_id, auth_subject=member_subject,
+            email=f"{member_subject}@example.com", display_name="Second Member")
+        schema_repo.add_household_member(self.conn, household_id=self.household_id, user_id=member_id, role="member")
+        schema_repo.create_household(self.conn, household_id=other_household, name="Other Household")
+        schema_repo.create_user(self.conn, user_id=foreign_id, auth_subject=f"foreign-{uuid4()}",
+            email=f"foreign-{uuid4()}@example.com", display_name="Foreign Member")
+        schema_repo.add_household_member(self.conn, household_id=other_household, user_id=foreign_id, role="owner")
+        self.conn.commit()
+        member_token = f"valid.jwt.{uuid4().hex}"
+        self.static_verifier.register_token(member_token, {"sub": member_subject})
+        member_headers = {"Authorization": f"Bearer {member_token}"}
+
+        def command_headers(headers):
+            return {**headers, "Idempotency-Key": f"owner-test-{uuid4()}"}
+
+        # Names come from this family's real rows, not the Auth subject or an external family.
+        for headers in (self.browser_headers, member_headers):
+            response = self.client.get("/api/v1/household-members", headers=headers)
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual({m["user_id"] for m in response.json()["items"]}, {str(self.user_id), str(member_id)})
+            self.assertEqual({m["display_name"] for m in response.json()["items"]}, {"Receipt User", "Second Member"})
+            self.assertTrue(all(set(m) == {"user_id", "display_name", "status"} for m in response.json()["items"]))
+        self.assertEqual(self.client.get("/api/v1/household-members", headers=self.device_headers).status_code, 403)
+
+        created = self.client.post("/api/v1/accounts", headers=command_headers(self.browser_headers), json={
+            "name": "Unassigned Savings", "balance_scope": "Savings only", "account_type": "savings",
+            "currency": "CNY", "opened_on": "2026-01-01"})
+        self.assertEqual(created.status_code, 201, created.text)
+        account = created.json()
+        self.assertIsNone(account["owner_user_id"])
+        category = self.client.post("/api/v1/categories", headers=command_headers(self.browser_headers),
+            json={"name": "Purchase", "type": "expense"})
+        self.assertEqual(category.status_code, 201, category.text)
+        spending = self.client.post("/api/v1/transactions", headers=command_headers(self.browser_headers), json={
+            "transaction_type": "expense", "occurred_on": "2026-09-01", "original_amount": "12.00",
+            "original_currency": "CNY", "category_id": category.json()["id"], "account_id": account["id"]})
+        self.assertEqual(spending.status_code, 201, spending.text)
+        balance = self.client.post("/api/v1/balance-updates", headers=command_headers(self.browser_headers), json={
+            "observations": [{"account_id": account["id"], "balance": "100.00", "currency": "CNY",
+                "as_of": "2026-09-01T12:00:00+08:00", "time_basis": "explicit",
+                "expected_latest_snapshot_id": None, "expected_account_version": account["row_version"]}]})
+        self.assertEqual(balance.status_code, 201, balance.text)
+
+        def financial_rows():
+            with self.conn.cursor() as cur:
+                result = []
+                for table in ("transactions", "account_snapshots"):
+                    cur.execute(f"SELECT to_jsonb(t) FROM {table} t WHERE household_id=%s ORDER BY id", (self.household_id,))
+                    result.append(cur.fetchall())
+                return result
+
+        original_facts = financial_rows()
+        wealth_response = self.client.get("/api/v1/reports/wealth", headers=self.browser_headers)
+        self.assertEqual(wealth_response.status_code, 200, wealth_response.text)
+        wealth_before = wealth_response.json()
+        self.assertEqual(wealth_before["net_worth"], "100.00")
+        path = f"/api/v1/accounts/{account['id']}"
+        # Ordinary member can assign ownership. Both people retain shared reads.
+        headers = command_headers(member_headers)
+        payload = {"expected_version": account["row_version"], "owner_user_id": str(member_id)}
+        assigned = self.client.patch(path, headers=headers, json=payload)
+        self.assertEqual(assigned.status_code, 200, assigned.text)
+        self.assertEqual(assigned.json()["owner_user_id"], str(member_id))
+        self.assertEqual(self.client.patch(path, headers=headers, json=payload).json(), assigned.json())
+        for actor_headers in (self.browser_headers, member_headers):
+            self.assertEqual(self.client.get(path, headers=actor_headers).json()["owner_user_id"], str(member_id))
+            self.assertIn(account["id"], {a["id"] for a in self.client.get("/api/v1/accounts", headers=actor_headers).json()["items"]})
+        rejected = self.client.patch(path, headers=command_headers(self.browser_headers), json={
+            "expected_version": assigned.json()["row_version"], "owner_user_id": str(foreign_id)})
+        self.assertEqual(rejected.status_code, 422, rejected.text)
+        self.assertEqual(rejected.json()["error"]["code"], "USER_NOT_IN_HOUSEHOLD")
+        stale = self.client.patch(path, headers=command_headers(self.browser_headers), json={
+            "expected_version": account["row_version"], "owner_user_id": None})
+        self.assertEqual(stale.status_code, 409, stale.text)
+        cleared = self.client.patch(path, headers=command_headers(self.browser_headers), json={
+            "expected_version": assigned.json()["row_version"], "owner_user_id": None})
+        self.assertEqual(cleared.status_code, 200, cleared.text)
+        self.assertIsNone(cleared.json()["owner_user_id"])
+        self.assertEqual(financial_rows(), original_facts)
+        wealth_response = self.client.get("/api/v1/reports/wealth", headers=member_headers)
+        self.assertEqual(wealth_response.status_code, 200, wealth_response.text)
+        wealth_after = wealth_response.json()
+        for field in ("net_worth", "total_assets", "total_liabilities"):
+            self.assertEqual(wealth_after[field], wealth_before[field])
+        with self.conn.cursor() as cur:
+            cur.execute("SELECT after_data->>'owner_user_id' FROM audit_events WHERE household_id=%s "
+                "AND entity_type='account' AND entity_id=%s AND action='update' ORDER BY id", (self.household_id, account["id"]))
+            self.assertEqual(cur.fetchall(), [(str(member_id),), (None,)])
+
     def test_01_header_contract_missing_or_invalid_key_rejected(self):
         """
         Requirements 1-3:

@@ -17,6 +17,7 @@ from app.api.errors import (
 from app.api.routes.expenses import router as expenses_router
 from app.api.routes.ingestion import router as ingestion_router
 from app.api.routes.accounts import router as accounts_router
+from app.api.routes.household_members import router as household_members_router
 from app.api.routes.categories import router as categories_router
 from app.api.routes.transactions import router as transactions_router
 from app.api.routes.snapshots import router as snapshots_router
@@ -51,6 +52,7 @@ def create_app() -> FastAPI:
     app.include_router(expenses_router)
     app.include_router(ingestion_router)
     app.include_router(accounts_router)
+    app.include_router(household_members_router)
     app.include_router(categories_router)
     app.include_router(transactions_router)
     app.include_router(spending_reports_router)

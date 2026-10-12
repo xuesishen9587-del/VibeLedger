@@ -244,6 +244,8 @@ EXTRACTION RULES:
 3. original_amount: The exact total consumption amount charged, as a decimal string.
 4. original_currency: 3-letter currency code (e.g. CNY, USD, JPY, EUR). If currency is not explicitly clear, set to null. DO NOT default to CNY.
 5. from_account: The payment account label visible in the screenshot, or a canonical account name ONLY when distinctive evidence identifies it.
+   A clearly readable card suffix or holder name that uniquely identifies a configured account should yield its canonical name in from_account.
+   from_account must match a configured name or alias; candidate names alone, with null or an unrecognized label, cannot identify an account.
    account_candidates: List ALL compatible canonical account names supported by screenshot evidence (names, aliases, card suffixes, holder names).
    A shared label/alias or similar names without distinguishing evidence must retain all plausible accounts; never invent a unique canonical name.
    Ownership is server-provided context: uploader/other_member/unassigned/unknown. It is NOT screenshot evidence.

@@ -50,6 +50,9 @@ def match_account(value, accounts, uploader_user_id=None, candidates=None):
     evidence = [a for a in accounts if normalized and normalized in
                 (str(a["id"]).casefold(), a["name"].casefold(),
                  *(alias.casefold() for alias in a.get("aliases", [])))]
+    if not evidence:
+        # Candidate names and ownership alone do not establish screenshot evidence.
+        return None
     if candidates is None:
         matches = evidence
     else:

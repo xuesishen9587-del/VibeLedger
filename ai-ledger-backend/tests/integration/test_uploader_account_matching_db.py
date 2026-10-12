@@ -118,10 +118,11 @@ class TestUploaderAccountMatchingDb(BaseDbTestCase):
         self.assertEqual(self.stored_account(self.capture(0)), self.accounts[1]["id"])
 
     def test_multiple_similar_owned_accounts_keep_metadata_review(self):
-        schema.create_account(self.conn, self.hh, "First Person Spare Wallet", "spare wallet", "cash", "CNY",
-                              owner_user_id=self.users[0], opened_on=date(2026, 1, 1))
+        spare = schema.create_account(self.conn, self.hh, "First Person Spare Wallet", "spare wallet", "cash", "CNY",
+                                      owner_user_id=self.users[0], opened_on=date(2026, 1, 1))
+        schema.create_alias(self.conn, self.hh, spare["id"], "Wallet")
         self.conn.commit()
-        self.model.set_next_result(self.result(from_account="Mobile wallet",
+        self.model.set_next_result(self.result(from_account="Wallet",
             account_candidates=[self.accounts[0]["name"], "First Person Spare Wallet", self.accounts[1]["name"]]))
         response = self.capture(0)
         self.assertIsNone(self.stored_account(response))
@@ -139,12 +140,58 @@ class TestUploaderAccountMatchingDb(BaseDbTestCase):
         for changes in ({"from_account": None, "account_candidates": []},
                         {"from_account": "Unknown account", "account_candidates": None},
                         {"from_account": self.accounts[0]["name"], "account_candidates": [self.accounts[0]["name"]],
-                         "field_confidence": {"account": .4}}):
+                         "field_confidence": {**self.result().field_confidence, "account": .4}}):
             with self.subTest(changes=changes):
                 self.model.set_next_result(self.result(**changes))
                 response = self.capture(0)
                 self.assertIsNone(self.stored_account(response))
                 self.assertIn("MISSING_ACCOUNT", {w["code"] for w in response.json()["warnings"]})
+
+    def test_inconsistent_model_outputs_never_bind_a_candidate_only_account(self):
+        for changes in (
+            {"from_account": None, "account_candidates": [self.accounts[0]["name"]]},
+            {"from_account": "  ", "account_candidates": [self.accounts[0]["name"]]},
+            {"from_account": "Unrecognized label", "account_candidates": [self.accounts[0]["name"]]},
+            {"from_account": None, "account_candidates": [a["name"] for a in self.accounts]},
+            {"from_account": self.accounts[1]["name"], "account_candidates": [self.accounts[0]["name"]]},
+            {"from_account": "Wallet", "account_candidates": [self.accounts[0]["name"]]},
+            {"from_account": self.accounts[0]["name"], "account_candidates": []},
+        ):
+            with self.subTest(changes=changes):
+                self.model.set_next_result(self.result(**changes))
+                response = self.capture(0)
+                self.assertIsNone(self.stored_account(response))
+                self.assertIn("MISSING_ACCOUNT", {w["code"] for w in response.json()["warnings"]})
+        self.assertTrue(all(t["account_id"] is None for t in repo.rows(self.conn, "SELECT account_id FROM transactions")))
+
+    def test_explicit_card_suffix_alias_keeps_other_members_match(self):
+        schema.create_alias(self.conn, self.hh, self.accounts[1]["id"], "Card ending 4321")
+        self.conn.commit()
+        for candidates in (None, [self.accounts[1]["name"]]):
+            self.model.set_next_result(self.result(from_account="Card ending 4321", account_candidates=candidates))
+            self.assertEqual(str(self.stored_account(self.capture(0))), str(self.accounts[1]["id"]))
+
+    def test_low_account_confidence_preserves_unknown_on_otherwise_clear_expense(self):
+        self.model.set_next_result(self.result(from_account=self.accounts[0]["name"],
+            account_candidates=[self.accounts[0]["name"]],
+            field_confidence={**self.result().field_confidence, "account": .84}))
+        response = self.capture(0)
+        self.assertEqual(response.json()["status"], "committed", response.text)
+        self.assertIsNone(self.stored_account(response))
+        self.assertIn("MISSING_ACCOUNT", {w["code"] for w in response.json()["warnings"]})
+
+    def test_low_financial_confidence_cannot_auto_commit_with_candidate_only_account(self):
+        for field in ("amount", "currency", "date", "intent"):
+            with self.subTest(field=field):
+                self.model.set_next_result(self.result(from_account=None, account_candidates=[self.accounts[0]["name"]],
+                    field_confidence={**self.result().field_confidence, field: .4}))
+                key = str(uuid4())
+                response = self.capture(0, key)
+                self.assertEqual(response.json()["status"], "needs_confirmation", response.text)
+                self.assertIsNone(self.stored_account(response))
+                self.assertEqual(self.capture(0, key).json(), response.json())
+                self.assertEqual(repo.rows(self.conn, "SELECT count(*) n FROM transactions")[0]["n"], 0)
+                self.assertEqual(repo.rows(self.conn, "SELECT count(*) n FROM account_snapshots")[0]["n"], 0)
 
     def test_invalid_uploader_never_reaches_model_or_reserves_capture(self):
         self.tokens[0] = "vbl_test_not_registered"

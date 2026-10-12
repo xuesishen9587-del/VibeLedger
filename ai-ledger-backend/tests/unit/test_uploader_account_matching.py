@@ -23,10 +23,10 @@ class UploaderAccountMatchingTests(TestCase):
             actor = AuthContext("device", owner, uuid4(), "member", device_id=uuid4())
             self.assertEqual(match_account(" wallet ", self.accounts, actor.user_id), expected)
 
-    def test_similar_names_candidates_prefer_owner_without_a_common_alias(self):
+    def test_similar_names_without_a_supported_label_cannot_use_owner_as_evidence(self):
         names = [a["name"] for a in self.accounts[:2]]
-        for owner, expected in ((self.first, self.accounts[0]), (self.second, self.accounts[1])):
-            self.assertEqual(match_account("Mobile payment", self.accounts, owner, names), expected)
+        for owner in (self.first, self.second):
+            self.assertIsNone(match_account("Mobile payment", self.accounts, owner, names))
 
     def test_multiple_own_accounts_are_ambiguous_regardless_of_order(self):
         self.accounts[1]["owner_user_id"] = self.first
@@ -62,10 +62,25 @@ class UploaderAccountMatchingTests(TestCase):
             self.assertIsNone(match_account(value, self.accounts, self.first))
         self.assertIsNone(match_account("Wallet", self.accounts, self.first, []))
 
+    def test_candidates_alone_are_not_account_evidence(self):
+        for label in (None, "", "  ", "Unrecognized payment label"):
+            for candidates in (["First Wallet"], ["First Wallet", "Second Wallet"]):
+                with self.subTest(label=label, candidates=candidates):
+                    for owner in (None, self.first, self.second):
+                        self.assertIsNone(match_account(label, self.accounts, owner, candidates))
+
+    def test_high_model_confidence_cannot_replace_missing_account_evidence(self):
+        transport = ExpenseExtractionTransportSchema.model_validate({"from_account": None,
+            "account_candidates": ["First Wallet"], "field_confidence": {"account": .99}})
+        result = ExpenseExtractionResult.from_transport(transport)
+        draft = initial_draft(result, datetime(2026, 1, 2, tzinfo=timezone.utc),
+            {"timezone": "Asia/Singapore"}, self.accounts, [], self.first)
+        self.assertIsNone(draft["from_account"])
+
     def test_invalid_or_conflicting_candidates_cannot_fall_back_to_owner(self):
         for candidates in (["First Wallet", "Outside household"], ["Outside household"], ["Second Wallet"]):
             self.assertIsNone(match_account("First Wallet", self.accounts, self.first, candidates))
-        self.assertEqual(match_account(None, self.accounts, self.first, ["First Wallet", "First Wallet"]), self.accounts[0])
+        self.assertEqual(match_account("First Wallet", self.accounts, self.first, ["First Wallet", "First Wallet"]), self.accounts[0])
 
     def test_model_transport_preserves_candidates_and_confidence(self):
         transport = ExpenseExtractionTransportSchema.model_validate({
@@ -90,7 +105,8 @@ class UploaderAccountMatchingTests(TestCase):
                         ("uploader", "other_member", "unassigned"), ("First Person", "Second Person", None))]
         prompt = GeminiService(api_key="mock").build_system_prompt(accounts, [])
         for text in ("ownership: uploader", "ownership: other_member", "ownership: unassigned", "Second Person",
-                     "List ALL compatible", "Explicit screenshot evidence", "ownership must not inflate"):
+                     "List ALL compatible", "Explicit screenshot evidence", "ownership must not inflate",
+                     "card suffix", "candidate names alone"):
             self.assertIn(text, prompt)
         for secret in (str(self.first), str(self.second), "private@example.test", *(str(a["id"]) for a in accounts)):
             self.assertNotIn(secret, prompt)

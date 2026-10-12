@@ -18,6 +18,7 @@ _EXPENSE_EXTRACTION_TRANSPORT_SCHEMA = {
         "original_amount": {"type": ["string", "null"]},
         "original_currency": {"type": ["string", "null"]},
         "from_account": {"type": ["string", "null"]},
+        "account_candidates": {"type": ["array", "null"], "items": {"type": "string"}},
         "category": {"type": ["string", "null"]},
         "payment_mode": {"type": ["string", "null"]},
         "total_amount": {"type": ["string", "null"]},
@@ -39,7 +40,7 @@ _EXPENSE_EXTRACTION_TRANSPORT_SCHEMA = {
         "intent": {"type": "string", "enum": ["expense", "refund", "transfer", "repayment", "failed", "pending", "unknown"]},
         "date_evidence": {"type": "string", "enum": ["visible", "current_payment", "uncertain"]},
     },
-    "required": ["occurred_on", "merchant", "original_amount", "original_currency", "from_account", "category", "payment_mode", "total_amount", "total_periods", "confidence", "field_confidence", "intent", "date_evidence"],
+    "required": ["occurred_on", "merchant", "original_amount", "original_currency", "from_account", "account_candidates", "category", "payment_mode", "total_amount", "total_periods", "confidence", "field_confidence", "intent", "date_evidence"],
 }
 
 _EXPENSE_REVISION_TRANSPORT_SCHEMA = {
@@ -83,6 +84,7 @@ class ExpenseExtractionTransportSchema(BaseModel):
     original_amount: Optional[Decimal] = None
     original_currency: Optional[str] = None  # MUST NOT default to "CNY"
     from_account: Optional[str] = None
+    account_candidates: Optional[List[str]] = None
     category: Optional[str] = None
     payment_mode: Optional[str] = None  # MUST NOT default to "one_off"; defaults to None
     total_amount: Optional[Decimal] = None
@@ -103,6 +105,7 @@ class ExpenseExtractionResult(BaseModel):
     original_amount: Optional[Decimal] = None
     original_currency: Optional[str] = None  # MUST NOT default to "CNY"
     from_account: Optional[str] = None
+    account_candidates: Optional[List[str]] = None
     category: Optional[str] = None
     payment_mode: Optional[str] = None  # MUST NOT default to "one_off"; defaults to None
     total_amount: Optional[Decimal] = None
@@ -133,6 +136,7 @@ class ExpenseExtractionResult(BaseModel):
             original_amount=transport.original_amount,
             original_currency=transport.original_currency,
             from_account=transport.from_account,
+            account_candidates=transport.account_candidates,
             category=transport.category,
             payment_mode=transport.payment_mode,
             total_amount=transport.total_amount,
@@ -211,7 +215,9 @@ class GeminiService:
         acc_descriptions = []
         for a in accounts:
             aliases_str = f" (aliases: {', '.join(a.get('aliases', []))})" if a.get('aliases') else ""
-            acc_descriptions.append(f"- {a['name']} [{a['account_type']}, {a['currency']}]{aliases_str} (balance scope: {a.get('balance_scope') or 'unspecified'})")
+            ownership = a.get("ownership", "unknown")
+            owner_name = json.dumps(a.get("owner_name"), ensure_ascii=False)
+            acc_descriptions.append(f"- {a['name']} [{a['account_type']}, {a['currency']}]{aliases_str} (balance scope: {a.get('balance_scope') or 'unspecified'}) (ownership: {ownership}; owner name: {owner_name})")
 
         cat_descriptions = [f"- {c['name']}: {c.get('description') or ''}" for c in categories if c.get("category_type") == "expense"]
 
@@ -237,7 +243,17 @@ EXTRACTION RULES:
 2. merchant: The store, vendor, platform, or payee name.
 3. original_amount: The exact total consumption amount charged, as a decimal string.
 4. original_currency: 3-letter currency code (e.g. CNY, USD, JPY, EUR). If currency is not explicitly clear, set to null. DO NOT default to CNY.
-5. from_account: The name of the payment card, bank account, or wallet used. Match closely with available accounts or aliases.
+5. from_account: The payment account label visible in the screenshot, or a canonical account name ONLY when distinctive evidence identifies it.
+   A clearly readable card suffix or holder name that uniquely identifies a configured account should yield its canonical name in from_account.
+   from_account must match a configured name or alias; candidate names alone, with null or an unrecognized label, cannot identify an account.
+   account_candidates: List ALL compatible canonical account names supported by screenshot evidence (names, aliases, card suffixes, holder names).
+   A shared label/alias or similar names without distinguishing evidence must retain all plausible accounts; never invent a unique canonical name.
+   Ownership is server-provided context: uploader/other_member/unassigned/unknown. It is NOT screenshot evidence.
+   The server prefers a unique uploader-owned candidate only to break an otherwise ambiguous match.
+   Explicit screenshot evidence for another member's account takes priority; do not add the uploader's account just because they uploaded.
+   Unassigned accounts remain eligible. Multiple similar uploader-owned accounts must stay ambiguous.
+   With no reliable account evidence return from_account=null and account_candidates=[]; do not infer an account from identity alone.
+   field_confidence.account measures confidence in the observed label/candidate evidence, not certainty of a unique owner; ownership must not inflate it.
 6. category: The best matching expense category name from the available categories.
 7. payment_mode: Set to "installment" if the receipt explicitly shows a credit card installment purchase (e.g. 分期, split into N periods/months); otherwise "one_off". If unclear, use null.
 8. If payment_mode is "installment":

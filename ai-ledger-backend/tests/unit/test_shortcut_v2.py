@@ -6,7 +6,7 @@ import plistlib
 from http.client import RemoteDisconnected
 from threading import Thread
 from unittest import TestCase
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 import json
 
@@ -313,5 +313,26 @@ class ShortcutFlowTests(TestCase):
                 self.assertEqual(json.load(recovered)["status"], "committed")
             self.assertEqual(server.state.counts["uploads"], 1)
             self.assertEqual(server.state.counts["transactions"], 1)
+        finally:
+            server.shutdown(); server.server_close(); thread.join(timeout=2)
+
+    def test_real_http_not_found_then_cancel_prevents_late_capture(self):
+        server = mock_api.ThreadingHTTPServer(("127.0.0.1", 0), mock_api.Handler)
+        server.state = mock_api.State()
+        thread = Thread(target=server.serve_forever, daemon=True); thread.start()
+        origin = f"http://127.0.0.1:{server.server_port}/api/v1"
+        headers = {"Authorization": "Bearer " + shortcut.TEST_TOKEN, "Content-Type": "application/json"}
+        try:
+            with self.assertRaises(HTTPError) as error:
+                urlopen(Request(origin + "/ingestion-requests/by-key/absent-test-key", headers=headers), timeout=2)
+            with error.exception as response:
+                self.assertEqual(response.code, 404)
+                self.assertEqual(json.load(response)["error"]["code"], "REQUEST_NOT_FOUND")
+            with urlopen(Request(origin + "/ingestion-requests/by-key/absent-test-key/cancel", data=b"{}", headers=headers), timeout=2) as response:
+                self.assertEqual(json.load(response)["status"], "rejected")
+            payload = json.dumps({"idempotency_key": "absent-test-key", "note": ""}).encode()
+            with urlopen(Request(origin + "/expenses", data=payload, headers=headers), timeout=2) as response:
+                self.assertEqual(json.load(response)["status"], "rejected")
+            self.assertEqual(server.state.counts["uploads"], 0)
         finally:
             server.shutdown(); server.server_close(); thread.join(timeout=2)

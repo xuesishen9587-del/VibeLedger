@@ -119,9 +119,11 @@ class Handler(BaseHTTPRequestHandler):
         pass  # No paths, headers, images or notes in logs.
 
     def send_json(self, result):
-        # Always HTTP 200 in this mock; real 4xx/5xx iOS behavior is a separate test boundary.
         body = json.dumps(result, ensure_ascii=False).encode()
-        self.send_response(200)
+        code = (result.get("error") or {}).get("code")
+        status = {"REQUEST_NOT_FOUND": 404, "IDEMPOTENCY_KEY_REUSE": 409, "DRAFT_CHANGED": 409,
+                  "TEST_TOKEN_REQUIRED": 401, "INVALID_REQUEST": 422, "TEST_INPUT_TOO_LARGE": 413}.get(code, 200)
+        self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()

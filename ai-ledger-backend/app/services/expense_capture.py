@@ -16,6 +16,7 @@ from app.repositories import spending as repo, simplified_schema as schema
 from app.services import capture_receipts as receipts, spending_service as spending
 from app.services.durable_commands import compute_command_hash
 from app.services.spending_reports import prime_quote
+from app.services import expense_review
 
 
 def references(conn, household_id, *, uploader_user_id=None):
@@ -87,7 +88,7 @@ def confidence(draft, name):
     return isinstance(value, (float, int)) and math.isfinite(value) and .85 <= value <= 1
 
 
-def initial_draft(result, captured_at, household, accounts, categories, uploader_user_id=None):
+def initial_draft(result, captured_at, household, accounts, categories, uploader_user_id=None, *, note=None):
     data = result.model_dump(mode="json", exclude={"raw_response"})
     account = match_account(data.get("from_account"), accounts, uploader_user_id, data.get("account_candidates"))
     category = match(data.get("category"), categories)
@@ -101,7 +102,7 @@ def initial_draft(result, captured_at, household, accounts, categories, uploader
         "from_account": {"id": str(account["id"]), "name": account["name"]} if account else None,
         "category": {"id": str(category["id"]), "name": category["name"]} if category else None,
         "payment_mode": data.get("payment_mode"), "total_periods": data.get("total_periods"),
-        "remarks": None, "intent": data.get("intent", "unknown"), "date_source": date_source,
+        "remarks": (note or "").strip() or None, "intent": data.get("intent", "unknown"), "date_source": date_source,
         "date_evidence": data.get("date_evidence", "uncertain"), "field_confidence": {
             k: v for k, v in (data.get("field_confidence") or {}).items()
             if k in ("amount", "currency", "date", "account", "category", "intent", "total_periods")
@@ -111,19 +112,21 @@ def initial_draft(result, captured_at, household, accounts, categories, uploader
 
 def validate_draft(conn, actor, draft, request_row, *, confirming=False):
     draft = json.loads(json.dumps(draft, default=str))
+    draft.pop("review_in_web", None)  # Presentation state is recomputed from current references.
     accounts, categories = references(conn, actor.household_id)
     fallback = next((c for c in categories if c["is_fallback"]), None)
     if not fallback:
         fail("CATEGORY_CONFIGURATION", "An active Other category is required.", 409)
-    warnings, blocked = [], False
-    def warning(code, message, blocking=True):
-        nonlocal blocked
+    warnings, blocked, confirmation_blocked = [], False, False
+    def warning(code, message, blocking=True, *, confirmation_blocking=True):
+        nonlocal blocked, confirmation_blocked
         warnings.append({"code": code, "message": message})
         blocked |= blocking
+        confirmation_blocked |= confirmation_blocking
     if draft.get("intent") != "expense":
         warning("EXPENSE_INTENT_UNCERTAIN", "Confirm that this is an expense by correcting its intent.")
     elif not confirming and not confidence(draft, "intent"):
-        warning("EXPENSE_INTENT_UNCERTAIN", "Review whether this is an expense.")
+        warning("EXPENSE_INTENT_UNCERTAIN", "Review whether this is an expense.", confirmation_blocking=False)
     household = schema.get_household(conn, actor.household_id)
     for name, key, validator in (("amount", "original_amount", lambda: money(draft.get("original_amount"), draft.get("original_currency"))),
                                   ("date", "occurred_on", lambda: business_date(draft.get("occurred_on"), household))):
@@ -133,9 +136,9 @@ def validate_draft(conn, actor, draft, request_row, *, confirming=False):
             warning("INVALID_" + name.upper(), "Correct the expense " + name + ".")
         else:
             if not confirming and not confidence(draft, name):
-                warning("UNCERTAIN_" + name.upper(), "Review the expense " + name + ".")
+                warning("UNCERTAIN_" + name.upper(), "Review the expense " + name + ".", confirmation_blocking=False)
     if not confirming and not confidence(draft, "currency"):
-        warning("UNCERTAIN_CURRENCY", "Review the original currency.")
+        warning("UNCERTAIN_CURRENCY", "Review the original currency.", confirmation_blocking=False)
     account = match((draft.get("from_account") or {}).get("id"), accounts)
     if not confidence(draft, "account"):
         account = None
@@ -143,9 +146,9 @@ def validate_draft(conn, actor, draft, request_row, *, confirming=False):
     uncertain = not category or not confidence(draft, "category")
     if uncertain:
         category = fallback
-        warning("CATEGORY_UNCERTAIN", "Saved under Other; correct the category later.", False)
+        warning("CATEGORY_UNCERTAIN", "Saved under Other; correct the category later.", False, confirmation_blocking=False)
     if not account:
-        warning("MISSING_ACCOUNT", "Payment account unknown; correct it later.", False)
+        warning("MISSING_ACCOUNT", "Payment account unknown; correct it later.", False, confirmation_blocking=False)
     draft["from_account"] = {"id": str(account["id"]), "name": account["name"]} if account else None
     draft["category"] = {"id": str(category["id"]), "name": category["name"]}
     draft["category_uncertain"] = uncertain
@@ -172,9 +175,32 @@ def validate_draft(conn, actor, draft, request_row, *, confirming=False):
     ids = sorted({str(c["id"]) for c in candidates})
     if ids:
         warning("POSSIBLE_DUPLICATE", "Review matching expenses. Confirming records a separate purchase.",
-                not confirming or bool(set(ids) - set(draft.get("duplicate_ids", []))))
+                not confirming or bool(set(ids) - set(draft.get("duplicate_ids", []))), confirmation_blocking=False)
     draft["duplicate_ids"], draft["warnings"] = ids, warnings
+    draft["confirmation_ready"] = not confirmation_blocked
+    if draft["confirmation_ready"] and draft.get("action") == "use_schedule_period":
+        from app.services.spending_schedules import validate_capture_period
+        try:
+            validate_capture_period(conn, actor, draft, fields)
+        except HTTPException:
+            draft["confirmation_ready"] = False
+            draft["review_in_web"] = True
     return draft, fields, blocked
+
+
+def pending_response(conn, actor, row, *, recovery=False):
+    """Refresh expense presentation on reads/replays, without editing or acknowledging it."""
+    if row["status"] == "needs_confirmation" and row["request_kind"] == "expense":
+        try:
+            draft, _, _ = validate_draft(conn, actor, row["draft_payload"], row)
+        except HTTPException:
+            draft = {**row["draft_payload"], "confirmation_ready": False, "review_in_web": True}
+        # New duplicates must first be persisted by confirm/revise and reviewed at that version.
+        if set(draft.get("duplicate_ids", [])) - set(row["draft_payload"].get("duplicate_ids", [])):
+            draft["confirmation_ready"] = False
+            draft["review_in_web"] = True
+        row = {**row, "draft_payload": draft}
+    return receipts.response(row, recovery=recovery)
 
 
 def finalize(conn, actor, row, proposed, confirming=False):
@@ -188,13 +214,16 @@ def finalize(conn, actor, row, proposed, confirming=False):
         transaction = spending.create_record(conn, actor, row["id"], fields, source="shortcut",
             date_source=draft["date_source"], category_uncertain=draft["category_uncertain"])
     saved = spending.serialize(transaction)
-    message = f"{saved['original_amount']} {saved['original_currency']} · {saved.get('merchant') or 'Expense'}\n{saved['occurred_on']}"
+    message = expense_review.summary({**draft, "original_amount": saved["original_amount"],
+                                     "original_currency": saved["original_currency"],
+                                     "merchant": saved.get("merchant"), "occurred_on": saved["occurred_on"]}, saved=True)
     result = {"status": "committed", "request_id": str(row["id"]), "transaction_id": saved["id"],
         "payment_mode": transaction["payment_mode"], "display_summary": message,
         "row_version": saved["row_version"], "original_amount": saved["original_amount"],
-        "original_currency": saved["original_currency"], "warnings": draft["warnings"]}
+        "original_currency": saved["original_currency"], "warnings": draft["warnings"], **expense_review.terminal_fields()}
     if saved["reporting_amount"] is None:
         result["warnings"].append({"code": "REPORTING_FX_UNAVAILABLE", "message": "Original amount saved; reporting conversion is pending."})
+        result["display_summary"] += "\n原币已保存，报表汇率换算待补充。"
     return receipts.response(receipts.terminal(conn, actor, row, "committed", result))
 
 
@@ -221,14 +250,14 @@ def process(factory, actor, payload, model, fx_provider=None):
     with receipts.session(factory) as conn:
         row, inserted = receipts.reserve(conn, actor, payload["idempotency_key"], request_hash, digest, captured_at, payload.get("client_version"))
         if not inserted:
-            return receipts.response(row)
+            return pending_response(conn, actor, row)
         accounts, categories = references(conn, actor.household_id, uploader_user_id=actor.user_id)
         household = schema.get_household(conn, actor.household_id)
     try:
         # No database connection is alive here. The SDK has a 40s timeout and no retry.
         with request_context(row["id"]):
             result = model.extract_expense(raw, mime, payload.get("note"), accounts, categories, captured_at=captured_at)
-        proposed = initial_draft(result, captured_at, household, accounts, categories, actor.user_id)
+        proposed = initial_draft(result, captured_at, household, accounts, categories, actor.user_id, note=payload.get("note"))
         if time.monotonic() - started >= 45:
             with request_context(row["id"]):
                 log_failure("expense_extract", "capture_deadline", TimeoutError())
@@ -254,7 +283,7 @@ def process(factory, actor, payload, model, fx_provider=None):
         schema.acquire_household_finance_lock(conn, actor.household_id)
         receipts.authorize(conn, actor)
         if proposed["intent"] in ("transfer", "repayment", "failed", "refund") and confidence(proposed, "intent"):
-            return receipts.response(receipts.rejected(conn, actor, current, "This is not a spending purchase. Use Dashboard for refunds."))
+            return receipts.response(receipts.rejected(conn, actor, current, "这张截图不是可直接记账的消费，请到网页处理退款或其他记录。"))
         return finalize(conn, actor, current, proposed)
 
 

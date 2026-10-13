@@ -1,5 +1,6 @@
 from datetime import datetime
-from typing import Optional
+from typing import Any, Literal, Optional
+from uuid import UUID
 from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, ConfigDict, field_validator
@@ -34,11 +35,25 @@ class CreateExpenseRequest(BaseModel):
             raise ValueError("Capture timestamp requires a timezone.")
         return value
 
+
+class ExpenseCaptureResponse(BaseModel):
+    """Additive presentation contract; facts remain in draft and durable results."""
+    model_config = ConfigDict(extra="allow")
+    status: Literal["processing", "needs_confirmation", "committed", "rejected", "failed"]
+    request_id: UUID
+    display_summary: str
+    confirmation_ready: bool = Field(description="Whether the current draft passes confirm saving checks; not an AI confidence score. Confirm still checks current versions and data.")
+    next_action: Literal["confirm", "supplement", "review_in_web", "recover", "done"]
+    supplement_prompt: str
+    row_version: Optional[int] = None
+    draft: Optional[dict[str, Any]] = None
+    warnings: list[dict[str, Any]] = Field(default_factory=list)
+
 def capture_response(result):
     payload, status = result
     return JSONResponse(payload, status_code=status, headers={"Retry-After": "2"} if status == 202 else None)
 
-@router.post("")
+@router.post("", responses={200: {"model": ExpenseCaptureResponse}, 202: {"model": ExpenseCaptureResponse}})
 def create_expense(payload: CreateExpenseRequest, actor=Depends(require_device_auth),
                    conn=Depends(get_db_connection), model=Depends(get_capture_model), provider=Depends(get_fx_provider)):
     factory = capture_receipts.connection_factory(conn)

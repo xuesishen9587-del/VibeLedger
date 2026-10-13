@@ -51,7 +51,9 @@
 - 分类是可编辑的数据，不是固定 Literal 或独立规则引擎；稳定 ID 保留历史，fallback 可改显示名称但必须保持有效。初始分类的易混规则：儿童相关优先 Child；给父母现金属 Gift & Socials、为父母购买具体商品属 Parents；成人软件／AI 订阅属 Education；贷款本金不属支出，可辨识房贷利息属 Home & Utilities。完整种子直接查 bootstrap，不重复列全部分类。
 - 截图 JPEG／PNG 经严格 base64、类型、尺寸验证，当前上限 10 MiB／20 MP；外部识别超时与总截止时间有界，失败只写安全回执。
 - 自然语言 revise 只针对已存草稿，通过允许字段 patch 和本地验证，仍保持 needs_confirmation，不自动入账；失败不能覆盖原草稿／版本。
-- 初始 API 的 note 会参与识别，但当前初始草稿 remarks 为 null；自然语言 revise 不提供 remarks 字段。交易备注应通过结构化编辑保存，不能宣称识别备注会自动成为持久备注。
+- 初始 API 的 note 保持参与识别，并保存为交易 remarks；空白备注为 null。correction_note 仅修订草稿，自然语言 revise 不提供 remarks 字段，不覆盖初始备注；网页结构化编辑仍可显式修改 remarks。
+- 消费回执提供后端生成的 display_summary、confirmation_ready、next_action、supplement_prompt。confirmation_ready 表示草稿通过当前 confirm 保存检查，与 AI 置信度不同；实际提交仍重新核对版本、重复候选与引用。未知账户／分类不阻止已有效事实的人工确认。next_action 为 confirm／supplement／review_in_web／recover／done，终态 readiness=false；取消始终由客户端明确选择。分期草稿手机仅提醒到网页处理，原有网页确认规则保留。
+- GET／同键重放会只读校验旧消费草稿，补充展示字段，不修改版本／审计或确认新重复候选；新增重复候选与失效计划建议到网页处理。revise 返回更新摘要和版本后仍待确认，无重新上传图片或隐式保存。
 - 不同新键仍可能捕获同笔消费。当前候选匹配同家庭有效消费的业务日／原币金额／币种／规范化商户（大小写、空白归一），账户相同或任一未知；截图另检查相同图像摘要关联。候选必须审核，不静默删除；确认表示另记一笔，确认前新出现的候选须再次审阅。没有模糊商户／不同裁剪图片／跨设备新键的无条件 exactly-once 保证。
 - 明确分期证据必须选择 record_full_purchase 或 use_schedule_period，不能默认当一笔完整消费；选择计划月份需验证对应期次，不能随意绑定未来月。
 

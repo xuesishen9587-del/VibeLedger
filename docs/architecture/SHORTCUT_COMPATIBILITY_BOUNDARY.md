@@ -1,5 +1,7 @@
 # 实际 iPhone Shortcut 与后端核对
 
+本文件区分仍在使用的生产导出与 V2 候选，候选尚未部署或完成 iPhone 验收。生产只有一份 Shortcut 逻辑，下面的本地验收文件只是同一逻辑的测试配置，不是额外生产入口。
+
 生产导出为 `E:\VibeLedger_V2\shortcut\VibeLedger_Production_unsigned.shortcut`（从仓库根目录为 `../shortcut/VibeLedger_Production_unsigned.shortcut`）。用户已确认这是当前生产版本，两位家庭成员使用完全相同的逻辑，只维护这一份；各自手机本地保存不同设备 token，以区分设备身份。2026-10-09 的解析针对该文件，没有读取 token 文件，也没有将导出／解包内容／私有 endpoint／凭据提交到仓库。
 
 ## 解析依据
@@ -53,3 +55,43 @@
 另一条路径是 POST 发出后中断 → 重跑按原键 GET：committed 展示并清除，needs_confirmation 恢复菜单，processing 保留文件退出。后端 tombstone、迟到识别与重复确认已有集成测试；本轮未运行数据库测试，且这些测试不覆盖 iOS 动作。
 
 pending 文件仅保存键，没有原始图像／请求正文；不能据此重构同一 POST。换环境时 endpoint、token 和 pending-state 文件命名空间必须成组迁移；先解决原环境未确定键，不能只改 URL。
+
+## V2 候选与验收
+
+[转换器](../../scripts/shortcut_v2.py) 在本地将上述真实导出动作转换为候选（233 动作）。输入／输出必须在仓库外；不提交导出、解包文件、endpoint、token 或 File Provider 元数据。转换器拒绝不匹配的原始动作布局，自动化测试使用合成布局及模拟执行器，不是 Apple 运行时。原生产导出不覆盖。
+
+- 截图发生在备注输入之前；备注可留空，POST 明确发送 note=""，有内容保存到 remarks。取消输入表单会由 iOS 中止，不上传；没有 WithNote 入口。
+- 正常路径一次 POST 图片与一次 AI；committed 展示六项摘要后清理 pending，不增加确认步骤。
+- needs_confirmation 用 display_summary 作菜单提示，显示金额／币种、商户、分类、支付账户、日期、分期。后端 next_action 和 confirmation_ready 控制操作；Shortcut 不解析金融事实或自行猜账户。非就绪不显示确认保存，取消始终存在。
+- 补充输入展示 supplement_prompt，发送 correction_note 与 expected_version；空输入不发请求。返回更新摘要后在本地重复菜单，不额外 GET、不重传图片。confirm／reject 同样提交当前版本。单次最多 20 次菜单循环，达到上限保留 pending，下次继续。
+- 分期只显示“检测到分期，请在网页端处理。”和稍后／取消，不在手机选择方案。选择稍后保持 pending，网页处理后下次运行可恢复终态。
+- 网络／版本结果不明保留原键，可明确选择重新查询／稍后／取消；重跑先 GET 原键，无新图片／新键。404 cancel tombstone 保留；只有 committed／rejected／failed 清理文件，next_action=done 本身不作为清理依据。
+
+候选是 unsigned binary plist，修改后原签名失效。需在 Mac 用 [Apple 官方命令](https://support.apple.com/guide/shortcuts-mac/run-shortcuts-from-the-command-line-apd455c82f02/mac) 签名；anyone 模式会发送文件给 Apple 验证，签名前本地检查配置，签名后不要编辑文件字节。没有 Mac 远程访问，因此本轮不能代签名或宣称已导入成功。
+
+```sh
+shortcuts sign --mode anyone --input VibeLedger_V2_acceptance_unsigned.shortcut --output VibeLedger_V2_acceptance.shortcut
+```
+
+先签名 **acceptance 文件**，AirDrop 到 iPhone，命名为 VibeLedger V2 本地验收。它不读取生产 token，使用合成测试 token；pending 为 vibeledger-v2-acceptance-key.txt，与生产 pending-key.txt 分开。保留生产 Shortcut 作为现用版本。使用 Mac 与手机同一可信 Wi-Fi，Mac 在此开发分支仓库根目录运行（Python 3，无需后端依赖）：
+
+```sh
+python3 scripts/shortcut_acceptance_server.py --bind 0.0.0.0
+```
+
+Mac 浏览器打开 http://127.0.0.1:8089，选择场景；手机浏览器打开 http://MAC局域网IP:8089/sample 作为合成账单，每次启动验收 Shortcut 时填写 http://MAC局域网IP:8089/api/v1（允许本地网络访问）。仅用合成截图／备注。服务不连接数据库或 Gemini、不持久化图片／回执、不记录请求正文，退出即丢失回执；测试期间保持服务运行，结束后 Ctrl-C。默认仅绑定本机，显式 bind 为手机开放局域网；不要公网转发。场景只影响新请求，切换前先结束旧 pending。
+
+| iOS 27.0.1 场景 | 操作 | 预期与计数增量 |
+| --- | --- | --- |
+| 正常自动保存 | Mac 选 auto，手机运行、备注留空 | 直接展示六项摘要；无确认菜单；uploads+1、transactions+1 |
+| 空备注 | auto，备注空白继续 | 正常保存，摘要无备注；不报必填错误，无 revise／confirm |
+| 有备注 | auto，输入“测试备注” | 摘要含原备注；一次上传，无补充请求 |
+| 缺字段补充 | missing，选择补充信息，输入“38.50元，2026年10月1日，测试银行卡1234” | 提示缺金额／日期及账户线索；初始不出现确认；补充后摘要变为38.50并出现确认；明确确认才保存 |
+| revise 后重新确认 | revise，选择补充、输入“金额38.50元” | 新摘要返回原菜单；原备注不变；uploads+1、revisions+1、confirms+1、transactions+1 |
+| 网络异常恢复 | lost_response，手机上传后等待网络动作报错，再运行相同 Shortcut | 本地 pending 保留；第二次 GET 原键得到已保存摘要、清理；总 uploads+1、transactions+1，recoveries+1，无第二次上传 |
+
+补充核对：installment 只展示指定提醒和网页／取消；processing 可稍后或取消，不清理未知状态。查看 /metrics（网页链接），仅计数，不含图片、备注或密钥。回传场景名、成功／失败、脱敏提示和计数增量即可，不发送 token／原始 JSON。
+
+**验收边界：** 此本地 API 固定生成合成识别／修订结果，不解析自然语言，也统一用 HTTP 200 返回测试错误；真实 Gemini／数据库由后端测试覆盖。iPhone 导入、空输入、布尔条件、动态菜单、文件权限、URL 动作断网及真实 4xx／5xx 行为必须设备实测，当前均待用户回报。若动作中止，原键应仍存在。文件解析／模拟执行和 CI 不能替代真实手机验收。
+
+生产候选 VibeLedger_V2_unsigned.shortcut 保留原设备文件与 endpoint；仅在后端合入并获得部署授权、手机验收通过后再签名替换现用 Shortcut。当前不指向生产测试、不部署；避免用新版 Shortcut 调用尚不提供展示字段的旧后端。

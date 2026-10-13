@@ -37,6 +37,40 @@ def json_fields(fields):
         for key, value in fields.items()]}, "WFSerializationType": "WFDictionaryFieldValue"}
 
 
+def url_input(output):
+    """WFURL is a token STRING parameter, even when it holds one URL output.
+
+    Match the working production export: a URL action's typed magic variable
+    inside the string, not a bare WFTextTokenAttachment accepted by our simulator.
+    """
+    return {"Value": {"string": "\ufffc", "attachmentsByRange": {"{0, 1}": deepcopy(output["Value"])}},
+            "WFSerializationType": "WFTextTokenString"}
+
+
+def validate_http_bindings(workflow):
+    """Check native parameter shape/producer type, not just UUID existence.
+
+    This is structural validation against the production export, not an iOS runtime.
+    """
+    actions = workflow["WFWorkflowActions"]
+    for index, action in enumerate(actions):
+        if action["WFWorkflowActionIdentifier"] != PREFIX + "downloadurl":
+            continue
+        value = action["WFWorkflowActionParameters"].get("WFURL", {})
+        state = value.get("Value", {})
+        attachments = state.get("attachmentsByRange", {})
+        attachment = attachments.get("{0, 1}", {})
+        producer = actions[index - 1] if index else {}
+        params = producer.get("WFWorkflowActionParameters", {})
+        if not (value.get("WFSerializationType") == "WFTextTokenString"
+                and state.get("string") == "\ufffc" and set(attachments) == {"{0, 1}"}
+                and attachment.get("Type") == "ActionOutput" and attachment.get("OutputName") == "URL"
+                and attachment.get("OutputUUID") == params.get("UUID")
+                and producer.get("WFWorkflowActionIdentifier") == PREFIX + "url"
+                and params.get("WFURLActionURL", {}).get("WFSerializationType") == "WFTextTokenString"):
+            raise ValueError(f"HTTP action {index + 1} lacks a native URL action binding")
+
+
 class Builder:
     def __init__(self, original):
         self.original, self.actions, self.remap = original, [], {}
@@ -45,7 +79,8 @@ class Builder:
         parameters.setdefault("UUID", str(uuid4()).upper())
         self.actions.append({"WFWorkflowActionIdentifier": PREFIX + name,
                              "WFWorkflowActionParameters": parameters})
-        return {"Value": {"Type": "ActionOutput", "OutputUUID": parameters["UUID"], "OutputName": "Result"},
+        return {"Value": {"Type": "ActionOutput", "OutputUUID": parameters["UUID"],
+                          "OutputName": "URL" if name == "url" else "Result"},
                 "WFSerializationType": "WFTextTokenAttachment"}
 
     def clone(self, index):
@@ -101,8 +136,8 @@ class Builder:
         self.add(name, GroupingIdentifier=group, WFControlFlowMode=2)
 
     def http(self, suffix, fields=None, *, method="POST", initial=False):
-        url = self.add("url", WFURLActionURL=token_text(("BASE_URL",), *suffix))
-        params = {"WFURL": url, "WFHTTPHeaders": deepcopy(self.original[98]["WFWorkflowActionParameters"]["WFHTTPHeaders"])}
+        url = self.add("url", WFURLActionURL=token_text(("API_BASE_URL",), *suffix))
+        params = {"WFURL": url_input(url), "WFHTTPHeaders": deepcopy(self.original[98]["WFWorkflowActionParameters"]["WFHTTPHeaders"])}
         if method != "GET":
             params["WFHTTPMethod"] = method
         if initial:
@@ -162,7 +197,7 @@ class Builder:
 def build(workflow, *, acceptance=False):
     original = workflow["WFWorkflowActions"]
     # Refuse to silently patch a different export/layout.
-    expected = {1: "gettext", 3: "file", 7: "filter.files", 90: "takescreenshot", 99: "downloadurl", 155: "downloadurl"}
+    expected = {1: "gettext", 3: "file", 7: "filter.files", 90: "takescreenshot", 98: "url", 99: "downloadurl", 155: "downloadurl"}
     if len(original) != 176 or any(original[i-1]["WFWorkflowActionIdentifier"] != PREFIX + name for i, name in expected.items()):
         raise ValueError("Unsupported production export; inspect its layout before transforming.")
     b = Builder(original)
@@ -171,7 +206,7 @@ def build(workflow, *, acceptance=False):
         if acceptance and i == 1:
             action["WFWorkflowActionIdentifier"] = PREFIX + "ask"
             action["WFWorkflowActionParameters"] = {"UUID": action["WFWorkflowActionParameters"]["UUID"],
-                "WFAskActionPrompt": "本地验收服务器地址（Mac 局域网 IP，含 /api/v1）", "WFInputType": "Text",
+                "WFAskActionPrompt": "本地验收服务器地址（电脑局域网 IP，含 /api/v1）", "WFInputType": "Text",
                 "WFAskActionDefaultAnswer": "http://192.168.1.100:8089/api/v1"}
         if acceptance and i == 3:
             action["WFWorkflowActionIdentifier"] = PREFIX + "gettext"
@@ -182,6 +217,10 @@ def build(workflow, *, acceptance=False):
             filters[0]["Values"]["String"] = "vibeledger-v2-acceptance-key"
     count = b.actions[-1]["WFWorkflowActionParameters"]["UUID"]
     count_ref = {"Value": {"Type": "ActionOutput", "OutputUUID": count, "OutputName": "Count"}, "WFSerializationType": "WFTextTokenAttachment"}
+    # Production BASE_URL is an origin; the acceptance input already includes /api/v1.
+    # Materialize a URL in both profiles, without changing the private production origin.
+    api_url = b.add("url", WFURLActionURL=token_text(("BASE_URL",), *([] if acceptance else ["/api/v1"])))
+    b.set("API_BASE_URL", api_url)
     multiple = b.condition(count_ref, number=1, greater=True)
     b.message("发现多个待处理请求文件，请先核对文件；本次未上传截图。")
     b.stop()
@@ -248,6 +287,7 @@ def build(workflow, *, acceptance=False):
     b.message("本次操作已暂停；请求仍保留，下次运行可继续。")
     result = deepcopy(workflow)
     result["WFWorkflowActions"] = b.actions
+    validate_http_bindings(result)
     return result
 
 

@@ -58,7 +58,9 @@ pending 文件仅保存键，没有原始图像／请求正文；不能据此重
 
 ## V2 候选与验收
 
-[转换器](../../scripts/shortcut_v2.py) 在本地将上述真实导出动作转换为候选（233 动作）。输入／输出必须在仓库外；不提交导出、解包文件、endpoint、token 或 File Provider 元数据。转换器拒绝不匹配的原始动作布局，自动化测试使用合成布局及模拟执行器，不是 Apple 运行时。原生产导出不覆盖。
+[转换器](../../scripts/shortcut_v2.py) 在本地将上述真实导出动作转换为候选（235 动作）。输入／输出必须在仓库外；不提交导出、解包文件、endpoint、token 或 File Provider 元数据。转换器拒绝不匹配的原始动作布局，自动化测试使用合成布局及模拟执行器，不是 Apple 运行时。原生产导出不覆盖。
+
+首次 iOS 27.0.1 验收已成功签名并导入，但上传时 Get Contents of URL 未识别生成的 URL 输入。修订后的所有 HTTP 动作用原生产文件的 WFTextTokenString 参数包裹 URL 动作输出（OutputName=URL）；生成器及测试拒绝旧的裸 WFTextTokenAttachment。生产 origin 追加 /api/v1，验收输入已含 /api/v1，两者统一为 API_BASE_URL，所有请求只保留一次 API 前缀。结构核对不等于修订后已在手机运行成功，需重新签名／导入复核。
 
 - 截图发生在备注输入之前；备注可留空，POST 明确发送 note=""，有内容保存到 remarks。取消输入表单会由 iOS 中止，不上传；没有 WithNote 入口。
 - 正常路径一次 POST 图片与一次 AI；committed 展示六项摘要后清理 pending，不增加确认步骤。
@@ -73,17 +75,19 @@ pending 文件仅保存键，没有原始图像／请求正文；不能据此重
 shortcuts sign --mode anyone --input VibeLedger_V2_acceptance_unsigned.shortcut --output VibeLedger_V2_acceptance.shortcut
 ```
 
-先签名 **acceptance 文件**，AirDrop 到 iPhone，命名为 VibeLedger V2 本地验收。它不读取生产 token，使用合成测试 token；pending 为 vibeledger-v2-acceptance-key.txt，与生产 pending-key.txt 分开。保留生产 Shortcut 作为现用版本。使用 Mac 与手机同一可信 Wi-Fi，Mac 在此开发分支仓库根目录运行（Python 3，无需后端依赖）：
+先签名 **acceptance 文件**，AirDrop 到 iPhone，命名为 VibeLedger V2 本地验收。它不读取生产 token，使用合成测试 token；pending 为 vibeledger-v2-acceptance-key.txt，与生产 pending-key.txt 分开。保留生产 Shortcut 作为现用版本。服务支持 Windows 和 Mac（Python 3.9+，无需后端依赖）。电脑与手机使用同一可信局域网，在此开发分支仓库根目录运行：
 
 ```sh
 python3 scripts/shortcut_acceptance_server.py --bind 0.0.0.0
 ```
 
-Mac 浏览器打开 http://127.0.0.1:8089，选择场景；手机浏览器打开 http://MAC局域网IP:8089/sample 作为合成账单，每次启动验收 Shortcut 时填写 http://MAC局域网IP:8089/api/v1（允许本地网络访问）。仅用合成截图／备注。服务不连接数据库或 Gemini、不持久化图片／回执、不记录请求正文，退出即丢失回执；测试期间保持服务运行，结束后 Ctrl-C。默认仅绑定本机，显式 bind 为手机开放局域网；不要公网转发。场景只影响新请求，切换前先结束旧 pending。
+Windows PowerShell 使用已安装的真实 Python 路径启动同一脚本（例如 `& "C:\Users\Illidan\miniconda3\python.exe" -u scripts/shortcut_acceptance_server.py --bind 0.0.0.0 --port 8089`）；签名仍在 Mac 完成。
+
+电脑浏览器打开 http://127.0.0.1:8089，选择场景；手机浏览器打开 http://电脑局域网IP:8089/sample 作为合成账单，每次启动验收 Shortcut 时填写 http://电脑局域网IP:8089/api/v1（允许本地网络访问）。仅用合成截图／备注。服务不连接数据库或 Gemini、不持久化图片／回执、不记录请求正文，退出即丢失回执；测试期间保持服务运行，结束后 Ctrl-C。默认仅绑定本机，显式 bind 为手机开放局域网；不要公网转发。场景只影响新请求，切换前先结束旧 pending。
 
 | iOS 27.0.1 场景 | 操作 | 预期与计数增量 |
 | --- | --- | --- |
-| 正常自动保存 | Mac 选 auto，手机运行、备注留空 | 直接展示六项摘要；无确认菜单；uploads+1、transactions+1 |
+| 正常自动保存 | 电脑选 auto，手机运行、备注留空 | 直接展示六项摘要；无确认菜单；uploads+1、transactions+1 |
 | 空备注 | auto，备注空白继续 | 正常保存，摘要无备注；不报必填错误，无 revise／confirm |
 | 有备注 | auto，输入“测试备注” | 摘要含原备注；一次上传，无补充请求 |
 | 缺字段补充 | missing，选择补充信息，输入“38.50元，2026年10月1日，测试银行卡1234” | 提示缺金额／日期及账户线索；初始不出现确认；补充后摘要变为38.50并出现确认；明确确认才保存 |
@@ -92,8 +96,8 @@ Mac 浏览器打开 http://127.0.0.1:8089，选择场景；手机浏览器打开
 
 补充核对：installment 只展示指定提醒和网页／取消；processing 可稍后或取消，不清理未知状态。查看 /metrics（网页链接），仅计数，不含图片、备注或密钥。回传场景名、成功／失败、脱敏提示和计数增量即可，不发送 token／原始 JSON。
 
-附加 HTTP 404 复核：选择 processing，手机选稍后恢复，退出并重启 Mac 服务（清空合成回执），再运行手机 Shortcut。GET 返回真实 404／REQUEST_NOT_FOUND；若 iOS 将 JSON 交给后续动作，应发送原键 cancel tombstone 并清理；若 URL 动作中止，应保留 pending，回报该行为，不手动删除或换键。
+附加 HTTP 404 复核：选择 processing，手机选稍后恢复，退出并重启测试服务（清空合成回执），再运行手机 Shortcut。GET 返回真实 404／REQUEST_NOT_FOUND；若 iOS 将 JSON 交给后续动作，应发送原键 cancel tombstone 并清理；若 URL 动作中止，应保留 pending，回报该行为，不手动删除或换键。
 
-**验收边界：** 此本地 API 固定生成合成识别／修订结果，不解析自然语言；错误按场景返回 401／404／409／422 等状态，便于实际 iOS 复核。真实 Gemini／数据库由后端测试覆盖。iPhone 导入、空输入、布尔条件、动态菜单、文件权限及 URL 动作断网／HTTP 错误行为必须设备实测，当前均待用户回报。若动作中止，原键应仍存在。文件解析／模拟执行和 CI 不能替代真实手机验收。
+**验收边界：** 此本地 API 固定生成合成识别／修订结果，不解析自然语言；错误按场景返回 401／404／409／422 等状态，便于实际 iOS 复核。真实 Gemini／数据库由后端测试覆盖。首次导入与 Windows 服务启动已有用户／本机证据；修订后 URL 输入、空输入、布尔条件、动态菜单、文件权限及断网／HTTP 错误行为仍需设备实测。若动作中止，原键应仍存在。文件解析／模拟执行和 CI 不能替代真实手机验收。
 
 生产候选 VibeLedger_V2_unsigned.shortcut 保留原设备文件与 endpoint；仅在后端合入并获得部署授权、手机验收通过后再签名替换现用 Shortcut。当前不指向生产测试、不部署；避免用新版 Shortcut 调用尚不提供展示字段的旧后端。

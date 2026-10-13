@@ -8,6 +8,7 @@ from threading import Thread
 from unittest import TestCase
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+from urllib.parse import urlsplit
 import json
 
 
@@ -31,7 +32,7 @@ def fixture():
         actions[index-1] = {"WFWorkflowActionIdentifier": P + name, "WFWorkflowActionParameters": {"UUID": str(index), **params}}
     def out(i):
         return {"Value": {"Type": "ActionOutput", "OutputUUID": str(i)}}
-    action(1, "gettext", WFTextActionText="http://test.invalid/api/v1")
+    action(1, "gettext", WFTextActionText="http://test.invalid")
     action(2, "setvariable", WFVariableName="BASE_URL", WFInput=out(1))
     action(3, "file", WFFile="SYNTHETIC_TOKEN_FILE")
     action(4, "detect.text", WFInput=out(3))
@@ -55,7 +56,12 @@ def fixture():
     action(95, "image.convert", WFInput=out(94))
     action(96, "base64encode", WFInput=out(95))
     action(97, "setvariable", WFVariableName="IMAGE_BASE64", WFInput=out(96))
-    action(99, "downloadurl", WFHTTPHeaders=shortcut.json_fields({"Authorization": ("DEVICE_TOKEN",)}),
+    action(98, "url", WFURLActionURL=shortcut.token_text(("BASE_URL",), "/api/v1/expenses"))
+    # Non-private golden parameter shape transcribed from working production action 99.
+    action(99, "downloadurl", WFURL={"Value": {"string": "\ufffc", "attachmentsByRange": {
+        "{0, 1}": {"OutputUUID": "98", "Type": "ActionOutput", "OutputName": "URL"}}},
+        "WFSerializationType": "WFTextTokenString"},
+        WFHTTPHeaders=shortcut.json_fields({"Authorization": ("DEVICE_TOKEN",)}),
            WFJSONValues=shortcut.json_fields({"idempotency_key": ("NEW_KEY",), "captured_at": ("CAPTURED_AT",),
                "client_version": "old", "image": ("IMAGE_BASE64",)}))
     action(155, "downloadurl")
@@ -68,6 +74,7 @@ class Halt(Exception):
 
 class Simulator:
     def __init__(self, workflow, state, answers=(), choices=(), files=None):
+        shortcut.validate_http_bindings(workflow)
         self.actions = workflow["WFWorkflowActions"]
         self.state, self.answers, self.choices = state, iter(answers), iter(choices)
         self.files = {} if files is None else files
@@ -261,6 +268,64 @@ class ShortcutFlowTests(TestCase):
         filenames = [a["WFWorkflowActionParameters"].get("WFName") for a in actions]
         self.assertIn("vibeledger-v2-acceptance-key.txt", filenames)
         self.assertNotIn("pending-key.txt", filenames)
+
+    def test_every_http_uses_production_native_url_parameter_shape(self):
+        expected = fixture()["WFWorkflowActions"][98]["WFWorkflowActionParameters"]["WFURL"]
+        for acceptance in (False, True):
+            workflow = shortcut.build(fixture(), acceptance=acceptance)
+            workflow = plistlib.loads(plistlib.dumps(workflow, fmt=plistlib.FMT_BINARY))
+            endpoints = set()
+            for index, action in enumerate(workflow["WFWorkflowActions"]):
+                if action["WFWorkflowActionIdentifier"] != P + "downloadurl":
+                    continue
+                url = deepcopy(action["WFWorkflowActionParameters"]["WFURL"])
+                producer = workflow["WFWorkflowActions"][index-1]
+                uuid = producer["WFWorkflowActionParameters"]["UUID"]
+                self.assertEqual(url["Value"]["attachmentsByRange"]["{0, 1}"]["OutputUUID"], uuid)
+                url["Value"]["attachmentsByRange"]["{0, 1}"]["OutputUUID"] = "98"
+                self.assertEqual(url, expected)
+                endpoints.add(producer["WFWorkflowActionParameters"]["WFURLActionURL"]["Value"]["string"])
+            self.assertEqual(endpoints, {"\ufffc/expenses", "\ufffc/ingestion-requests/by-key/\ufffc",
+                "\ufffc/ingestion-requests/by-key/\ufffc/cancel", "\ufffc/ingestion-requests/\ufffc/reject",
+                "\ufffc/ingestion-requests/\ufffc/confirm", "\ufffc/ingestion-requests/\ufffc/revise"})
+
+    def test_native_validator_rejects_old_binding_even_with_correct_uuid(self):
+        for wrong in ("bare_attachment", "wrong_output_name", "text_producer"):
+            with self.subTest(wrong=wrong):
+                workflow = deepcopy(self.workflow)
+                index = next(i for i, a in enumerate(workflow["WFWorkflowActions"]) if a["WFWorkflowActionIdentifier"] == P + "downloadurl")
+                action = workflow["WFWorkflowActions"][index]["WFWorkflowActionParameters"]
+                if wrong == "bare_attachment":
+                    action["WFURL"] = {"Value": action["WFURL"]["Value"]["attachmentsByRange"]["{0, 1}"],
+                                       "WFSerializationType": "WFTextTokenAttachment"}
+                elif wrong == "wrong_output_name":
+                    action["WFURL"]["Value"]["attachmentsByRange"]["{0, 1}"]["OutputName"] = "Result"
+                else:
+                    workflow["WFWorkflowActions"][index-1]["WFWorkflowActionIdentifier"] = P + "gettext"
+                with self.assertRaisesRegex(ValueError, "native URL action binding"):
+                    Simulator(workflow, self.state)
+
+    def test_api_prefix_is_present_once_in_all_request_paths_in_both_profiles(self):
+        expected = ["/api/v1/expenses", "/api/v1/ingestion-requests/{id}/revise", "/api/v1/ingestion-requests/{id}/confirm"]
+        for acceptance in (False, True):
+            with self.subTest(acceptance=acceptance):
+                self.state = mock_api.State(); self.state.scenario = "missing"
+                answers = ["http://test.invalid/api/v1"] if acceptance else []
+                workflow = shortcut.build(fixture(), acceptance=acceptance)
+                flow = Simulator(workflow, self.state, answers=answers+["", "修订金额"], choices=["补充信息", "确认保存"]).run()
+                identity = next(iter(self.state.receipts.values()))["id"]
+                self.assertEqual([urlsplit(r[1]).path.replace(identity, "{id}") for r in flow.requests], expected)
+                saved_key = next(iter(self.state.receipts))
+                key_file = "vibeledger-v2-acceptance-key.txt" if acceptance else "pending-key.txt"
+                flow = Simulator(workflow, self.state, answers=answers, files={key_file: saved_key}).run()
+                self.assertEqual(urlsplit(flow.requests[0][1]).path, "/api/v1/ingestion-requests/by-key/"+saved_key)
+                self.state = mock_api.State(); self.state.scenario = "missing"
+                flow = Simulator(workflow, self.state, answers=answers+[""], choices=["取消"]).run()
+                self.assertTrue(urlsplit(flow.requests[-1][1]).path.startswith("/api/v1/ingestion-requests/"))
+                self.assertTrue(flow.requests[-1][1].endswith("/reject"))
+                flow = Simulator(workflow, self.state, answers=answers, files={key_file: "absent-key"}).run()
+                self.assertEqual([urlsplit(r[1]).path for r in flow.requests], [
+                    "/api/v1/ingestion-requests/by-key/absent-key", "/api/v1/ingestion-requests/by-key/absent-key/cancel"])
 
     def test_stale_confirm_preserves_key_then_requires_fresh_summary_review(self):
         self.state.scenario = "revise"

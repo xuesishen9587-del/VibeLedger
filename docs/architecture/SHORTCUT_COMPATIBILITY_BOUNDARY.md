@@ -81,7 +81,7 @@ shortcuts sign --mode anyone --input VibeLedger_V2_acceptance_unsigned.shortcut 
 python3 scripts/shortcut_acceptance_server.py --bind 0.0.0.0
 ```
 
-Windows PowerShell 使用已安装的真实 Python 路径启动同一脚本（例如 `& "C:\Users\Illidan\miniconda3\python.exe" -u scripts/shortcut_acceptance_server.py --bind 0.0.0.0 --port 8089`）；签名仍在 Mac 完成。
+Windows PowerShell 使用已安装的真实 Python 路径启动同一脚本（例如 `& "C:\path\to\python.exe" -u scripts/shortcut_acceptance_server.py --bind 0.0.0.0 --port 8089`，替换为自己的解释器路径）；签名仍在 Mac 完成。
 
 电脑浏览器打开 http://127.0.0.1:8089，选择场景；手机浏览器打开 http://电脑局域网IP:8089/sample 作为合成账单，每次启动验收 Shortcut 时填写 http://电脑局域网IP:8089/api/v1（允许本地网络访问）。仅用合成截图／备注。服务不连接数据库或 Gemini、不持久化图片／回执、不记录请求正文，退出即丢失回执；测试期间保持服务运行，结束后 Ctrl-C。默认仅绑定本机，显式 bind 为手机开放局域网；不要公网转发。场景只影响新请求，切换前先结束旧 pending。
 

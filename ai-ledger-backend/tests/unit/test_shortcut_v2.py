@@ -262,6 +262,42 @@ class ShortcutFlowTests(TestCase):
         self.assertIn("vibeledger-v2-acceptance-key.txt", filenames)
         self.assertNotIn("pending-key.txt", filenames)
 
+    def test_stale_confirm_preserves_key_then_requires_fresh_summary_review(self):
+        self.state.scenario = "revise"
+        action = self.state.action
+        first = True
+        def changed(identity, operation, payload):
+            nonlocal first
+            if first and operation == "confirm":
+                first = False
+                row = next(iter(self.state.receipts.values()))
+                row["version"] += 1
+                row["draft"]["original_amount"] = "48.50"
+            return action(identity, operation, payload)
+        self.state.action = changed
+        flow = Simulator(self.workflow, self.state, answers=[""], choices=["确认保存", "重新查询", "确认保存"]).run()
+        self.assertEqual([r[0] for r in flow.requests], ["POST", "POST", "GET", "POST"])
+        self.assertIn("金额：48.50 CNY", flow.menus[2][0])
+        self.assertEqual(flow.requests[-1][2]["expected_version"], "2")
+        self.assertEqual(self.state.counts["transactions"], 1)
+        self.assertFalse(flow.files)
+
+    def test_multiple_pending_files_prevents_upload_or_deletion(self):
+        files = {"pending-key-a.txt": "key-a", "pending-key-b.txt": "key-b"}
+        flow = Simulator(self.workflow, self.state, files=files).run()
+        self.assertEqual(len(files), 2)
+        self.assertFalse(flow.requests)
+        self.assertEqual(flow.screenshots, 0)
+
+    def test_unknown_response_is_not_shown_as_json_and_keeps_pending(self):
+        def malformed(payload):
+            return {"error": {"code": "unexpected", "details": "synthetic private details"}, "next_action": "done"}, False
+        self.state.capture = malformed
+        flow = Simulator(self.workflow, self.state, answers=[""], choices=["稍后恢复"]).run()
+        self.assertTrue(flow.files)
+        self.assertFalse(flow.summaries)
+        self.assertNotIn("synthetic private details", flow.menus[0][0])
+
     def test_real_http_lost_response_then_get_returns_receipt(self):
         server = mock_api.ThreadingHTTPServer(("127.0.0.1", 0), mock_api.Handler)
         server.state = mock_api.State(); server.state.scenario = "lost_response"

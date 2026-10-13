@@ -454,6 +454,29 @@ class TestS2CaptureDb(BaseDbTestCase):
             self.assertEqual(run_due(lambda: get_connection(self.test_schema)), {"processed": 0})
         self.assertEqual(repo.rows(self.conn, "SELECT count(*) AS n FROM transactions")[0]["n"], 1)
 
+    def test_saved_summary_for_existing_period_uses_actual_record(self):
+        category = schema.create_category(self.conn, self.hh, "Actual category", "expense")["id"]
+        self.conn.commit()
+        schedule = self.create_schedule({**self.schedule_body(), "category_id": str(category),
+            "merchant": "Actual merchant", "acknowledged_due_through": "2026-01-02"})
+        recorded = repo.rows(self.conn, "SELECT * FROM transactions")[0]
+        updated = self.client.patch(f"/api/v1/transactions/{recorded['id']}",
+            json={"expected_version": recorded["row_version"], "remarks": "Actual remarks"},
+            headers={"Idempotency-Key": str(uuid4())})
+        self.assertEqual(updated.status_code, 200, updated.text)
+        self.actor = self.device
+        self.model.set_next_result(self.result(payment_mode="installment"))
+        draft = self.capture(note="Attempted note").json()
+        self.edit(draft["request_id"], action="use_schedule_period", schedule_id=schedule["id"],
+                  period_no=1, expected_schedule_version=schedule["row_version"])
+        saved = self.client.post(f"/api/v1/ingestion-requests/{draft['request_id']}/confirm").json()
+        self.assertEqual(saved["status"], "committed")
+        self.assertIn("分类：Actual category", saved["display_summary"])
+        self.assertIn("商户：Actual merchant", saved["display_summary"])
+        self.assertIn("备注：Actual remarks", saved["display_summary"])
+        self.assertNotIn("Attempted note", saved["display_summary"])
+        self.assertEqual(repo.rows(self.conn, "SELECT count(*) AS n FROM transactions")[0]["n"], 1)
+
     def test_source_draft_is_consumed_atomically_and_replays(self):
         self.model.set_next_result(self.result(payment_mode="installment", total_periods=2))
         draft = self.capture().json()

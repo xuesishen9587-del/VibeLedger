@@ -214,9 +214,17 @@ def finalize(conn, actor, row, proposed, confirming=False):
         transaction = spending.create_record(conn, actor, row["id"], fields, source="shortcut",
             date_source=draft["date_source"], category_uncertain=draft["category_uncertain"])
     saved = spending.serialize(transaction)
-    message = expense_review.summary({**draft, "original_amount": saved["original_amount"],
-                                     "original_currency": saved["original_currency"],
-                                     "merchant": saved.get("merchant"), "occurred_on": saved["occurred_on"]}, saved=True)
+    # A selected schedule period can already exist. Summarize the actual record,
+    # including its references/remarks, rather than the attempted draft values.
+    display = {**draft, **{key: saved.get(key) for key in (
+        "original_amount", "original_currency", "merchant", "occurred_on", "remarks", "payment_mode")}}
+    for key, field, getter in (("category_id", "category", schema.get_category),
+                               ("account_id", "from_account", schema.get_account)):
+        identity = saved.get(key)
+        if str(identity) != str((draft.get(field) or {}).get("id")):
+            reference = getter(conn, actor.household_id, identity) if identity else None
+            display[field] = {"name": reference["name"]} if reference else None
+    message = expense_review.summary(display, saved=True)
     result = {"status": "committed", "request_id": str(row["id"]), "transaction_id": saved["id"],
         "payment_mode": transaction["payment_mode"], "display_summary": message,
         "row_version": saved["row_version"], "original_amount": saved["original_amount"],

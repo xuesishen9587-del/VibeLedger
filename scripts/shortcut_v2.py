@@ -310,7 +310,8 @@ def build(workflow, *, acceptance=False):
         group = b.condition(token("STATUS"), status)
         b.field("display_summary", "SUMMARY")
         b.show(token("SUMMARY"))
-        b.add("file.delete", WFInput=token("PENDING_FILE"))
+        # iOS 27.0.1 acceptance requires Delete Immediately for this provider file.
+        b.add("file.delete", WFInput=token("PENDING_FILE"), WFDeleteImmediatelyDelete=True)
         b.stop()
         b.end(group)
     draft = b.condition(token("STATUS"), "needs_confirmation")

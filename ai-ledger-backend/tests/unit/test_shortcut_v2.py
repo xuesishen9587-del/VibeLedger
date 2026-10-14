@@ -155,7 +155,10 @@ class Simulator:
             elif name == "ask": result = next(self.answers)
             elif name == "setitemname": result = p["WFName"]; self.files[result] = self.value(p["WFInput"])
             elif name == "documentpicker.save": result = self.value(p["WFInput"])
-            elif name == "file.delete": self.files.pop(self.value(p["WFInput"]))
+            elif name == "file.delete":
+                if p.get("WFDeleteImmediatelyDelete") is not True:
+                    raise AssertionError("Pending cleanup requires native Delete Immediately=true")
+                self.files.pop(self.value(p["WFInput"]))
             elif name == "previewdocument": self.summaries.append(self.value(p["WFInput"]))
             elif name == "url": result = self.value(p["WFURLActionURL"])
             elif name == "getvalueforkey":
@@ -278,6 +281,18 @@ class ShortcutFlowTests(TestCase):
         filenames = [a["WFWorkflowActionParameters"].get("WFName") for a in actions]
         self.assertIn("vibeledger-v2-acceptance-key.txt", filenames)
         self.assertNotIn("pending-key.txt", filenames)
+
+    def test_terminal_cleanup_explicitly_deletes_pending_immediately(self):
+        for acceptance in (False, True):
+            with self.subTest(acceptance=acceptance):
+                workflow = shortcut.build(fixture(), acceptance=acceptance)
+                actions = plistlib.loads(plistlib.dumps(workflow, fmt=plistlib.FMT_BINARY))["WFWorkflowActions"]
+                deletes = [a["WFWorkflowActionParameters"] for a in actions
+                           if a["WFWorkflowActionIdentifier"] == P + "file.delete"]
+                self.assertEqual(len(deletes), 3)  # committed, rejected, failed only
+                for params in deletes:
+                    self.assertIs(params.get("WFDeleteImmediatelyDelete"), True)
+                    self.assertEqual(params["WFInput"], shortcut.token("PENDING_FILE"))
 
     def test_every_http_uses_production_native_url_parameter_shape(self):
         expected = fixture()["WFWorkflowActions"][98]["WFWorkflowActionParameters"]["WFURL"]

@@ -75,6 +75,7 @@ class Halt(Exception):
 class Simulator:
     def __init__(self, workflow, state, answers=(), choices=(), files=None):
         shortcut.validate_http_bindings(workflow)
+        shortcut.validate_condition_bindings(workflow)
         self.actions = workflow["WFWorkflowActions"]
         self.state, self.answers, self.choices = state, iter(answers), iter(choices)
         self.files = {} if files is None else files
@@ -116,8 +117,14 @@ class Simulator:
                         self.block(i+1, finish)
                 elif name == "conditional":
                     left = self.value(p["WFInput"])
-                    right = int(p["WFNumberValue"]) if "WFNumberValue" in p else p["WFConditionalActionString"]
-                    yes = left > right if p["WFCondition"] == 2 else left == right
+                    code = p["WFCondition"]
+                    if code in (100, 101):
+                        present = left is not None and left != ""
+                        yes = present if code == 100 else not present
+                    elif code == 2:
+                        yes = left > float(p["WFNumberValue"])
+                    else:
+                        yes = left == p["WFConditionalActionString"]
                     split = splits[0] if splits else finish
                     if yes: self.block(i+1, split)
                     elif splits: self.block(split+1, finish)
@@ -137,7 +144,10 @@ class Simulator:
             elif name == "count": result = len(self.value(p["Input"]))
             elif name == "getitemfromlist": result = self.value(p["WFInput"])[0]
             elif name == "detect.text":
-                inp = self.value(p["WFInput"]); result = self.files.get(inp, inp) if isinstance(inp, str) else inp
+                inp = self.value(p["WFInput"])
+                inp = self.files.get(inp, inp) if isinstance(inp, str) else inp
+                result = "" if inp is None else str(inp)
+            elif name == "number": result = float(self.value(p["WFNumberActionNumber"]))
             elif name in ("image.resize", "image.convert", "base64encode", "detect.dictionary"): result = self.value(p.get("WFInput", p.get("WFImage")))
             elif name == "date" or name == "format.date": result = "2026-10-01T12:00:00+08:00"
             elif name == "number.random": result = 123456
@@ -304,6 +314,108 @@ class ShortcutFlowTests(TestCase):
                     workflow["WFWorkflowActions"][index-1]["WFWorkflowActionIdentifier"] = P + "gettext"
                 with self.assertRaisesRegex(ValueError, "native URL action binding"):
                     Simulator(workflow, self.state)
+
+    def test_all_string_conditions_match_production_get_text_then_if_shape(self):
+        # Non-private shape of production action 50, with UUID and literal normalized.
+        expected = {"WFControlFlowMode": 0, "WFCondition": 4, "WFConditionalActionString": "LITERAL",
+            "WFInput": {"Type": "Variable", "Variable": {"Value": {"Type": "ActionOutput",
+                "OutputUUID": "TEXT_UUID", "OutputName": "Text"}, "WFSerializationType": "WFTextTokenAttachment"}}}
+        literals, named_inputs = set(), set()
+        for acceptance in (False, True):
+            workflow = shortcut.build(fixture(), acceptance=acceptance)
+            actions = plistlib.loads(plistlib.dumps(workflow, fmt=plistlib.FMT_BINARY))["WFWorkflowActions"]
+            for index, action in enumerate(actions):
+                p = action["WFWorkflowActionParameters"]
+                if action["WFWorkflowActionIdentifier"] != P + "conditional" or p.get("WFControlFlowMode") != 0:
+                    continue
+                if p["WFCondition"] not in (4, 100, 101):
+                    continue
+                producer = actions[index-1]
+                self.assertEqual(producer["WFWorkflowActionIdentifier"], P + "detect.text")
+                ref = p["WFInput"]["Variable"]["Value"]
+                self.assertEqual(ref["OutputUUID"], producer["WFWorkflowActionParameters"]["UUID"])
+                self.assertEqual(ref["OutputName"], "Text")
+                source = producer["WFWorkflowActionParameters"]["WFInput"]["Value"]
+                if source.get("Type") == "Variable": named_inputs.add(source["VariableName"])
+                if p["WFCondition"] == 4:
+                    literals.add(p["WFConditionalActionString"])
+                    normalized = {k: deepcopy(v) for k, v in p.items() if k not in ("UUID", "GroupingIdentifier")}
+                    normalized["WFConditionalActionString"] = "LITERAL"
+                    normalized["WFInput"]["Variable"]["Value"]["OutputUUID"] = "TEXT_UUID"
+                    self.assertEqual(normalized, expected)
+                else:
+                    self.assertNotIn("WFConditionalActionString", p)
+                    self.assertNotIn("WFNumberValue", p)
+        self.assertEqual(literals, {"REQUEST_NOT_FOUND", "committed", "rejected", "failed", "needs_confirmation",
+                                    "review_in_web", "confirm", "supplement"})
+        self.assertTrue({"STATUS", "NEXT_ACTION", "NOTE", "CORRECTION_NOTE"} <= named_inputs)
+
+    def test_condition_validator_rejects_native_type_and_operand_mismatches(self):
+        mutations = ("raw_dictionary", "generic_result", "missing_literal", "empty_literal", "numeric_operand_on_text",
+                     "text_operand_on_number", "old_numeric_equality", "literal_on_presence", "missing_input_wrapper")
+        for wrong in mutations:
+            with self.subTest(wrong=wrong):
+                workflow = deepcopy(self.workflow)
+                code = 2 if wrong in ("text_operand_on_number", "old_numeric_equality") else 101 if wrong == "literal_on_presence" else 4
+                index = next(i for i, a in enumerate(workflow["WFWorkflowActions"]) if a["WFWorkflowActionIdentifier"] == P + "conditional"
+                    and a["WFWorkflowActionParameters"].get("WFControlFlowMode") == 0 and a["WFWorkflowActionParameters"]["WFCondition"] == code)
+                p = workflow["WFWorkflowActions"][index]["WFWorkflowActionParameters"]
+                if wrong == "raw_dictionary":
+                    # The UUID still exists, but its producer is Get Dictionary Value.
+                    p["WFInput"]["Variable"] = deepcopy(workflow["WFWorkflowActions"][index-1]["WFWorkflowActionParameters"]["WFInput"])
+                elif wrong == "generic_result": p["WFInput"]["Variable"]["Value"]["OutputName"] = "Result"
+                elif wrong == "missing_literal": p.pop("WFConditionalActionString")
+                elif wrong == "empty_literal": p["WFConditionalActionString"] = ""
+                elif wrong == "numeric_operand_on_text": p.pop("WFConditionalActionString"); p["WFNumberValue"] = "1"
+                elif wrong == "text_operand_on_number": p.pop("WFNumberValue"); p["WFConditionalActionString"] = "0"
+                elif wrong == "old_numeric_equality": p["WFCondition"] = 4
+                elif wrong == "literal_on_presence": p["WFConditionalActionString"] = ""
+                else: p["WFInput"] = p["WFInput"]["Variable"]
+                with self.assertRaisesRegex(ValueError, "native typed condition"):
+                    Simulator(workflow, self.state)
+
+    def test_readiness_uses_number_greater_than_zero_and_keeps_false_guard(self):
+        for flag, choice in ((True, "确认保存"), (False, "稍后恢复")):
+            with self.subTest(flag=flag):
+                self.state = mock_api.State(); self.state.scenario = "revise"
+                capture = self.state.capture
+                def response(payload):
+                    result, drop = capture(payload)
+                    result["confirmation_ready"] = flag
+                    return result, drop
+                self.state.capture = response
+                flow = Simulator(self.workflow, self.state, answers=[""], choices=[choice]).run()
+                self.assertEqual("确认保存" in flow.menus[0][1], flag)
+                self.assertEqual(self.state.counts["transactions"], int(flag))
+                self.assertEqual(bool(flow.files), not flag)
+        actions = self.workflow["WFWorkflowActions"]
+        numbers = [a for a in actions if a["WFWorkflowActionIdentifier"] == P + "number"]
+        self.assertEqual(len(numbers), 3)
+        self.assertTrue(any(a["WFWorkflowActionParameters"]["WFNumberActionNumber"]["Value"].get("VariableName") == "READY" for a in numbers))
+
+    def test_null_optional_inputs_use_presence_checks_without_extra_calls(self):
+        flow = Simulator(self.workflow, self.state, answers=[None]).run()
+        self.assertEqual(flow.requests[0][2]["note"], "")
+        self.state = mock_api.State(); self.state.scenario = "missing"
+        flow = Simulator(self.workflow, self.state, answers=["", None], choices=["补充信息", "取消"]).run()
+        self.assertEqual(self.state.counts["revisions"], 0)
+        self.assertEqual(len(flow.requests), 2)
+
+    def test_consumed_output_names_are_native_in_both_profiles(self):
+        def references(value):
+            if isinstance(value, dict):
+                if value.get("Type") == "ActionOutput": yield value
+                for item in value.values(): yield from references(item)
+            elif isinstance(value, list):
+                for item in value: yield from references(item)
+        for acceptance in (False, True):
+            workflow = shortcut.build(fixture(), acceptance=acceptance)
+            names = [r.get("OutputName") for r in references(workflow)]
+            self.assertNotIn("Result", names)
+            self.assertTrue({"Text", "Number", "Dictionary Value", "URL", "Dictionary", "Contents of URL", "Ask for Input"} <= set(names))
+            if acceptance:
+                self.assertEqual(workflow["WFWorkflowActions"][1]["WFWorkflowActionParameters"]["WFInput"]["Value"]["OutputName"], "Ask for Input")
+                self.assertEqual(workflow["WFWorkflowActions"][3]["WFWorkflowActionParameters"]["WFInput"]["Value"]["OutputName"], "Text")
 
     def test_api_prefix_is_present_once_in_all_request_paths_in_both_profiles(self):
         expected = ["/api/v1/expenses", "/api/v1/ingestion-requests/{id}/revise", "/api/v1/ingestion-requests/{id}/confirm"]

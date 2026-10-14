@@ -11,6 +11,11 @@ from uuid import uuid4
 
 PREFIX = "is.workflow.actions."
 TEST_TOKEN = "vibeledger-local-acceptance-only"
+# Names taken from the production export for consumed outputs; Number is the
+# native Number action's output. Control markers return no consumed output.
+OUTPUT_NAMES = {"url": "URL", "getvalueforkey": "Dictionary Value", "detect.text": "Text",
+                "gettext": "Text", "number": "Number", "downloadurl": "Contents of URL",
+                "detect.dictionary": "Dictionary", "ask": "Ask for Input", "getitemfromlist": "Item from List"}
 
 
 def token(name):
@@ -71,6 +76,44 @@ def validate_http_bindings(workflow):
             raise ValueError(f"HTTP action {index + 1} lacks a native URL action binding")
 
 
+def validate_condition_bindings(workflow):
+    """Validate the typed input and literal fields of every generated If.
+
+    String comparisons follow production's Get Text -> If Text shape. Empty
+    input uses a presence condition, never an unfilled comparison literal.
+    Numeric comparisons use a Number output and a numeric condition code.
+    """
+    actions = workflow["WFWorkflowActions"]
+    for index, action in enumerate(actions):
+        params = action["WFWorkflowActionParameters"]
+        if action["WFWorkflowActionIdentifier"] != PREFIX + "conditional" or params.get("WFControlFlowMode") != 0:
+            continue
+        wrapper = params.get("WFInput", {})
+        variable = wrapper.get("Variable", {})
+        attachment = variable.get("Value", {})
+        producer = actions[index - 1] if index else {}
+        source = producer.get("WFWorkflowActionParameters", {})
+        common = (wrapper.get("Type") == "Variable" and variable.get("WFSerializationType") == "WFTextTokenAttachment"
+                  and attachment.get("Type") == "ActionOutput" and attachment.get("OutputUUID") == source.get("UUID"))
+        code = params.get("WFCondition")
+        numeric_keys = {"WFNumberValue", "WFAnotherNumber"} & params.keys()
+        string = params.get("WFConditionalActionString")
+        text_source = (producer.get("WFWorkflowActionIdentifier") == PREFIX + "detect.text"
+                       and attachment.get("OutputName") == "Text" and "WFInput" in source)
+        valid = False
+        if code == 4:
+            valid = text_source and isinstance(string, str) and bool(string) and not numeric_keys
+        elif code in (100, 101):
+            valid = text_source and "WFConditionalActionString" not in params and not numeric_keys
+        elif code == 2:
+            valid = (producer.get("WFWorkflowActionIdentifier") == PREFIX + "number"
+                     and attachment.get("OutputName") == "Number" and "WFNumberActionNumber" in source
+                     and numeric_keys == {"WFNumberValue"} and "WFConditionalActionString" not in params
+                     and isinstance(params["WFNumberValue"], str) and bool(params["WFNumberValue"]))
+        if not (common and valid):
+            raise ValueError(f"If action {index + 1} lacks a native typed condition")
+
+
 class Builder:
     def __init__(self, original):
         self.original, self.actions, self.remap = original, [], {}
@@ -80,7 +123,7 @@ class Builder:
         self.actions.append({"WFWorkflowActionIdentifier": PREFIX + name,
                              "WFWorkflowActionParameters": parameters})
         return {"Value": {"Type": "ActionOutput", "OutputUUID": parameters["UUID"],
-                          "OutputName": "URL" if name == "url" else "Result"},
+                          "OutputName": OUTPUT_NAMES.get(name, "Result")},
                 "WFSerializationType": "WFTextTokenAttachment"}
 
     def clone(self, index):
@@ -120,11 +163,19 @@ class Builder:
 
     def condition(self, value, equals=None, *, number=None, greater=False):
         group = str(uuid4()).upper()
+        if number is not None:
+            if not greater:
+                raise ValueError("Use an explicit numeric inequality, not text equality with a numeric operand")
+            value = self.add("number", WFNumberActionNumber=value)
+            code = 2
+        else:
+            value = self.add("detect.text", WFInput=value)
+            code = 101 if equals == "" else 4
         params = {"GroupingIdentifier": group, "WFControlFlowMode": 0,
-                  "WFInput": {"Type": "Variable", "Variable": value}, "WFCondition": 2 if greater else 4}
+                  "WFInput": {"Type": "Variable", "Variable": value}, "WFCondition": code}
         if number is not None:
             params["WFNumberValue"] = str(number)
-        else:
+        elif code == 4:
             params["WFConditionalActionString"] = equals
         self.add("conditional", **params)
         return group
@@ -212,6 +263,9 @@ def build(workflow, *, acceptance=False):
             action["WFWorkflowActionIdentifier"] = PREFIX + "gettext"
             action["WFWorkflowActionParameters"] = {"UUID": action["WFWorkflowActionParameters"]["UUID"],
                                                      "WFTextActionText": TEST_TOKEN}
+        if acceptance and i in (2, 4):
+            # Their producers changed from Text/File to Ask/Text in this profile.
+            action["WFWorkflowActionParameters"]["WFInput"]["Value"]["OutputName"] = "Ask for Input" if i == 2 else "Text"
         if acceptance and i == 7:
             filters = action["WFWorkflowActionParameters"]["WFContentItemFilter"]["Value"]["WFActionParameterFilterTemplates"]
             filters[0]["Values"]["String"] = "vibeledger-v2-acceptance-key"
@@ -267,7 +321,8 @@ def build(workflow, *, acceptance=False):
     b.menu(["稍后在网页处理", "取消"], token_text(("SUMMARY",), "\n", ("SUPPLEMENT_PROMPT",)), [b.later, b.cancel_draft])
     b.otherwise(web)
     action = b.condition(token("NEXT_ACTION"), "confirm")
-    ready = b.condition(token("READY"), number=1)
+    # JSON boolean -> Number: true=1, false=0. No localized Yes/True text comparison.
+    ready = b.condition(token("READY"), number=0, greater=True)
     b.menu(["确认保存", "补充信息", "取消"], token_text(("SUMMARY",)), [b.confirm, b.supplement, b.cancel_draft])
     b.otherwise(ready)
     b.menu(["重新查询", "稍后恢复", "取消"], "确认条件已变化，请重新查询。", [b.recover, b.later, b.cancel_key])
@@ -288,6 +343,7 @@ def build(workflow, *, acceptance=False):
     result = deepcopy(workflow)
     result["WFWorkflowActions"] = b.actions
     validate_http_bindings(result)
+    validate_condition_bindings(result)
     return result
 
 

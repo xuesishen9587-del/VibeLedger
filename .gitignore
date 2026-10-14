@@ -10,6 +10,8 @@ venv_dashboard/
 *.env
 *.local.json
 **/*.local.json
+# Private iPhone workflows and signed exports stay outside Git.
+*.shortcut
 
 # Python caching & system files
 __pycache__/

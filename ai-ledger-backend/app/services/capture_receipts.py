@@ -5,6 +5,7 @@ from uuid import uuid4
 from app.db import get_connection
 from app.domain.spending import fail
 from app.repositories import spending as repo, simplified_schema as schema
+from app.services import expense_review
 
 TERMINAL = {"committed", "rejected", "failed"}
 
@@ -55,18 +56,26 @@ def get(conn, actor, identity, lock=False):
 
 
 def response(row, recovery=False):
+    expense = row.get("request_kind") == "expense"
     if row["status"] in TERMINAL:
         if recovery and row["status"] == "failed":
             return {"status": "failed", "request_id": str(row["id"]), "failure_code": row["failure_code"],
-                    "row_version": row["row_version"], "display_summary": "Capture failed. You may capture again with a new key."}, 200
-        return row["response_payload"], row["response_http_status"]
+                    "row_version": row["row_version"], "display_summary": ("识别未完成，本次请求已结束。核实后可重新记账。" if expense else "Capture failed. You may capture again with a new key."),
+                    **(expense_review.terminal_fields() if expense else {})}, 200
+        result = row["response_payload"]
+        if expense:
+            result = {**result, **expense_review.terminal_fields()}
+            if row["status"] == "failed":
+                result.setdefault("display_summary", "识别未完成，请保留请求编号并恢复查询。")
+        return result, row["response_http_status"]
     if row["status"] == "processing":
         return {"status": "processing", "request_id": str(row["id"]), "row_version": row["row_version"],
-                "display_summary": "Capture is processing. Keep this request key."}, 202
+                "display_summary": ("识别正在处理中，请保留本次请求，稍后运行以恢复。" if expense else "Capture is processing. Keep this request key."),
+                **({"confirmation_ready": False, "next_action": "recover", "supplement_prompt": ""} if expense else {})}, 202
     draft = row["draft_payload"]
     return {"status": "needs_confirmation", "request_id": str(row["id"]), "row_version": row["row_version"],
             "draft": draft, "warnings": draft.get("warnings", []),
-            "display_summary": "Please review the expense before saving."}, 200
+            **(expense_review.presentation(draft) if expense else {"display_summary": "Please review the expense before saving."})}, 200
 
 
 def reserve(conn, actor, key, request_hash=None, digest=None, captured_at=None, client_version=None, cancel=False, *, request_kind="expense", operation="POST /api/v1/expenses"):
@@ -108,5 +117,7 @@ def terminal(conn, actor, row, status, payload, http_status=200, failure_code=No
 
 
 def rejected(conn, actor, row, message="Capture cancelled."):
+    if row.get("request_kind") == "expense" and message == "Capture cancelled.":
+        message = "已取消本次记账。"
     return terminal(conn, actor, row, "rejected", {"status": "rejected", "request_id": str(row["id"]),
                                                   "display_summary": message})

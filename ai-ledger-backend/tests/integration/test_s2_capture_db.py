@@ -70,6 +70,79 @@ class TestS2CaptureDb(BaseDbTestCase):
         self.assertEqual(repo.rows(self.conn, "SELECT count(*) AS n FROM transactions")[0]["n"], 1)
         self.assertEqual(repo.rows(self.conn, "SELECT count(*) AS n FROM account_snapshots")[0]["n"], 0)
 
+    def test_shortcut_empty_note_auto_saves_with_terminal_presentation(self):
+        saved = self.capture(note="").json()
+        self.assertEqual(saved["status"], "committed")
+        self.assertEqual(saved["next_action"], "done")
+        self.assertFalse(saved["confirmation_ready"])
+        row = repo.get(self.conn, self.hh, saved["transaction_id"])
+        self.assertIsNone(row["remarks"])
+        for label in ("金额：28.50 CNY", "商户：Cafe", "分类：Other", "支付账户：未识别", "日期：2026-01-02", "分期：非分期"):
+            self.assertIn(label, saved["display_summary"])
+        self.assertEqual(self.model.call_count, 1)
+
+    def test_shortcut_note_is_saved_without_becoming_a_correction(self):
+        saved = self.capture(note="购买手机").json()
+        self.assertEqual(saved["status"], "committed")
+        row = repo.get(self.conn, self.hh, saved["transaction_id"])
+        self.assertEqual(row["remarks"], "购买手机")
+        self.assertIn("备注：购买手机", saved["display_summary"])
+        self.assertEqual(self.model.call_count, 1)
+
+    def test_shortcut_supplement_refreshes_summary_then_requires_explicit_confirm(self):
+        self.model.set_next_result(self.result(original_amount=None, occurred_on=None, payment_mode=None))
+        draft = self.capture(note="用户备注").json()
+        self.assertFalse(draft["confirmation_ready"])
+        self.assertEqual(draft["next_action"], "supplement")
+        for label in ("金额", "日期", "一次性或分期", "银行名称和卡尾号"):
+            self.assertIn(label, draft["supplement_prompt"])
+        self.model.set_next_revision_result(ExpenseRevisionResult(original_amount=Decimal("4924.00"),
+            occurred_on=date(2026, 1, 2), payment_mode="one_off", merchant="测试商户"))
+        identity = draft["request_id"]
+        revised = self.client.post(f"/api/v1/ingestion-requests/{identity}/revise", json={
+            "expected_version": draft["row_version"], "correction_note": "4924元，2026年1月2日，一次性付款"}).json()
+        self.assertEqual(revised["status"], "needs_confirmation")
+        self.assertTrue(revised["confirmation_ready"])
+        self.assertEqual(revised["next_action"], "confirm")
+        self.assertGreater(revised["row_version"], draft["row_version"])
+        self.assertIn("金额：4924.00 CNY", revised["display_summary"])
+        self.assertIn("商户：测试商户", revised["display_summary"])
+        self.assertEqual(revised["draft"]["remarks"], "用户备注")
+        self.assertEqual(repo.rows(self.conn, "SELECT count(*) AS n FROM transactions")[0]["n"], 0)
+        self.assertEqual(self.model.call_count, 2)
+        self.assertEqual(self.model.revision_call_count, 1)
+        saved = self.client.post(f"/api/v1/ingestion-requests/{identity}/confirm",
+            json={"expected_version": revised["row_version"]}).json()
+        self.assertEqual(saved["status"], "committed")
+        self.assertEqual(saved["next_action"], "done")
+        self.assertEqual(repo.get(self.conn, self.hh, saved["transaction_id"])["remarks"], "用户备注")
+        self.assertEqual(self.model.call_count, 2)
+
+    def test_shortcut_get_revalidates_legacy_draft_without_mutation(self):
+        draft = self.draft()
+        identity = draft["request_id"]
+        repo.rows(self.conn, "UPDATE ingestion_requests SET draft_payload=draft_payload-'confirmation_ready' "
+            "WHERE id=%s RETURNING id", (identity,))
+        self.conn.commit()
+        audit_before = repo.rows(self.conn, "SELECT count(*) AS n FROM audit_events")[0]["n"]
+        recovered = self.client.get(f"/api/v1/ingestion-requests/{identity}").json()
+        self.assertEqual(recovered["next_action"], "supplement")
+        self.assertFalse(recovered["confirmation_ready"])
+        self.assertEqual(recovered["row_version"], draft["row_version"])
+        stored = repo.rows(self.conn, "SELECT draft_payload FROM ingestion_requests WHERE id=%s", (identity,))[0]
+        self.assertNotIn("confirmation_ready", stored["draft_payload"])
+        self.assertEqual(repo.rows(self.conn, "SELECT count(*) AS n FROM audit_events")[0]["n"], audit_before)
+
+    def test_shortcut_installment_goes_to_web_without_writing_purchase(self):
+        self.model.set_next_result(self.result(payment_mode="installment", total_periods=12))
+        draft = self.capture().json()
+        self.assertEqual(draft["status"], "needs_confirmation")
+        self.assertFalse(draft["confirmation_ready"])
+        self.assertEqual(draft["next_action"], "review_in_web")
+        self.assertEqual(draft["supplement_prompt"], "检测到分期，请在网页端处理。")
+        self.assertIn("分期：12期", draft["display_summary"])
+        self.assertEqual(repo.rows(self.conn, "SELECT count(*) AS n FROM transactions")[0]["n"], 0)
+
     def test_metadata_fallback_commits_with_both_review_reasons(self):
         self.model.set_next_result(self.result(category="Unrecognized", from_account="Unknown"))
         response = self.capture()
@@ -211,6 +284,9 @@ class TestS2CaptureDb(BaseDbTestCase):
         self.model.set_next_result(self.result())
         other = self.capture().json()
         self.assertEqual(other["status"], "committed")
+        recovered = self.client.get(f"/api/v1/ingestion-requests/{draft['request_id']}").json()
+        self.assertFalse(recovered["confirmation_ready"])
+        self.assertEqual(recovered["next_action"], "review_in_web")
         response = self.client.post(f"/api/v1/ingestion-requests/{draft['request_id']}/confirm").json()
         self.assertEqual(response["status"], "needs_confirmation")
         self.assertIn(other["transaction_id"], response["draft"]["duplicate_ids"])
@@ -376,6 +452,29 @@ class TestS2CaptureDb(BaseDbTestCase):
         self.assertEqual(response.json()["status"], "committed")
         with patch("app.services.spending_schedules.local_today", return_value=date(2026, 1, 2)):
             self.assertEqual(run_due(lambda: get_connection(self.test_schema)), {"processed": 0})
+        self.assertEqual(repo.rows(self.conn, "SELECT count(*) AS n FROM transactions")[0]["n"], 1)
+
+    def test_saved_summary_for_existing_period_uses_actual_record(self):
+        category = schema.create_category(self.conn, self.hh, "Actual category", "expense")["id"]
+        self.conn.commit()
+        schedule = self.create_schedule({**self.schedule_body(), "category_id": str(category),
+            "merchant": "Actual merchant", "acknowledged_due_through": "2026-01-02"})
+        recorded = repo.rows(self.conn, "SELECT * FROM transactions")[0]
+        updated = self.client.patch(f"/api/v1/transactions/{recorded['id']}",
+            json={"expected_version": recorded["row_version"], "remarks": "Actual remarks"},
+            headers={"Idempotency-Key": str(uuid4())})
+        self.assertEqual(updated.status_code, 200, updated.text)
+        self.actor = self.device
+        self.model.set_next_result(self.result(payment_mode="installment"))
+        draft = self.capture(note="Attempted note").json()
+        self.edit(draft["request_id"], action="use_schedule_period", schedule_id=schedule["id"],
+                  period_no=1, expected_schedule_version=schedule["row_version"])
+        saved = self.client.post(f"/api/v1/ingestion-requests/{draft['request_id']}/confirm").json()
+        self.assertEqual(saved["status"], "committed")
+        self.assertIn("分类：Actual category", saved["display_summary"])
+        self.assertIn("商户：Actual merchant", saved["display_summary"])
+        self.assertIn("备注：Actual remarks", saved["display_summary"])
+        self.assertNotIn("Attempted note", saved["display_summary"])
         self.assertEqual(repo.rows(self.conn, "SELECT count(*) AS n FROM transactions")[0]["n"], 1)
 
     def test_source_draft_is_consumed_atomically_and_replays(self):

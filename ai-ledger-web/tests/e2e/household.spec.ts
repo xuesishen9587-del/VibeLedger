@@ -789,6 +789,47 @@ test("persistent login, desktop homepage and deep-link restore, logout clears se
   await page.reload();
   await expect(page.getByRole("heading", { name: "登录" })).toBeVisible();
 });
+test("balance editor offers read-only signed credit estimate and only fills after user click", async ({ page }) => {
+  const fixture = await setup(page);
+  await page.route("**/api/v1/reports/balance-estimates", (route) =>
+    route.fulfill({ json: { as_of: "2026-10-15T12:00:00Z", items: [{
+      account_id: "account", currency: "CNY", status: "ready",
+      snapshot_id: "snapshot", baseline_date: "2026-10-01", baseline_balance: "-100.00",
+      recorded_change: "-5.00", estimated_balance: "-105.00",
+      transaction_count: 2, same_day_count: 0, currency_mismatch_count: 0,
+    }] } }),
+  );
+  await login(page);
+  await page.goto("/#/wealth");
+  await page.getByRole("button", { name: /更新余额：家庭信用卡/ }).click();
+  await expect(page.getByText(/推荐余额：/)).toContainText("105.00");
+  const input = page.locator('input[name="account"]');
+  await expect(input).toHaveValue("");
+  await page.getByRole("button", { name: "使用推荐值" }).click();
+  await expect(input).toHaveValue("105.00");
+  await expect(page.locator('input[name="surplus-account"]')).not.toBeChecked();
+  await input.fill("110.00");
+  await expect(input).toHaveValue("110.00");
+  expect(fixture.writes.filter((write) => write.path === "/balance-updates")).toEqual([]);
+});
+
+test("same-day ambiguous balance estimate never supplies a one-click value", async ({ page }) => {
+  await setup(page);
+  await page.route("**/api/v1/reports/balance-estimates", (route) =>
+    route.fulfill({ json: { as_of: "2026-10-15T12:00:00Z", items: [{
+      account_id: "account", currency: "CNY", status: "ambiguous_same_day",
+      snapshot_id: "snapshot", baseline_date: "2026-10-01", baseline_balance: "-100.00",
+      recorded_change: null, estimated_balance: null,
+      transaction_count: 2, same_day_count: 1, currency_mismatch_count: 0,
+    }] } }),
+  );
+  await login(page);
+  await page.goto("/#/wealth");
+  await page.getByRole("button", { name: /更新余额：家庭信用卡/ }).click();
+  await expect(page.getByText(/无法确定先后顺序/)).toBeVisible();
+  await expect(page.getByRole("button", { name: "使用推荐值" })).toHaveCount(0);
+});
+
 test("balance actions distinguish batch entry from each account after cards load", async ({
   page,
 }) => {

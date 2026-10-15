@@ -125,7 +125,7 @@ export function InvestmentEditor({
     </Modal>
   );
 }
-function BalanceEditor({
+export function BalanceEditor({
   account,
   onClose,
 }: {
@@ -136,7 +136,13 @@ function BalanceEditor({
   const [selected, setSelected] = useState(account ? [account.id] : []);
   const [inputValues, setInputValues] = useState<Record<string, string>>({});
   const [surpluses, setSurpluses] = useState<Record<string, boolean>>({});
-  const estimates = useResource<BalanceEstimateReport>("/reports/balance-estimates");
+  const [appliedSnapshots, setAppliedSnapshots] = useState<
+    Record<string, string>
+  >({});
+  const [changedTimes, setChangedTimes] = useState<Record<string, boolean>>({});
+  const estimates = useResource<BalanceEstimateReport>(
+    "/reports/balance-estimates",
+  );
   return (
     <Modal title="更新余额" onClose={onClose}>
       <ActionForm
@@ -158,7 +164,8 @@ function BalanceEditor({
               as_of: new Date(String(f.get("at-" + id))).toISOString(),
               time_basis: "explicit",
               expected_account_version: a.row_version,
-              expected_latest_snapshot_id: a.latest_snapshot?.id || null,
+              expected_latest_snapshot_id:
+                appliedSnapshots[id] ?? a.latest_snapshot?.id ?? null,
             };
           });
           await api.command(
@@ -199,7 +206,9 @@ function BalanceEditor({
         </div>
         {selected.map((id) => {
           const a = accounts.find((a) => a.id === id)!;
-          const estimate = estimates.data?.items.find((r) => r.account_id === id);
+          const estimate = estimates.data?.items.find(
+            (r) => r.account_id === id,
+          );
           return (
             <section key={id} className="balance-edit-row">
               <h3>{a.name}</h3>
@@ -217,9 +226,12 @@ function BalanceEditor({
                     required
                     placeholder="0.00"
                     value={inputValues[id] ?? ""}
-                    onChange={(event) => setInputValues((values) => ({
-                      ...values, [id]: event.target.value,
-                    }))}
+                    onChange={(event) =>
+                      setInputValues((values) => ({
+                        ...values,
+                        [id]: event.target.value,
+                      }))
+                    }
                   />
                 </Field>
                 <Field label="记录时间（设备当地时间）">
@@ -232,38 +244,91 @@ function BalanceEditor({
                     )
                       .toISOString()
                       .slice(0, 16)}
+                    onChange={() => {
+                      setChangedTimes((values) => ({ ...values, [id]: true }));
+                      if (appliedSnapshots[id]) {
+                        setInputValues((values) => ({ ...values, [id]: "" }));
+                        setSurpluses((values) => ({ ...values, [id]: false }));
+                        setAppliedSnapshots((values) => {
+                          const next = { ...values };
+                          delete next[id];
+                          return next;
+                        });
+                      }
+                    }}
                   />
                 </Field>
               </div>
-              {estimate?.status === "ready" && estimate.estimated_balance !== null ? (
+              {estimate?.status === "ready" &&
+              estimate.estimated_balance !== null &&
+              estimate.snapshot_id &&
+              !changedTimes[id] ? (
                 <div className="balance-suggestion">
-                  <small>系统推算 · {estimate.baseline_date} 确认余额 {money(estimate.baseline_balance, a.currency)}</small>
-                  <span>此后已记录 {estimate.transaction_count} 笔 · 变动 {money(estimate.recorded_change, a.currency)}</span>
-                  <strong>推荐余额：{money(estimate.estimated_balance, a.currency)}</strong>
-                  <Button onClick={() => {
-                    const signed = estimate.estimated_balance!;
-                    setInputValues((values) => ({ ...values, [id]: signed.replace(/^-/, "") }));
-                    if (a.account_type === "credit")
-                      setSurpluses((values) => ({ ...values, [id]: !signed.startsWith("-") && signed !== "0.00" }));
-                  }}>
+                  <small>
+                    系统推算 · {estimate.baseline_date} 确认余额{" "}
+                    {money(estimate.baseline_balance, a.currency)}
+                  </small>
+                  <span>
+                    此后已记录 {estimate.transaction_count} 笔 · 变动{" "}
+                    {money(estimate.recorded_change, a.currency)}
+                  </span>
+                  <strong>
+                    推荐余额：{money(estimate.estimated_balance, a.currency)}
+                  </strong>
+                  <Button
+                    onClick={() => {
+                      const signed = estimate.estimated_balance!;
+                      setInputValues((values) => ({
+                        ...values,
+                        [id]:
+                          a.account_type === "credit"
+                            ? signed.replace(/^-/, "")
+                            : signed,
+                      }));
+                      setAppliedSnapshots((values) => ({
+                        ...values,
+                        [id]: estimate.snapshot_id!,
+                      }));
+                      if (a.account_type === "credit")
+                        setSurpluses((values) => ({
+                          ...values,
+                          [id]: Number(signed) > 0,
+                        }));
+                    }}
+                  >
                     使用推荐值
                   </Button>
                 </div>
               ) : (
                 <p className="muted small">
-                  {estimates.loading ? "正在计算可参考的余额…" :
-                    estimate?.status === "no_snapshot" ? "尚无可用的历史确认余额，请手工填写。" :
-                    estimate?.status === "unsupported_account" ? "投资等非现金账户不适合用收支流水推算余额。" :
-                    estimate?.status === "ambiguous_same_day" ? "有交易与上次余额发生在同一天，无法确定先后顺序，请手工核对。" :
-                    estimate?.status === "currency_mismatch" ? "有交易币种与账户不同，不能直接相减，请手工核对。" :
-                    "暂时无法提供可靠的推荐值。"}
+                  {changedTimes[id]
+                    ? "记录时间已修改，请按该时刻实际余额手工填写。"
+                    : estimates.loading
+                      ? "正在计算可参考的余额…"
+                      : estimate?.status === "no_snapshot"
+                        ? "尚无可用的历史确认余额，请手工填写。"
+                        : estimate?.status === "unsupported_account"
+                          ? "投资等非现金账户不适合用收支流水推算余额。"
+                          : estimate?.status === "ambiguous_same_day"
+                            ? "有交易与上次余额发生在同一天，无法确定先后顺序，请手工核对。"
+                            : estimate?.status === "currency_mismatch"
+                              ? "有交易币种与账户不同，不能直接相减，请手工核对。"
+                              : "暂时无法提供可靠的推荐值。"}
                 </p>
               )}
               {a.account_type === "credit" && (
                 <label className="check">
-                  <input type="checkbox" name={"surplus-" + id}
+                  <input
+                    type="checkbox"
+                    name={"surplus-" + id}
                     checked={surpluses[id] ?? false}
-                    onChange={(event) => setSurpluses((values) => ({ ...values, [id]: event.target.checked }))} />
+                    onChange={(event) =>
+                      setSurpluses((values) => ({
+                        ...values,
+                        [id]: event.target.checked,
+                      }))
+                    }
+                  />
                   这是多存的溢缴款
                 </label>
               )}

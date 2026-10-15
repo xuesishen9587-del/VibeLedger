@@ -164,6 +164,139 @@
         "title": "BalanceDraftRow",
         "type": "object"
       },
+      "BalanceEstimate": {
+        "properties": {
+          "account_id": {
+            "format": "uuid",
+            "title": "Account Id",
+            "type": "string"
+          },
+          "baseline_balance": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Baseline Balance"
+          },
+          "baseline_date": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Baseline Date"
+          },
+          "currency": {
+            "title": "Currency",
+            "type": "string"
+          },
+          "currency_mismatch_count": {
+            "minimum": 0.0,
+            "title": "Currency Mismatch Count",
+            "type": "integer"
+          },
+          "estimated_balance": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Estimated Balance"
+          },
+          "recorded_change": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Recorded Change"
+          },
+          "same_day_count": {
+            "minimum": 0.0,
+            "title": "Same Day Count",
+            "type": "integer"
+          },
+          "snapshot_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Snapshot Id"
+          },
+          "status": {
+            "enum": [
+              "ready",
+              "no_snapshot",
+              "unsupported_account",
+              "ambiguous_same_day",
+              "currency_mismatch"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "transaction_count": {
+            "minimum": 0.0,
+            "title": "Transaction Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "account_id",
+          "currency",
+          "status",
+          "snapshot_id",
+          "baseline_date",
+          "baseline_balance",
+          "recorded_change",
+          "estimated_balance",
+          "transaction_count",
+          "same_day_count",
+          "currency_mismatch_count"
+        ],
+        "title": "BalanceEstimate",
+        "type": "object"
+      },
+      "BalanceEstimateReport": {
+        "properties": {
+          "as_of": {
+            "format": "date-time",
+            "title": "As Of",
+            "type": "string"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/BalanceEstimate"
+            },
+            "title": "Items",
+            "type": "array"
+          }
+        },
+        "required": [
+          "as_of",
+          "items"
+        ],
+        "title": "BalanceEstimateReport",
+        "type": "object"
+      },
       "BalanceUpdate": {
         "additionalProperties": false,
         "properties": {
@@ -5504,7 +5637,9 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/BalanceEstimateReport"
+                }
               }
             },
             "description": "Successful Response"

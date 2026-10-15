@@ -6,16 +6,13 @@ if a transaction is denominated in a different currency from the account.
 Transfers, unlinked transactions, market moves and unrecorded bank activity are
 not modeled, so even a ready estimate is not an account statement.
 """
-from collections import defaultdict
 from datetime import datetime, timezone
-from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 from app.domain.spending import money_text
 from app.repositories import simplified_schema as schema, spending as repo
 
 SUPPORTED = {"cash", "savings", "credit"}
-SIGNS = {"expense": -1, "refund": 1, "cash_income": 1}
 
 
 def report(conn, household_id):
@@ -30,13 +27,31 @@ def report(conn, household_id):
         "FROM account_snapshots WHERE household_id=%s AND status='active' AND as_of<=%s "
         "ORDER BY account_id, as_of DESC", (household_id, now))
     heads = {row["account_id"]: row for row in snapshots}
-    since = [row["as_of"].astimezone(zone).date() for row in snapshots if row["account_id"] in {a["id"] for a in accounts}]
-    rows = repo.rows(conn, "SELECT account_id, occurred_on, original_amount, original_currency, transaction_type "
-        "FROM transactions WHERE household_id=%s AND status='committed' AND account_id IS NOT NULL "
-        "AND occurred_on BETWEEN %s AND %s ORDER BY account_id, occurred_on, id", (household_id, min(since), today)) if since else []
-    linked = defaultdict(list)
-    for row in rows:
-        linked[row["account_id"]].append(row)
+    eligible = [a for a in accounts if a["account_type"] in SUPPORTED and a["id"] in heads]
+    # Aggregate in PostgreSQL, using each account's own baseline. Do not fetch the
+    # family's full transaction history into application memory on every read.
+    changes = repo.rows(conn, """
+        WITH baselines AS (
+            SELECT * FROM unnest(%s::uuid[], %s::date[], %s::text[])
+                AS b(account_id, baseline_date, currency)
+        )
+        SELECT b.account_id,
+            count(t.id) FILTER (WHERE t.occurred_on=b.baseline_date) AS same_day_count,
+            count(t.id) FILTER (WHERE t.occurred_on>b.baseline_date) AS transaction_count,
+            count(t.id) FILTER (WHERE t.occurred_on>b.baseline_date
+                AND t.original_currency<>b.currency) AS currency_mismatch_count,
+            COALESCE(sum(CASE WHEN t.occurred_on>b.baseline_date AND t.original_currency=b.currency
+                THEN CASE t.transaction_type WHEN 'expense' THEN -t.original_amount
+                    ELSE t.original_amount END ELSE 0 END), 0) AS recorded_change
+        FROM baselines b LEFT JOIN transactions t
+            ON t.household_id=%s AND t.account_id=b.account_id AND t.status='committed'
+            AND t.transaction_type IN ('expense', 'refund', 'cash_income')
+            AND t.occurred_on BETWEEN b.baseline_date AND %s
+        GROUP BY b.account_id
+        """, ([a["id"] for a in eligible],
+              [heads[a["id"]]["as_of"].astimezone(zone).date() for a in eligible],
+              [a["currency"] for a in eligible], household_id, today)) if eligible else []
+    linked = {row["account_id"]: row for row in changes}
     result = []
     for account in accounts:
         head = heads.get(account["id"])
@@ -55,20 +70,15 @@ def report(conn, household_id):
             item["status"] = "unsupported_account"
             result.append(item)
             continue
-        account_rows = linked[account["id"]]
-        same_day = [row for row in account_rows if row["occurred_on"] == baseline_date]
-        later = [row for row in account_rows if row["occurred_on"] > baseline_date]
-        incompatible = [row for row in later if row["original_currency"] != account["currency"]]
-        item["same_day_count"] = len(same_day)
-        item["currency_mismatch_count"] = len(incompatible)
-        item["transaction_count"] = len(later)
-        if same_day:
+        change = linked[account["id"]]
+        for field in ("same_day_count", "currency_mismatch_count", "transaction_count"):
+            item[field] = change[field]
+        if item["same_day_count"]:
             item["status"] = "ambiguous_same_day"
-        elif incompatible:
+        elif item["currency_mismatch_count"]:
             item["status"] = "currency_mismatch"
         else:
-            delta = sum((Decimal(row["original_amount"]) * SIGNS[row["transaction_type"]]
-                        for row in later), Decimal(0))
+            delta = change["recorded_change"]
             item["recorded_change"] = money_text(delta, account["currency"])
             item["estimated_balance"] = money_text(head["balance"] + delta, account["currency"])
             item["status"] = "ready"

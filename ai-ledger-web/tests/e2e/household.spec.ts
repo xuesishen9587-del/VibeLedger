@@ -789,15 +789,32 @@ test("persistent login, desktop homepage and deep-link restore, logout clears se
   await page.reload();
   await expect(page.getByRole("heading", { name: "登录" })).toBeVisible();
 });
-test("balance editor offers read-only signed credit estimate and only fills after user click", async ({ page }) => {
+test("balance editor offers read-only signed credit estimate and only fills after user click", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 2560, height: 1440 });
   const fixture = await setup(page);
   await page.route("**/api/v1/reports/balance-estimates", (route) =>
-    route.fulfill({ json: { as_of: "2026-10-15T12:00:00Z", items: [{
-      account_id: "account", currency: "CNY", status: "ready",
-      snapshot_id: "snapshot", baseline_date: "2026-10-01", baseline_balance: "-100.00",
-      recorded_change: "-5.00", estimated_balance: "-105.00",
-      transaction_count: 2, same_day_count: 0, currency_mismatch_count: 0,
-    }] } }),
+    route.fulfill({
+      json: {
+        as_of: "2026-10-15T12:00:00Z",
+        items: [
+          {
+            account_id: "account",
+            currency: "CNY",
+            status: "ready",
+            snapshot_id: "snapshot",
+            baseline_date: "2026-10-01",
+            baseline_balance: "-100.00",
+            recorded_change: "-5.00",
+            estimated_balance: "-105.00",
+            transaction_count: 2,
+            same_day_count: 0,
+            currency_mismatch_count: 0,
+          },
+        ],
+      },
+    }),
   );
   await login(page);
   await page.goto("/#/wealth");
@@ -810,18 +827,61 @@ test("balance editor offers read-only signed credit estimate and only fills afte
   await expect(page.locator('input[name="surplus-account"]')).not.toBeChecked();
   await input.fill("110.00");
   await expect(input).toHaveValue("110.00");
-  expect(fixture.writes.filter((write) => write.path === "/balance-updates")).toEqual([]);
+  expect(
+    fixture.writes.filter((write) => write.path === "/balance-updates"),
+  ).toEqual([]);
+  const dialog = page.getByRole("dialog", { name: "更新余额", exact: true });
+  const box = await dialog.boundingBox();
+  expect(box).not.toBeNull();
+  expect(box!.x).toBeGreaterThan(0);
+  expect(box!.x + box!.width).toBeLessThan(2560);
+  await expect(
+    page.getByRole("button", { name: "保存本次余额" }),
+  ).toBeInViewport();
+  await page.screenshot({
+    path: "test-results/balance-estimate-desktop.png",
+    fullPage: true,
+  });
+  await page.getByRole("button", { name: "保存本次余额" }).click();
+  await expect(dialog).not.toBeVisible();
+  const writes = fixture.writes.filter(
+    (write) => write.path === "/balance-updates",
+  );
+  expect(writes).toHaveLength(1);
+  expect(writes[0].body.observations).toEqual([
+    expect.objectContaining({
+      account_id: "account",
+      balance: "-110.00",
+      expected_latest_snapshot_id: "snapshot",
+    }),
+  ]);
 });
 
-test("same-day ambiguous balance estimate never supplies a one-click value", async ({ page }) => {
+test("same-day ambiguous balance estimate never supplies a one-click value", async ({
+  page,
+}) => {
   await setup(page);
   await page.route("**/api/v1/reports/balance-estimates", (route) =>
-    route.fulfill({ json: { as_of: "2026-10-15T12:00:00Z", items: [{
-      account_id: "account", currency: "CNY", status: "ambiguous_same_day",
-      snapshot_id: "snapshot", baseline_date: "2026-10-01", baseline_balance: "-100.00",
-      recorded_change: null, estimated_balance: null,
-      transaction_count: 2, same_day_count: 1, currency_mismatch_count: 0,
-    }] } }),
+    route.fulfill({
+      json: {
+        as_of: "2026-10-15T12:00:00Z",
+        items: [
+          {
+            account_id: "account",
+            currency: "CNY",
+            status: "ambiguous_same_day",
+            snapshot_id: "snapshot",
+            baseline_date: "2026-10-01",
+            baseline_balance: "-100.00",
+            recorded_change: null,
+            estimated_balance: null,
+            transaction_count: 2,
+            same_day_count: 1,
+            currency_mismatch_count: 0,
+          },
+        ],
+      },
+    }),
   );
   await login(page);
   await page.goto("/#/wealth");

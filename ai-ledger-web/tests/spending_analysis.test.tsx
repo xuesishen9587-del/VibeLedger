@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { expect, it, vi } from "vitest";
@@ -61,7 +62,7 @@ const categories = ["a", "b"].map((id) => ({
   row_version: 0,
   is_fallback: false,
 }));
-function wrap(children: React.ReactNode, data = fixture()) {
+function wrap(children: ReactNode, data = fixture()) {
   const api = new Api("spending-test-user", async () => "fixture-token");
   const request = vi.spyOn(api, "request").mockResolvedValue(data as never);
   const view = render(

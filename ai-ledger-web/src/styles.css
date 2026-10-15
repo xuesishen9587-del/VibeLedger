@@ -1034,6 +1034,14 @@ dialog::backdrop {
   margin-bottom: 20px;
   font-size: 12px;
 }
+.drop-zone.dragging {
+  background: #e5f1e5;
+  border-color: #497966;
+  box-shadow: inset 0 0 0 2px #90b7a1;
+}
+.drop-zone:focus-within {
+  border-color: #497966;
+}
 .drop-zone input {
   border: 0;
   background: transparent;

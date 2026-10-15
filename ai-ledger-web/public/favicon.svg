@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="VibeLedger">
+  <rect width="64" height="64" rx="15" fill="#264f43"/>
+  <path d="M13 29 32 14 51 29" fill="none" stroke="#fff" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M19 28v22h26V28" fill="none" stroke="#fff" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="m25 39 5 4 9-10" fill="none" stroke="#d8efcd" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

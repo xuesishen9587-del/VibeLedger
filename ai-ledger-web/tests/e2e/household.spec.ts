@@ -825,6 +825,172 @@ test("balance actions distinguish batch entry from each account after cards load
   await expect(dialog.getByRole("checkbox", { checked: true })).toHaveCount(2);
 });
 
+async function dropFiles(
+  page: Page,
+  files: { name: string; type: string; size?: number }[],
+) {
+  const transfer = await page.evaluateHandle((files) => {
+    const data = new DataTransfer();
+    for (const file of files)
+      data.items.add(
+        new File(
+          [
+            file.size === undefined
+              ? "%PDF-1.4\nfixture"
+              : new Uint8Array(file.size),
+          ],
+          file.name,
+          { type: file.type },
+        ),
+      );
+    return data;
+  }, files);
+  await page
+    .locator(".drop-zone")
+    .dispatchEvent("drop", { dataTransfer: transfer });
+  await transfer.dispose();
+}
+
+test("PDF file limits clear rejected drops and preserve click selection", async ({
+  page,
+}) => {
+  const fixture = await setup(page);
+  await login(page);
+  await page.goto("/#/statement");
+  const input = page.getByLabel("PDF 账单", { exact: true });
+  const valid = { name: "valid.pdf", type: "application/pdf" };
+  for (const invalid of [
+    [{ name: "image.pdf", type: "image/png" }],
+    [{ name: "empty.pdf", type: "application/pdf", size: 0 }],
+    [valid, { ...valid, name: "second.pdf" }],
+    [{ ...valid, size: 20 * 1024 * 1024 + 1 }],
+  ]) {
+    await dropFiles(page, [valid]);
+    await expect(page.getByText("已选择：valid.pdf")).toBeVisible();
+    await dropFiles(page, invalid);
+    await expect(page.getByRole("alert").first()).toContainText("PDF");
+    expect(
+      await input.evaluate((el: HTMLInputElement) => el.files?.length),
+    ).toBe(0);
+    await expect(page.getByText("已选择：valid.pdf")).toHaveCount(0);
+  }
+  await dropFiles(page, [
+    { ...valid, name: "limit.PDF", type: "", size: 20 * 1024 * 1024 },
+  ]);
+  await expect(page.getByText("已选择：limit.PDF")).toBeVisible();
+  const chooser = page.waitForEvent("filechooser");
+  await page.getByText("拖拽 PDF 到这里，或点击选择", { exact: true }).click();
+  await (
+    await chooser
+  ).setFiles({
+    name: "clicked.pdf",
+    mimeType: "application/pdf",
+    buffer: Buffer.from("%PDF-fixture"),
+  });
+  await expect(page.getByText("已选择：clicked.pdf")).toBeVisible();
+  expect(
+    await input.evaluate((el: HTMLInputElement) => el.files?.[0]?.name),
+  ).toBe("clicked.pdf");
+  expect(fixture.writes).toEqual([]);
+});
+
+test("dropped password-protected PDF retries explicitly with a new key after a definitive password error", async ({
+  page,
+}) => {
+  await setup(page);
+  const keys: string[] = [];
+  await page.route(
+    "**/api/v1/accounts/account/statement-imports",
+    async (route) => {
+      keys.push(route.request().headers()["idempotency-key"]);
+      const body = route.request().postDataBuffer()!.toString("utf8");
+      expect(body).toContain('filename="locked.pdf"');
+      expect(body).toContain(
+        keys.length === 1 ? "fixture-wrong" : "fixture-correct",
+      );
+      await route.fulfill(
+        keys.length === 1
+          ? {
+              status: 400,
+              json: { error: { code: "STATEMENT_PASSWORD_INVALID" } },
+            }
+          : { json: statement(5) },
+      );
+    },
+  );
+  await login(page);
+  await page.goto("/#/statement");
+  await dropFiles(page, [{ name: "locked.pdf", type: "application/pdf" }]);
+  await page.getByLabel("PDF 密码（如有）").fill("fixture-wrong");
+  await page.getByRole("button", { name: "开始识别账单" }).click();
+  await expect(
+    page.getByText("PDF 密码不正确，请重新填写。", { exact: true }).first(),
+  ).toBeVisible();
+  await expect(page.getByLabel("PDF 密码（如有）")).toHaveValue("");
+  await expect(page.getByText("已选择：locked.pdf")).toHaveCount(0);
+  expect(
+    await page.evaluate(() =>
+      Object.keys(sessionStorage).filter((k) => k.startsWith("vl-upload:")),
+    ),
+  ).toEqual([]);
+  await dropFiles(page, [{ name: "locked.pdf", type: "application/pdf" }]);
+  await page.getByLabel("PDF 密码（如有）").fill("fixture-correct");
+  await page.getByRole("button", { name: "开始识别账单" }).click();
+  await expect(page.getByRole("heading", { name: "核对账单" })).toBeVisible();
+  expect(keys).toHaveLength(2);
+  expect(keys[0]).not.toBe(keys[1]);
+});
+
+test("PDF drop-zone accepts drag and drop, rejects non-PDF, and preserves the existing upload form", async ({
+  page,
+}) => {
+  const fixture = await setup(page);
+  await login(page);
+  await page.goto("/#/statement");
+  const zone = page.locator(".drop-zone");
+  await expect(zone).toBeVisible();
+  // Simulate a file dropped from the OS; do not trigger an import until the user confirms.
+  const pdfTransfer = await page.evaluateHandle(() => {
+    const transfer = new DataTransfer();
+    transfer.items.add(
+      new File(["%PDF-1.4\\n1 0 obj\\n"], "test-statement.pdf", {
+        type: "application/pdf",
+      }),
+    );
+    return transfer;
+  });
+  await zone.dispatchEvent("dragenter", { dataTransfer: pdfTransfer });
+  await expect(zone).toHaveClass(/dragging/);
+  await zone.dispatchEvent("drop", { dataTransfer: pdfTransfer });
+  await expect(zone).not.toHaveClass(/dragging/);
+  await expect(zone.getByText("已选择：test-statement.pdf")).toBeVisible();
+  expect(
+    await page
+      .locator('input[type="file"][name="file"]')
+      .evaluate((el: HTMLInputElement) => ({
+        name: el.files?.[0]?.name,
+        count: el.files?.length,
+      })),
+  ).toEqual({ name: "test-statement.pdf", count: 1 });
+  expect(
+    fixture.writes.filter((entry) => entry.path.includes("/statement-imports")),
+  ).toEqual([]);
+
+  const badTransfer = await page.evaluateHandle(() => {
+    const transfer = new DataTransfer();
+    transfer.items.add(
+      new File(["not pdf"], "virus.txt", { type: "text/plain" }),
+    );
+    return transfer;
+  });
+  await zone.dispatchEvent("drop", { dataTransfer: badTransfer });
+  await expect(page.getByRole("alert")).toContainText("PDF");
+  await expect(zone.getByText("已选择：test-statement.pdf")).toHaveCount(0);
+  expect(
+    fixture.writes.filter((entry) => entry.path.includes("/statement-imports")),
+  ).toEqual([]);
+});
+
 test("42-row statement shows at least 10 complete rows and imports with one confirmation", async ({
   page,
 }) => {
@@ -1098,11 +1264,14 @@ for (const uncertain of [false, true]) {
     });
     await login(page);
     await page.goto("/#/statement");
-    await page.getByLabel("PDF 账单", { exact: true }).setInputFiles({
-      name: "card.pdf",
-      mimeType: "application/pdf",
-      buffer: Buffer.from("%PDF-fixture"),
-    });
+    if (uncertain)
+      await dropFiles(page, [{ name: "card.pdf", type: "application/pdf" }]);
+    else
+      await page.getByLabel("PDF 账单", { exact: true }).setInputFiles({
+        name: "card.pdf",
+        mimeType: "application/pdf",
+        buffer: Buffer.from("%PDF-fixture"),
+      });
     await page.getByRole("button", { name: "开始识别账单" }).click();
     await expect(
       page.getByRole("progressbar", { name: "账单识别进行中" }),

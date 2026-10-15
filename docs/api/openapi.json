@@ -5479,6 +5479,53 @@
         ]
       }
     },
+    "/api/v1/reports/balance-estimates": {
+      "get": {
+        "operationId": "balance_estimate_suggestions_api_v1_reports_balance_estimates_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Balance Estimate Suggestions",
+        "tags": [
+          "Last reported wealth"
+        ]
+      }
+    },
     "/api/v1/reports/investments": {
       "get": {
         "operationId": "report_api_v1_reports_investments_get",

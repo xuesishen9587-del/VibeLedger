@@ -19,6 +19,7 @@ class TestBalanceEstimatesDb(BaseDbTestCase):
                                                 opened_on=date(2026, 1, 1))
         self.unknown = schema.create_account(self.conn, self.hh, "No starting balance", "cash", "cash", "CNY",
                                              opened_on=date(2026, 1, 1))
+        self.income_category = schema.create_category(self.conn, self.hh, "Income", "income")["id"]
         self.conn.commit()
 
     def baseline(self, account, balance="100.00"):
@@ -32,7 +33,7 @@ class TestBalanceEstimatesDb(BaseDbTestCase):
 
     def transaction(self, account, amount, when, kind="expense", currency="CNY"):
         payload = {"transaction_type": kind, "occurred_on": when, "original_amount": amount,
-                   "original_currency": currency, "category_id": str(self.category),
+                   "original_currency": currency, "category_id": str(self.income_category if kind == "cash_income" else self.category),
                    "account_id": str(account["id"]) if account else None, "merchant": "Fixture",
                    **({"remarks": "Refund"} if kind == "refund" else {})}
         result = self.client.post("/api/v1/transactions", json=payload,

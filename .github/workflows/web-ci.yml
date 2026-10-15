@@ -56,6 +56,10 @@ jobs:
           done
           curl --fail http://127.0.0.1:8080/health
           curl --fail http://127.0.0.1:8080/ | grep 'VibeLedger'
+          curl --fail http://127.0.0.1:8080/ | grep '/favicon.svg'
+          curl --fail --silent --show-error -D /tmp/favicon-headers -o /tmp/favicon.svg http://127.0.0.1:8080/favicon.svg
+          grep -i '^content-type: image/svg+xml' /tmp/favicon-headers
+          grep '<svg' /tmp/favicon.svg
           docker stop vibeledger-web-test
       - uses: actions/upload-artifact@v4
         if: always()

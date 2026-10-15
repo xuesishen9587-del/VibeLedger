@@ -1,6 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
+import { readFile } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
 import { createServer, publicConfig } from "../server.mjs";
 const listen = (server) =>
   new Promise((resolve) =>
@@ -8,6 +10,31 @@ const listen = (server) =>
       resolve(`http://127.0.0.1:${server.address().port}`),
     ),
   );
+test("production static handler serves the favicon as SVG for GET and HEAD", async (t) => {
+  const server = await createServer({
+    dist: fileURLToPath(new URL("../public", import.meta.url)),
+  });
+  const base = await listen(server);
+  t.after(() => {
+    server.closeAllConnections();
+    server.close();
+  });
+  const response = await fetch(base + "/favicon.svg");
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("content-type"), "image/svg+xml");
+  assert.equal(response.headers.get("x-content-type-options"), "nosniff");
+  assert.equal(
+    await response.text(),
+    await readFile(new URL("../public/favicon.svg", import.meta.url), "utf8"),
+  );
+  const head = await fetch(base + "/favicon.svg", { method: "HEAD" });
+  assert.equal(head.status, 200);
+  assert.equal(await head.text(), "");
+  assert.match(
+    await readFile(new URL("../index.html", import.meta.url), "utf8"),
+    /rel="icon"[^>]+href="\/favicon.svg"/,
+  );
+});
 test("runtime config exposes only public values", () => {
   assert.deepEqual(
     publicConfig({

@@ -47,6 +47,9 @@ def report(conn, household_id, as_of=None, *, historical_risk=False, owner=None)
                 owner_id = str(UUID(owner))
             except (ValueError, TypeError, AttributeError):
                 fail("INVALID_OWNER", "The wealth owner must be a household member UUID or 'unassigned'.")
+            members = schema.list_household_members(conn, household_id)
+            if not any(str(member["user_id"]) == owner_id for member in members):
+                fail("INVALID_OWNER", "The wealth owner must belong to this household.")
             accounts = [account for account in accounts if str(account["owner_user_id"]) == owner_id]
     rows = repo.rows(conn, "SELECT DISTINCT ON (account_id) * FROM account_snapshots WHERE household_id=%s "
         "AND status='active' AND as_of<=%s ORDER BY account_id,as_of DESC", (household_id, timestamp))

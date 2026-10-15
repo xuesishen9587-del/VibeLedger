@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type DragEvent } from "react";
 import {
   FileUp,
   FileText,
@@ -60,6 +60,54 @@ function StatementUpload() {
   const [error, setError] = useState<Error | null>(null),
     [busy, setBusy] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
+  const dragDepth = useRef(0);
+  const [dragging, setDragging] = useState(false);
+  const [selectedFile, setSelectedFile] = useState("");
+  function validatePdf(file?: File): string | null {
+    if (!file || !file.size || file.size > 20 * 1024 * 1024 ||
+        !file.name.toLowerCase().endsWith(".pdf") ||
+        (file.type && !["application/pdf", "application/octet-stream"].includes(file.type))) {
+      return "请选择一份 20 MiB 以内的 PDF 账单。";
+    }
+    return null;
+  }
+  function chooseFile(file?: File) {
+    const issue = validatePdf(file);
+    if (issue) {
+      setSelectedFile("");
+      setError(new Error(issue));
+      if (fileRef.current) fileRef.current.value = "";
+      return;
+    }
+    setError(null);
+    setSelectedFile(file!.name);
+  }
+  function dropPdf(event: DragEvent<HTMLLabelElement>) {
+    event.preventDefault();
+    event.stopPropagation();
+    dragDepth.current = 0;
+    setDragging(false);
+    const files = event.dataTransfer.files;
+    if (files.length !== 1) {
+      setError(new Error("一次只能拖入一份 PDF 账单。"));
+      return;
+    }
+    const file = files[0];
+    const issue = validatePdf(file);
+    if (issue) {
+      setError(new Error(issue));
+      return;
+    }
+    try {
+      const transfer = new DataTransfer();
+      transfer.items.add(file);
+      if (!fileRef.current) throw new Error("文件选择器不可用");
+      fileRef.current.files = transfer.files;
+      chooseFile(file);
+    } catch {
+      setError(new Error("无法接收拖入的文件，请点击选择 PDF 账单。"));
+    }
+  }
   const [recognizing, setRecognizing] = useState(false);
   const [elapsed, setElapsed] = useState(0);
   useEffect(() => {
@@ -158,11 +206,7 @@ function StatementUpload() {
           label="开始识别账单"
           onSave={async (form) => {
             const file = form.get("file") as File;
-            if (
-              !file?.size ||
-              file.size > 20 * 1024 * 1024 ||
-              !file.name.toLowerCase().endsWith(".pdf")
-            )
+            if (validatePdf(file))
               throw new ApiError("STATEMENT_LIMIT_EXCEEDED");
             const p = {
               key: crypto.randomUUID(),
@@ -214,6 +258,7 @@ function StatementUpload() {
               );
               if (password) password.value = "";
               if (fileRef.current) fileRef.current.value = "";
+              setSelectedFile("");
             }
           }}
         >
@@ -226,10 +271,29 @@ function StatementUpload() {
               ))}
             </select>
           </Field>
-          <label className="drop-zone">
+          <label
+            className={"drop-zone" + (dragging ? " dragging" : "")}
+            onDragEnter={(event) => {
+              event.preventDefault();
+              dragDepth.current += 1;
+              setDragging(true);
+            }}
+            onDragOver={(event) => {
+              event.preventDefault();
+              event.dataTransfer.dropEffect = "copy";
+            }}
+            onDragLeave={(event) => {
+              event.preventDefault();
+              dragDepth.current = Math.max(0, dragDepth.current - 1);
+              if (!dragDepth.current) setDragging(false);
+            }}
+            onDrop={dropPdf}
+          >
             <FileText size={25} />
-            <strong>选择 PDF 账单</strong>
-            <span>最多 20 MiB · 50 页</span>
+            <strong>拖拽 PDF 到这里，或点击选择</strong>
+            <span aria-live="polite">
+              {selectedFile ? "已选择：" + selectedFile : "最多 20 MiB · 50 页"}
+            </span>
             <input
               ref={fileRef}
               name="file"
@@ -237,6 +301,7 @@ function StatementUpload() {
               type="file"
               accept="application/pdf,.pdf"
               required
+              onChange={(event) => chooseFile(event.currentTarget.files?.[0])}
             />
           </label>
           <Field label="PDF 密码（如有）">

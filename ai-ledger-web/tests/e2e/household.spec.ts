@@ -825,6 +825,40 @@ test("balance actions distinguish batch entry from each account after cards load
   await expect(dialog.getByRole("checkbox", { checked: true })).toHaveCount(2);
 });
 
+test("PDF drop-zone accepts drag and drop, rejects non-PDF, and preserves the existing upload form", async ({ page }) => {
+  const fixture = await setup(page);
+  await login(page);
+  await page.goto("/#/statement");
+  const zone = page.locator(".drop-zone");
+  await expect(zone).toBeVisible();
+  const file = page.getByRole("textbox", { name: "PDF 账单" });
+  // Simulate a file dropped from the OS; do not trigger an import until the user confirms.
+  const pdfTransfer = await page.evaluateHandle(() => {
+    const transfer = new DataTransfer();
+    transfer.items.add(new File(["%PDF-1.4\\n1 0 obj\\n"], "test-statement.pdf", { type: "application/pdf" }));
+    return transfer;
+  });
+  await zone.dispatchEvent("dragenter", { dataTransfer: pdfTransfer });
+  await expect(zone).toHaveClass(/dragging/);
+  await zone.dispatchEvent("drop", { dataTransfer: pdfTransfer });
+  await expect(zone).not.toHaveClass(/dragging/);
+  await expect(zone.getByText("已选择：test-statement.pdf")).toBeVisible();
+  expect(await page.locator('input[type="file"][name="file"]').evaluate(
+    (el: HTMLInputElement) => ({ name: el.files?.[0]?.name, count: el.files?.length }),
+  )).toEqual({ name: "test-statement.pdf", count: 1 });
+  expect(fixture.writes.filter((entry) => entry.path.includes("/statement-imports"))).toEqual([]);
+
+  const badTransfer = await page.evaluateHandle(() => {
+    const transfer = new DataTransfer();
+    transfer.items.add(new File(["not pdf"], "virus.txt", { type: "text/plain" }));
+    return transfer;
+  });
+  await zone.dispatchEvent("drop", { dataTransfer: badTransfer });
+  await expect(page.getByRole("alert")).toContainText("PDF");
+  await expect(zone.getByText("已选择：test-statement.pdf")).toHaveCount(0);
+  expect(fixture.writes.filter((entry) => entry.path.includes("/statement-imports"))).toEqual([]);
+});
+
 test("42-row statement shows at least 10 complete rows and imports with one confirmation", async ({
   page,
 }) => {

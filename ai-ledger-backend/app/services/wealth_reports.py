@@ -36,6 +36,7 @@ def report(conn, household_id, as_of=None, *, historical_risk=False, owner=None)
     currency = household["reporting_currency"]
     accounts = repo.rows(conn, "SELECT * FROM accounts WHERE household_id=%s AND status<>'cancelled' "
         "AND opened_on<=%s AND (closed_on IS NULL OR closed_on>=%s) ORDER BY id", (household_id, day, day))
+    setup_required = not accounts
     # Ownership is a view filter, not an access control. All results remain household scoped.
     # Filter before calculating coverage, totals and risk so missing observations in
     # other members' accounts do not make a personal view incomplete.
@@ -98,7 +99,7 @@ def report(conn, household_id, as_of=None, *, historical_risk=False, owner=None)
     complete = bool(accounts) and not missing and not missing_fx
     totals = {"assets": assets, "liabilities": debts, "net_worth": assets-debts}
     result = {"as_of": timestamp.isoformat(), "reporting_currency": currency, "accounts": results,
-        "setup_required": not accounts, "risk_buckets": [] if historical_risk else [
+        "setup_required": setup_required, "risk_buckets": [] if historical_risk else [
             {"risk_level": key, "amount": money_text(value, currency),
              "percentage": str((value/assets*100).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)) if assets else None}
             for key, value in buckets.items()],

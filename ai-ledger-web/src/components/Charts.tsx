@@ -44,13 +44,19 @@ export function CategoryChart({ report }: { report: Spending }) {
     </Empty>
   );
 }
-export function WealthStats({ report }: { report: Wealth }) {
+export function WealthStats({
+  report,
+  scope = "家庭",
+}: {
+  report: Wealth;
+  scope?: string;
+}) {
   const complete = report.coverage.complete;
   return (
     <div className="wealth-summary">
       <div className="net-worth">
         <span>
-          {complete ? "家庭净资产" : "已知净资产"}{" "}
+          {complete ? scope + "净资产" : "已知净资产"}{" "}
           <Tag tone="light">{report.reporting_currency}</Tag>
         </span>
         <strong>
@@ -62,7 +68,9 @@ export function WealthStats({ report }: { report: Wealth }) {
         <small>根据各账户最近更新的余额</small>
       </div>
       <div>
-        <span>我们的资产</span>
+        <span>
+          {!complete ? "已知资产" : scope === "家庭" ? "我们的资产" : "资产"}
+        </span>
         <strong>
           {money(
             complete ? report.total_assets : report.known_assets,
@@ -72,7 +80,7 @@ export function WealthStats({ report }: { report: Wealth }) {
         <small>{complete ? "储蓄、钱包与投资" : "已记录部分"}</small>
       </div>
       <div>
-        <span>待还的欠款</span>
+        <span>{complete ? "待还的欠款" : "已知负债"}</span>
         <strong>
           {money(
             complete ? report.total_liabilities : report.known_liabilities,

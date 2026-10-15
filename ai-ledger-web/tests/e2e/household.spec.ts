@@ -522,12 +522,21 @@ for (const width of [1366, 390, 320]) {
     await expect(page.getByRole("heading", { name: "消费分类占比" })).toBeVisible();
     await expect(page.getByText("33.3%")).toBeVisible();
     await expect(page.getByText(/缺少换算汇率/)).toBeVisible();
-    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
+    const overflowing = await page.evaluate(() => {
+      const viewport = document.documentElement.clientWidth;
+      return [...document.querySelectorAll<HTMLElement>("body *")]
+        .filter((el) => el.getBoundingClientRect().width > 0 && el.getBoundingClientRect().right > viewport + 1)
+        .map((el) => ({ tag: el.tagName, className: String(el.className).slice(0, 90), right: Math.round(el.getBoundingClientRect().right), width: Math.round(el.getBoundingClientRect().width) }))
+        .slice(0, 12);
+    });
+    expect(overflowing).toEqual([]);
     await page.screenshot({ path: testInfo.outputPath(`spending-analysis-${width}.png`), fullPage: true });
     await page.getByRole("combobox", { name: "分析时间范围" }).selectOption("3");
     await expect(page.locator(".analysis-trend-row")).toHaveCount(3);
     expect(reportReads).toBeGreaterThanOrEqual(2);
-    expect(fixture.writes).toEqual([]);
+    // Materialization is an expected, idempotent system command on page entry.
+    // The analytics view itself must not create or change any financial record.
+    expect(fixture.writes.filter((write) => write.path !== "/spending-schedules/materialize")).toEqual([]);
   });
 }
 

@@ -88,6 +88,8 @@ function StatementUpload() {
     dragDepth.current = 0;
     setDragging(false);
     const files = event.dataTransfer.files;
+    if (fileRef.current) fileRef.current.value = "";
+    setSelectedFile("");
     if (files.length !== 1) {
       setError(new Error("一次只能拖入一份 PDF 账单。"));
       return;

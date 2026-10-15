@@ -153,4 +153,3 @@ class TestWealthOwnerViews(TestCase):
         historical = self.report("unassigned", as_of="2026-02-02")
         self.assertIsNone(historical["net_worth"])
         self.assertEqual(historical["risk_buckets"], [])
-

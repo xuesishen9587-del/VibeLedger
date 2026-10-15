@@ -28,7 +28,7 @@ class TestWealthOwnerViewsDb(BaseDbTestCase):
         self.add_account("Unassigned", None, "30.00", currency="USD", risk="medium")
         schema.create_account(self.conn, foreign_hh, "Private account", "private", "cash", "CNY",
                               owner_user_id=self.foreign, opened_on=date(2026, 1, 1))
-        repo.rows(self.conn, "INSERT INTO fx_quotes(from_currency,to_currency,rate_as_of,rate,provider) "
+        repo.rows(self.conn, "INSERT INTO fx_quotes(from_currency,to_currency,rate_as_of,rate,source) "
                   "VALUES ('USD','CNY','2026-02-02',7.123456,'fixture') RETURNING rate")
         self.conn.commit()
         clock = patch("app.services.wealth_reports.datetime", wraps=datetime)
@@ -84,7 +84,7 @@ class TestWealthOwnerViewsDb(BaseDbTestCase):
         self.assertIsNone(self.report()["net_worth"])
 
     def test_missing_fx_keeps_native_balance_and_known_subtotal(self):
-        repo.rows(self.conn, "DELETE FROM fx_quotes WHERE provider='fixture' RETURNING rate")
+        repo.rows(self.conn, "DELETE FROM fx_quotes WHERE source='fixture' RETURNING rate")
         self.conn.commit()
         group = self.report("unassigned")
         self.assertEqual(group["accounts"][0]["balance"], "30.00")
@@ -124,7 +124,7 @@ class TestWealthOwnerViewsDb(BaseDbTestCase):
         self.assertFalse(self.report("unassigned")["setup_required"])
         self.assertEqual(len(self.report()["accounts"]), 5)
 
-    def test_lifecycle_and_latest_valid_observation_still_apply(self):
+    def test_future_opened_accounts_stay_outside_the_selected_view(self):
         # A future-opened account is outside the report even if it has this owner.
         schema.create_account(self.conn, self.hh, "Future account", "future", "cash", "CNY",
                               owner_user_id=self.user, opened_on=date(2026, 2, 4))
@@ -162,4 +162,3 @@ class TestWealthOwnerViewsDb(BaseDbTestCase):
         self.assertEqual(history(), before)
         self.assertEqual(repo.rows(self.conn, "SELECT count(*) n FROM audit_events")[0]["n"], audit_count)
         self.assertEqual(repo.rows(self.conn, "SELECT * FROM account_snapshots ORDER BY id"), snapshots)
-

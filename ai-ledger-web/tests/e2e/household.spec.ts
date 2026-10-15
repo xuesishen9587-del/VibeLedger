@@ -446,7 +446,9 @@ for (const width of [1366, 390, 320]) {
     await expect(page.locator(".net-worth > span")).toContainText("家庭净资产");
     const owner = page.getByRole("combobox", { name: "财富账户归属" });
     await owner.selectOption("one");
-    await expect(page.locator(".net-worth > span")).toContainText(name + "净资产");
+    await expect(page.locator(".net-worth > span")).toContainText(
+      name + "净资产",
+    );
     await expect(page.locator(".account-card")).toHaveCount(1);
     await expect(page.locator(".section-heading .count")).toHaveText("1");
     await expect(page.getByText("小夏的储蓄账户", { exact: true })).toHaveCount(
@@ -485,58 +487,184 @@ for (const width of [1366, 390, 320]) {
   });
 }
 
-for (const width of [1366, 390, 320]) {
-  test(`spending analysis reports and charts fit ${width}px without writing data`, async ({ page }, testInfo) => {
-    await page.setViewportSize({ width, height: 900 });
+for (const width of [2560, 1366, 390, 320]) {
+  test(`spending analysis reports and charts fit ${width}px without writing data`, async ({
+    page,
+  }, testInfo) => {
+    await page.setViewportSize({ width, height: width === 2560 ? 1440 : 900 });
     const fixture = await setup(page);
     const current = new Intl.DateTimeFormat("en-CA", {
-      timeZone: "Asia/Singapore", year: "numeric", month: "2-digit",
+      timeZone: "Asia/Singapore",
+      year: "numeric",
+      month: "2-digit",
     }).format(new Date());
-    const previous = new Date(Date.UTC(
-      Number(current.slice(0, 4)), Number(current.slice(5, 7)) - 2, 1,
-    )).toISOString().slice(0, 7);
-    let reportReads = 0;
+    const previous = new Date(
+      Date.UTC(Number(current.slice(0, 4)), Number(current.slice(5, 7)) - 2, 1),
+    )
+      .toISOString()
+      .slice(0, 7);
+    const amounts = [600, 300, 100, 80, 60, 40, 20];
+    const labels = [
+      "餐饮与日常食品",
+      "家庭用品",
+      "交通出行",
+      "教育与订阅",
+      "医疗健康",
+      "礼物与社交",
+      "其他消费",
+    ];
+    await page.route("**/api/v1/categories", (route) =>
+      route.fulfill({
+        json: {
+          items: [
+            ...categories,
+            ...labels.map((name, i) => ({
+              ...categories[0],
+              id: "analysis-" + i,
+              name,
+            })),
+          ],
+          next_cursor: null,
+        },
+      }),
+    );
+    function amountsFor(gross: number, refunds: number) {
+      return {
+        gross_expenses: gross.toFixed(2),
+        known_gross_expenses: gross.toFixed(2),
+        refunds: refunds.toFixed(2),
+        known_refunds: refunds.toFixed(2),
+        net_spending: (gross - refunds).toFixed(2),
+        known_net_spending: (gross - refunds).toFixed(2),
+        missing_conversion_count: 0,
+      };
+    }
+    let reportReads = 0,
+      expanded = false;
     await page.route(/\/api\/v1\/reports\/spending(?:\?|$)/, (route) => {
       reportReads++;
+      const url = new URL(route.request().url());
       const data = {
         ...totals,
-        gross_expenses: "300.00", known_gross_expenses: "300.00",
-        refunds: "350.00", known_refunds: "350.00",
-        net_spending: null, known_net_spending: "-50.00",
-        missing_conversion_count: 1, reporting_currency: "CNY",
-        from: "2026-01-01", to: "2026-12-31",
+        gross_expenses: null,
+        known_gross_expenses: "300.00",
+        refunds: null,
+        known_refunds: "350.00",
+        net_spending: null,
+        known_net_spending: "-50.00",
+        missing_conversion_count: 1,
+        reporting_currency: "CNY",
+        from: url.searchParams.get("from"),
+        to: url.searchParams.get("to"),
         category: [
-          { ...totals, key: "food", known_gross_expenses: "100.00", gross_expenses: "100.00" },
-          { ...totals, key: "shop", known_gross_expenses: "200.00", gross_expenses: "200.00" },
+          {
+            ...amountsFor(100, 0),
+            key: "food",
+            gross_expenses: null,
+            refunds: null,
+            net_spending: null,
+            missing_conversion_count: 1,
+          },
+          { ...amountsFor(200, 350), key: "shop" },
         ],
-        month: [{ ...totals, key: previous, known_net_spending: "-50.00", net_spending: null, missing_conversion_count: 1 }],
+        month: [
+          {
+            ...amountsFor(300, 350),
+            key: previous,
+            gross_expenses: null,
+            refunds: null,
+            net_spending: null,
+            missing_conversion_count: 1,
+          },
+        ],
       };
+      if (expanded) {
+        Object.assign(data, amountsFor(1200, 450), {
+          category: amounts.map((amount, i) => ({
+            ...amountsFor(amount, i === 0 ? 450 : 0),
+            key: "analysis-" + i,
+          })),
+          month: [
+            {
+              ...amountsFor(500, 0),
+              key: new Date(
+                Date.UTC(
+                  Number(current.slice(0, 4)),
+                  Number(current.slice(5, 7)) - 3,
+                  1,
+                ),
+              )
+                .toISOString()
+                .slice(0, 7),
+            },
+            { ...amountsFor(300, 0), key: previous },
+            { ...amountsFor(400, 450), key: current },
+          ],
+        });
+      }
       return route.fulfill({ json: data });
     });
     await login(page);
     await page.goto("/#/spending");
     await page.getByRole("button", { name: "支出分析" }).click();
-    await expect(page.getByRole("heading", { name: "月度净支出趋势" })).toBeVisible();
+    await expect(
+      page.getByRole("heading", { name: "月度净支出趋势" }),
+    ).toBeVisible();
     await expect(page.locator(".analysis-trend-row")).toHaveCount(12);
     await expect(page.locator(".analysis-bar.refund-heavy")).toHaveCount(1);
-    await expect(page.getByRole("heading", { name: "消费分类占比" })).toBeVisible();
+    await expect(
+      page.getByRole("heading", { name: "消费分类占比" }),
+    ).toBeVisible();
     await expect(page.getByText("33.3%")).toBeVisible();
     await expect(page.getByText(/缺少换算汇率/)).toBeVisible();
     const overflowing = await page.evaluate(() => {
       const viewport = document.documentElement.clientWidth;
       return [...document.querySelectorAll<HTMLElement>("body *")]
-        .filter((el) => el.getBoundingClientRect().width > 0 && el.getBoundingClientRect().right > viewport + 1)
-        .map((el) => ({ tag: el.tagName, className: String(el.className).slice(0, 90), right: Math.round(el.getBoundingClientRect().right), width: Math.round(el.getBoundingClientRect().width) }))
+        .filter(
+          (el) =>
+            el.getBoundingClientRect().width > 0 &&
+            el.getBoundingClientRect().right > viewport + 1,
+        )
+        .map((el) => ({
+          tag: el.tagName,
+          className: String(el.className).slice(0, 90),
+          right: Math.round(el.getBoundingClientRect().right),
+          width: Math.round(el.getBoundingClientRect().width),
+        }))
         .slice(0, 12);
     });
     expect(overflowing).toEqual([]);
-    await page.screenshot({ path: testInfo.outputPath(`spending-analysis-${width}.png`), fullPage: true });
-    await page.getByRole("combobox", { name: "分析时间范围" }).selectOption("3");
+    await page.screenshot({
+      path: testInfo.outputPath(`spending-analysis-${width}.png`),
+      fullPage: true,
+    });
+    const before = reportReads;
+    expanded = true;
+    await page
+      .getByRole("combobox", { name: "分析时间范围" })
+      .selectOption("3");
     await expect(page.locator(".analysis-trend-row")).toHaveCount(3);
-    expect(reportReads).toBeGreaterThanOrEqual(2);
+    await expect(
+      page.locator(".stats-three .stat").first().locator("strong"),
+    ).toHaveText("¥750.00");
+    await expect(page.locator(".analysis-category-list li")).toHaveCount(6);
+    await expect(page.getByText("其余分类合计")).toBeVisible();
+    expect(reportReads).toBe(before + 1);
+    expect(
+      await page.evaluate(() => document.documentElement.scrollWidth),
+    ).toBeLessThanOrEqual(width);
+    if (width === 2560)
+      await page.screenshot({
+        path: testInfo.outputPath("spending-analysis-2k-complete.png"),
+        fullPage: true,
+      });
     // Materialization is an expected, idempotent system command on page entry.
     // The analytics view itself must not create or change any financial record.
-    expect(fixture.writes.filter((write) => write.path !== "/spending-schedules/materialize")).toEqual([]);
+    expect(
+      fixture.writes.filter(
+        (write) => write.path !== "/spending-schedules/materialize",
+      ),
+    ).toEqual([]);
   });
 }
 

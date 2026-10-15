@@ -5,12 +5,23 @@ import { money, monthRange, sumDecimal, today } from "../lib/format";
 import type { Spending } from "../types";
 import { Card, Empty, ErrorBox, Loading, Stat } from "./ui";
 
-const PALETTE = ["#617f6b", "#a5b99a", "#cdb586", "#829eae", "#c59c91", "#a99ebc"];
+const PALETTE = [
+  "#617f6b",
+  "#a5b99a",
+  "#cdb586",
+  "#829eae",
+  "#c59c91",
+  "#a99ebc",
+];
 
 export function shiftMonth(month: string, delta: number) {
   const [year, number] = month.split("-").map(Number);
   const date = new Date(Date.UTC(year, number - 1 + delta, 1));
-  return String(date.getUTCFullYear()) + "-" + String(date.getUTCMonth() + 1).padStart(2, "0");
+  return (
+    String(date.getUTCFullYear()) +
+    "-" +
+    String(date.getUTCMonth() + 1).padStart(2, "0")
+  );
 }
 
 function monthCount(from: string, to: string) {
@@ -29,11 +40,15 @@ export function MonthlySpendingTrend({
   toMonth: string;
 }) {
   const byMonth = new Map(report.month.map((row) => [row.key, row]));
-  const months = Array.from({ length: monthCount(fromMonth, toMonth) }, (_, i) =>
-    shiftMonth(fromMonth, i),
+  const months = Array.from(
+    { length: monthCount(fromMonth, toMonth) },
+    (_, i) => shiftMonth(fromMonth, i),
   );
-  const values = months.map((month) => byMonth.get(month)?.known_net_spending ?? "0.00");
-  const maximum = Math.max(1, ...values.map((value) => Math.abs(Number(value))));
+  const values = months.map(
+    (month) => byMonth.get(month)?.known_net_spending ?? "0.00",
+  );
+  const maximum =
+    Math.max(0, ...values.map((value) => Math.abs(Number(value)))) || 1;
   return (
     <div className="analysis-trend" role="list" aria-label="月度净支出趋势">
       {months.map((month, index) => {
@@ -46,25 +61,51 @@ export function MonthlySpendingTrend({
             className="analysis-trend-row"
             role="listitem"
             key={month}
-            aria-label={month + " 净支出 " + money(values[index], report.reporting_currency) + (incomplete ? "，部分交易缺汇率" : "")}
+            aria-label={
+              month +
+              (row
+                ? (incomplete ? " 已知净支出 " : " 净支出 ") +
+                  money(values[index], report.reporting_currency)
+                : " 无记录，不代表实际没有消费") +
+              (incomplete ? "，部分交易缺汇率" : "")
+            }
           >
-            <span className="analysis-month">{month.slice(2).replace("-", "/")}</span>
-            <div className="analysis-track" aria-hidden="true">
+            <span className="analysis-month">
+              {month.slice(2).replace("-", "/")}
+            </span>
+            <div
+              className={
+                "analysis-track" +
+                (incomplete ? " incomplete" : !row ? " no-records" : "")
+              }
+              aria-hidden="true"
+            >
               <div className="analysis-zero" />
               {amount !== 0 && (
                 <div
-                  className={"analysis-bar" + (amount < 0 ? " refund-heavy" : "")}
-                  style={{ left: String(amount < 0 ? 50 - width : 50) + "%", width: String(width) + "%" }}
+                  className={
+                    "analysis-bar" + (amount < 0 ? " refund-heavy" : "")
+                  }
+                  style={{
+                    left: String(amount < 0 ? 50 - width : 50) + "%",
+                    width: String(width) + "%",
+                  }}
                 />
               )}
             </div>
             <span className="analysis-amount">
-              {money(values[index], report.reporting_currency)}{incomplete ? " *" : ""}
+              {row
+                ? money(values[index], report.reporting_currency) +
+                  (incomplete ? " *" : "")
+                : "无记录"}
             </span>
           </div>
         );
       })}
-      <p className="muted small">净支出＝消费－退款；左侧柱表示该月退款超过消费。没有记录的月份显示零。</p>
+      <p className="muted small">
+        净支出＝消费－退款，不含收入；左侧表示已换算退款多于消费。*
+        为缺汇率月份的已知小计；无记录不代表实际没有消费。
+      </p>
     </div>
   );
 }
@@ -74,7 +115,9 @@ export function SpendingCategoryDonut({ report }: { report: Spending }) {
   const total = Number(report.known_gross_expenses);
   const positive = report.category
     .filter((row) => Number(row.known_gross_expenses) > 0)
-    .sort((a, b) => Number(b.known_gross_expenses) - Number(a.known_gross_expenses));
+    .sort(
+      (a, b) => Number(b.known_gross_expenses) - Number(a.known_gross_expenses),
+    );
   if (!(total > 0) || positive.length === 0) {
     return (
       <Empty title="暂无可统计的消费金额">
@@ -94,19 +137,30 @@ export function SpendingCategoryDonut({ report }: { report: Spending }) {
     leading.push({
       key: "__remaining__",
       name: "其余分类合计",
-      amount: sumDecimal(remainder.map((row) => row.known_gross_expenses)) || "0.00",
+      amount:
+        sumDecimal(remainder.map((row) => row.known_gross_expenses)) || "0.00",
     });
   }
   let offset = 0;
   const slices = leading.map((row, index) => {
-    const share = Math.max(0, Math.min(100 - offset, (Number(row.amount) / total) * 100));
+    const share = Math.max(
+      0,
+      Math.min(100 - offset, (Number(row.amount) / total) * 100),
+    );
     const start = offset;
     offset += share;
-    return { ...row, color: PALETTE[index], percentage: Number(row.amount) / total * 100, start, end: offset };
+    return {
+      ...row,
+      color: PALETTE[index],
+      percentage: (Number(row.amount) / total) * 100,
+      start,
+      end: offset,
+    };
   });
-  const gradient = "conic-gradient(" + slices.map((s) =>
-    s.color + " " + s.start + "% " + s.end + "%"
-  ).join(", ") + ")";
+  const gradient =
+    "conic-gradient(" +
+    slices.map((s) => s.color + " " + s.start + "% " + s.end + "%").join(", ") +
+    ")";
   return (
     <>
       <div className="analysis-donut-layout">
@@ -117,24 +171,35 @@ export function SpendingCategoryDonut({ report }: { report: Spending }) {
           aria-label="消费总额按分类占比，具体金额和百分比见分类列表"
         >
           <div className="analysis-donut-center">
-            <small>已换算消费</small>
-            <strong>{money(report.known_gross_expenses, report.reporting_currency)}</strong>
+            <small>
+              {report.gross_expenses === null ? "已知消费" : "消费总额"}
+            </small>
+            <strong>
+              {money(report.known_gross_expenses, report.reporting_currency)}
+            </strong>
           </div>
         </div>
         <ul className="analysis-category-list">
           {slices.map((slice) => (
             <li key={slice.key}>
-              <span className="analysis-legend-dot" style={{ background: slice.color }} />
+              <span
+                className="analysis-legend-dot"
+                style={{ background: slice.color }}
+              />
               <span className="analysis-category-name">{slice.name}</span>
               <strong>{money(slice.amount, report.reporting_currency)}</strong>
-              <span className="analysis-share">{slice.percentage.toFixed(1)}%</span>
+              <span className="analysis-share">
+                {slice.percentage.toFixed(1)}%
+              </span>
             </li>
           ))}
         </ul>
       </div>
       <p className="muted small">
         占比按消费总额计算，不扣退款；退款已在上方及月度净支出中单独体现。
-        {report.missing_conversion_count > 0 ? " 含缺汇率记录时，仅以已换算金额计算占比。" : ""}
+        {report.missing_conversion_count > 0
+          ? " 含缺汇率记录时，仅以已换算金额计算占比。"
+          : ""}
       </p>
     </>
   );
@@ -142,24 +207,31 @@ export function SpendingCategoryDonut({ report }: { report: Spending }) {
 
 export function SpendingAnalysis() {
   const { timezone } = useApp();
-  const currentMonth = today(timezone).slice(0, 7);
+  const currentDate = today(timezone);
+  const currentMonth = currentDate.slice(0, 7);
   const [windowSize, setWindowSize] = useState("12");
   const [customFrom, setCustomFrom] = useState(shiftMonth(currentMonth, -11));
   const [customTo, setCustomTo] = useState(currentMonth);
-  const fromMonth = windowSize === "custom"
-    ? customFrom
-    : shiftMonth(currentMonth, 1 - Number(windowSize));
+  const fromMonth =
+    windowSize === "custom"
+      ? customFrom
+      : shiftMonth(currentMonth, 1 - Number(windowSize));
   const toMonth = windowSize === "custom" ? customTo : currentMonth;
   const validMonth = /^\d{4}-(0[1-9]|1[0-2])$/;
-  const count = validMonth.test(fromMonth) && validMonth.test(toMonth)
-    ? monthCount(fromMonth, toMonth)
-    : 0;
+  const count =
+    validMonth.test(fromMonth) && validMonth.test(toMonth)
+      ? monthCount(fromMonth, toMonth)
+      : 0;
   const rangeValid = count >= 1 && count <= 24 && toMonth <= currentMonth;
-  const report = useResource<Spending>(
-    rangeValid
-      ? "/reports/spending" + query({ from: monthRange(fromMonth).from, to: monthRange(toMonth).to })
-      : null,
-  );
+  const through = rangeValid
+    ? toMonth === currentMonth
+      ? currentDate
+      : monthRange(toMonth).to
+    : "";
+  const path = rangeValid
+    ? "/reports/spending" +
+      query({ from: monthRange(fromMonth).from, to: through })
+    : "";
   return (
     <section className="spending-analysis" aria-label="支出分析">
       <div className="analysis-controls">
@@ -180,50 +252,110 @@ export function SpendingAnalysis() {
           <div className="analysis-custom-range">
             <label className="inline-field">
               开始
-              <input type="month" aria-label="分析开始月份" value={customFrom}
-                max={currentMonth} onChange={(e) => setCustomFrom(e.target.value)} />
+              <input
+                type="month"
+                aria-label="分析开始月份"
+                value={customFrom}
+                max={currentMonth}
+                onChange={(e) => setCustomFrom(e.target.value)}
+              />
             </label>
             <label className="inline-field">
               结束
-              <input type="month" aria-label="分析结束月份" value={customTo}
-                max={currentMonth} onChange={(e) => setCustomTo(e.target.value)} />
+              <input
+                type="month"
+                aria-label="分析结束月份"
+                value={customTo}
+                max={currentMonth}
+                onChange={(e) => setCustomTo(e.target.value)}
+              />
             </label>
           </div>
         )}
-        <span className="muted small">{fromMonth} — {toMonth}</span>
+        <span className="muted small analysis-range">
+          {fromMonth} — {toMonth}
+          {rangeValid && " · 截至 " + through}
+          {toMonth === currentMonth && "（本月未结束）"}
+        </span>
       </div>
       {!rangeValid ? (
-        <div className="notice" role="alert">请选择有效的起止月份，时间范围不得超过24个月，也不能晚于当前月份。</div>
-      ) : report.loading ? (
-        <Loading />
-      ) : report.error ? (
-        <ErrorBox error={report.error} retry={report.reload} />
-      ) : report.data ? (
-        <>
-          <div className="stats-three">
-            <Stat accent label={report.data.net_spending === null ? "已知净支出" : "净支出"}
-              value={money(report.data.net_spending ?? report.data.known_net_spending, report.data.reporting_currency)}
-              detail="消费减去退款" />
-            <Stat label={report.data.gross_expenses === null ? "已知消费" : "消费合计"}
-              value={money(report.data.gross_expenses ?? report.data.known_gross_expenses, report.data.reporting_currency)} />
-            <Stat label="收到的退款"
-              value={money(report.data.refunds ?? report.data.known_refunds, report.data.reporting_currency)} />
-          </div>
-          {report.data.missing_conversion_count > 0 && (
-            <div className="notice">
-              {report.data.missing_conversion_count} 笔交易缺少换算汇率，下面的金额均为已知小计，不能视为完整支出。
-            </div>
-          )}
-          <div className="two-columns analysis-panels">
-            <Card title="月度净支出趋势">
-              <MonthlySpendingTrend report={report.data} fromMonth={fromMonth} toMonth={toMonth} />
-            </Card>
-            <Card title="消费分类占比">
-              <SpendingCategoryDonut report={report.data} />
-            </Card>
-          </div>
-        </>
-      ) : null}
+        <div className="notice" role="alert">
+          请选择有效的起止月份，时间范围不得超过24个月，也不能晚于当前月份。
+        </div>
+      ) : (
+        <AnalysisResults
+          key={path}
+          path={path}
+          fromMonth={fromMonth}
+          toMonth={toMonth}
+        />
+      )}
     </section>
   );
+}
+
+function AnalysisResults({
+  path,
+  fromMonth,
+  toMonth,
+}: {
+  path: string;
+  fromMonth: string;
+  toMonth: string;
+}) {
+  // A new query mounts with no previous result, so a new range cannot label old totals.
+  const report = useResource<Spending>(path);
+  return report.loading ? (
+    <Loading />
+  ) : report.error ? (
+    <ErrorBox error={report.error} retry={report.reload} />
+  ) : report.data ? (
+    <>
+      {report.data.missing_conversion_count > 0 && (
+        <div className="notice">
+          {report.data.missing_conversion_count}{" "}
+          笔交易缺少换算汇率，当前仅显示已知小计，不能视为完整支出。
+        </div>
+      )}
+      <div className="stats-three">
+        <Stat
+          accent
+          label={report.data.net_spending === null ? "已知净支出" : "净支出"}
+          value={money(
+            report.data.net_spending ?? report.data.known_net_spending,
+            report.data.reporting_currency,
+          )}
+          detail="消费减去退款，不含收入"
+        />
+        <Stat
+          label={report.data.gross_expenses === null ? "已知消费" : "消费合计"}
+          value={money(
+            report.data.gross_expenses ?? report.data.known_gross_expenses,
+            report.data.reporting_currency,
+          )}
+          detail="未扣除退款"
+        />
+        <Stat
+          label={report.data.refunds === null ? "已知退款" : "收到的退款"}
+          value={money(
+            report.data.refunds ?? report.data.known_refunds,
+            report.data.reporting_currency,
+          )}
+          detail="按退款到账日期统计"
+        />
+      </div>
+      <div className="two-columns analysis-panels">
+        <Card title="月度净支出趋势">
+          <MonthlySpendingTrend
+            report={report.data}
+            fromMonth={fromMonth}
+            toMonth={toMonth}
+          />
+        </Card>
+        <Card title="消费分类占比">
+          <SpendingCategoryDonut report={report.data} />
+        </Card>
+      </div>
+    </>
+  ) : null;
 }

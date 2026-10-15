@@ -468,8 +468,15 @@ function ScreenshotUpload({ onClose }: { onClose: () => void }) {
 }
 export function WealthPage() {
   const { accounts, api, timezone, refresh, notify } = useApp();
-  const report = useResource<Wealth>("/reports/wealth");
+  const members = useResource<Page<{ user_id: string; display_name: string; status: string }>>("/household-members");
+  const [owner, setOwner] = useState("");
+  const report = useResource<Wealth>("/reports/wealth" + query({ owner }));
   const now = today(timezone);
+  const selectedOwnerName = owner === "unassigned" ? "未分配账户" :
+    members.data?.items.find((m) => m.user_id === owner)?.display_name || "家庭";
+  const visibleAccounts = owner
+    ? accounts.filter((a) => owner === "unassigned" ? !a.owner_user_id : a.owner_user_id === owner)
+    : accounts;
   const history = useResource<{ points: (Wealth & { as_of: string })[] }>(
     "/reports/wealth-history" +
       query({ from: Number(now.slice(0, 4)) - 1 + now.slice(4), to: now }),
@@ -502,12 +509,25 @@ export function WealthPage() {
       >
         查看账户余额、资产和负债。
       </Heading>
-      <ErrorBox error={report.error || error} retry={report.reload} />
+      <div className="filters">
+        <label>
+          <span className="muted small">查看范围 </span>
+          <select aria-label="财富账户归属" value={owner} onChange={(e) => setOwner(e.target.value)}>
+            <option value="">整个家庭</option>
+            {members.data?.items.map((m) => (
+              <option key={m.user_id} value={m.user_id}>{m.display_name}{m.status !== "active" ? "（已停用）" : ""}</option>
+            ))}
+            <option value="unassigned">未分配账户</option>
+          </select>
+        </label>
+      </div>
+      <ErrorBox error={members.error || report.error || error} retry={report.reload} />
       {report.loading ? (
         <Loading />
       ) : (
         report.data && (
           <>
+            {owner && <p className="muted small">当前显示：{selectedOwnerName}。仅按现有账户归属汇总，不代表历史期间的归属。</p>}
             <WealthStats report={report.data} />
             {!report.data.coverage.complete && (
               <div className="notice">
@@ -523,7 +543,7 @@ export function WealthPage() {
               <h2>
                 账户{" "}
                 <span className="count">
-                  {accounts.filter((a) => a.status === "active").length}
+                  {visibleAccounts.filter((a) => a.status === "active").length}
                 </span>
               </h2>
               <Button
@@ -617,7 +637,8 @@ export function WealthPage() {
               </Card>
             )}
             <div className="two-columns">
-              <Card title="净资产变化">
+              <Card title="家庭净资产变化">
+                {owner && <p className="muted small">历史趋势仍按家庭整体统计，不按当前账户归属追溯。</p>}
                 {history.data ? (
                   <WealthHistory points={history.data.points} />
                 ) : history.error ? (
@@ -626,7 +647,7 @@ export function WealthPage() {
                   <Loading />
                 )}
               </Card>
-              <Card title="资产风险分布">
+              <Card title={owner ? selectedOwnerName + " · 资产风险分布" : "家庭资产风险分布"}>
                 <div className="risk-list">
                   {report.data.risk_buckets.map((r, i) => (
                     <div key={r.risk_level}>
@@ -649,7 +670,8 @@ export function WealthPage() {
           </>
         )
       )}
-      <Card title="投资收益">
+      <Card title="家庭投资收益">
+        {owner && <p className="muted small">投资收益仍按整个家庭展示，暂未按账户归属过滤。</p>}
         <ErrorBox error={investments.error} retry={investments.reload} />
         {investments.data?.items.length ? (
           investments.data.items.map((i) => (

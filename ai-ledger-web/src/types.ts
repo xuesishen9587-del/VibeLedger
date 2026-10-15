@@ -22,6 +22,23 @@ export type Snapshot = {
   status: string;
   time_basis: string;
 };
+export type BalanceEstimate = {
+  account_id: string;
+  currency: string;
+  status: "ready" | "no_snapshot" | "unsupported_account" | "ambiguous_same_day" | "currency_mismatch";
+  snapshot_id: string | null;
+  baseline_date: string | null;
+  baseline_balance: string | null;
+  recorded_change: string | null;
+  estimated_balance: string | null;
+  transaction_count: number;
+  same_day_count: number;
+  currency_mismatch_count: number;
+};
+export type BalanceEstimateReport = {
+  as_of: string;
+  items: BalanceEstimate[];
+};
 export type Account = {
   id: string;
   household_id: string;

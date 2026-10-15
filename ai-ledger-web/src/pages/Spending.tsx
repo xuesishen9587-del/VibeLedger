@@ -24,6 +24,7 @@ import {
   Tag,
 } from "../components/ui";
 import { Schedules, ScheduleEditor } from "./Schedules";
+import { SpendingAnalysis } from "../components/SpendingAnalysis";
 import type { Transaction, Page, Spending } from "../types";
 export function TransactionEditor({
   record,
@@ -228,17 +229,21 @@ export function SpendingPage() {
     ),
     [tab, setTab] = useState("transactions");
   const range = monthRange(month);
-  const report = useResource<Spending>("/reports/spending" + query(range));
+  const report = useResource<Spending>(
+    tab === "transactions" ? "/reports/spending" + query(range) : null,
+  );
   const records = useResource<Page<Transaction>>(
-    "/transactions" +
-      query({
-        ...range,
-        category_id: category,
-        account_id: account,
-        merchant: search,
-        cursor,
-        limit: 30,
-      }),
+    tab === "transactions"
+      ? "/transactions" +
+          query({
+            ...range,
+            category_id: category,
+            account_id: account,
+            merchant: search,
+            cursor,
+            limit: 30,
+          })
+      : null,
   );
   useEffect(() => {
     const listener = () => {
@@ -270,7 +275,7 @@ export function SpendingPage() {
       >
         查看和记录消费、退款及收入。
       </Heading>
-      <div className="toolbar">
+      <div className="toolbar spending-toolbar">
         <div className="tabs">
           <button
             className={tab === "transactions" ? "selected" : ""}
@@ -284,23 +289,33 @@ export function SpendingPage() {
           >
             月度计划
           </button>
+          <button
+            className={tab === "analysis" ? "selected" : ""}
+            onClick={() => setTab("analysis")}
+          >
+            支出分析
+          </button>
         </div>
-        <label className="inline-field">
-          月份
-          <input
-            type="month"
-            aria-label="月份"
-            value={month}
-            onChange={(e) =>
-              change(() =>
-                setMonth(e.target.value || today(timezone).slice(0, 7)),
-              )
-            }
-          />
-        </label>
+        {tab !== "analysis" && (
+          <label className="inline-field">
+            月份
+            <input
+              type="month"
+              aria-label="月份"
+              value={month}
+              onChange={(e) =>
+                change(() =>
+                  setMonth(e.target.value || today(timezone).slice(0, 7)),
+                )
+              }
+            />
+          </label>
+        )}
       </div>
       {tab === "schedules" ? (
         <Schedules />
+      ) : tab === "analysis" ? (
+        <SpendingAnalysis />
       ) : (
         <>
           <ErrorBox error={report.error} retry={report.reload} />

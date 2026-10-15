@@ -485,6 +485,52 @@ for (const width of [1366, 390, 320]) {
   });
 }
 
+for (const width of [1366, 390, 320]) {
+  test(`spending analysis reports and charts fit ${width}px without writing data`, async ({ page }, testInfo) => {
+    await page.setViewportSize({ width, height: 900 });
+    const fixture = await setup(page);
+    const current = new Intl.DateTimeFormat("en-CA", {
+      timeZone: "Asia/Singapore", year: "numeric", month: "2-digit",
+    }).format(new Date());
+    const previous = new Date(Date.UTC(
+      Number(current.slice(0, 4)), Number(current.slice(5, 7)) - 2, 1,
+    )).toISOString().slice(0, 7);
+    let reportReads = 0;
+    await page.route(/\/api\/v1\/reports\/spending(?:\?|$)/, (route) => {
+      reportReads++;
+      const data = {
+        ...totals,
+        gross_expenses: "300.00", known_gross_expenses: "300.00",
+        refunds: "350.00", known_refunds: "350.00",
+        net_spending: null, known_net_spending: "-50.00",
+        missing_conversion_count: 1, reporting_currency: "CNY",
+        from: "2026-01-01", to: "2026-12-31",
+        category: [
+          { ...totals, key: "food", known_gross_expenses: "100.00", gross_expenses: "100.00" },
+          { ...totals, key: "shop", known_gross_expenses: "200.00", gross_expenses: "200.00" },
+        ],
+        month: [{ ...totals, key: previous, known_net_spending: "-50.00", net_spending: null, missing_conversion_count: 1 }],
+      };
+      return route.fulfill({ json: data });
+    });
+    await login(page);
+    await page.goto("/#/spending");
+    await page.getByRole("button", { name: "支出分析" }).click();
+    await expect(page.getByRole("heading", { name: "月度净支出趋势" })).toBeVisible();
+    await expect(page.locator(".analysis-trend-row")).toHaveCount(12);
+    await expect(page.locator(".analysis-bar.refund-heavy")).toHaveCount(1);
+    await expect(page.getByRole("heading", { name: "消费分类占比" })).toBeVisible();
+    await expect(page.getByText("33.3%")).toBeVisible();
+    await expect(page.getByText(/缺少换算汇率/)).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
+    await page.screenshot({ path: testInfo.outputPath(`spending-analysis-${width}.png`), fullPage: true });
+    await page.getByRole("combobox", { name: "分析时间范围" }).selectOption("3");
+    await expect(page.locator(".analysis-trend-row")).toHaveCount(3);
+    expect(reportReads).toBeGreaterThanOrEqual(2);
+    expect(fixture.writes).toEqual([]);
+  });
+}
+
 async function login(page: Page) {
   await page.goto("/");
   await page.getByLabel("邮箱", { exact: true }).fill("test@example.com");

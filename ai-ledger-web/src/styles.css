@@ -2331,3 +2331,32 @@ dialog::backdrop {
   .spending-analysis .stats-three .stat > strong { font-size: 17px; overflow-wrap: anywhere; line-height: 1.3; }
   .spending-analysis .stats-three .stat:first-child > strong { font-size: 26px; }
 }
+
+/* Advisory balance projection only; never presented as a verified observation. */
+.balance-suggestion {
+  display: grid;
+  justify-items: start;
+  gap: 8px;
+  margin: 12px 0;
+  padding: 14px 16px;
+  border: 1px solid #dbe7d9;
+  border-radius: 11px;
+  background: #f4f8f2;
+  font-size: 12px;
+  min-width: 0;
+}
+.balance-suggestion > strong {
+  color: #395d4b;
+  font-size: 16px;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+.balance-suggestion > small {
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+.balance-suggestion > span { overflow-wrap: anywhere; }
+@media (max-width: 680px) {
+  .balance-suggestion { padding: 12px; }
+  .balance-suggestion > strong { font-size: 14px; }
+}

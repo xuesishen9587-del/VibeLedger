@@ -2,6 +2,7 @@
 from datetime import date, datetime, time, timezone, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 from zoneinfo import ZoneInfo
+from uuid import UUID
 from app.domain.balances import instant
 from app.domain.spending import fail, MINOR_UNITS, money_text
 from app.repositories import spending as repo, simplified_schema as schema
@@ -27,7 +28,7 @@ def report_time(value, household):
     return timestamp, False
 
 
-def report(conn, household_id, as_of=None, *, historical_risk=False):
+def report(conn, household_id, as_of=None, *, historical_risk=False, owner=None):
     household = schema.get_household(conn, household_id)
     timestamp, current = report_time(as_of, household)
     tz = ZoneInfo(household["timezone"])
@@ -35,6 +36,22 @@ def report(conn, household_id, as_of=None, *, historical_risk=False):
     currency = household["reporting_currency"]
     accounts = repo.rows(conn, "SELECT * FROM accounts WHERE household_id=%s AND status<>'cancelled' "
         "AND opened_on<=%s AND (closed_on IS NULL OR closed_on>=%s) ORDER BY id", (household_id, day, day))
+    setup_required = not accounts
+    # Ownership is a view filter, not an access control. All results remain household scoped.
+    # Filter before calculating coverage, totals and risk so missing observations in
+    # other members' accounts do not make a personal view incomplete.
+    if owner is not None:
+        if owner == "unassigned":
+            accounts = [account for account in accounts if account["owner_user_id"] is None]
+        else:
+            try:
+                owner_id = str(UUID(owner))
+            except (ValueError, TypeError, AttributeError):
+                fail("INVALID_OWNER", "The wealth owner must be a household member UUID or 'unassigned'.")
+            members = schema.list_household_members(conn, household_id)
+            if not any(str(member["user_id"]) == owner_id for member in members):
+                fail("INVALID_OWNER", "The wealth owner must belong to this household.")
+            accounts = [account for account in accounts if str(account["owner_user_id"]) == owner_id]
     rows = repo.rows(conn, "SELECT DISTINCT ON (account_id) * FROM account_snapshots WHERE household_id=%s "
         "AND status='active' AND as_of<=%s ORDER BY account_id,as_of DESC", (household_id, timestamp))
     by_account = {r["account_id"]: r for r in rows}
@@ -82,7 +99,7 @@ def report(conn, household_id, as_of=None, *, historical_risk=False):
     complete = bool(accounts) and not missing and not missing_fx
     totals = {"assets": assets, "liabilities": debts, "net_worth": assets-debts}
     result = {"as_of": timestamp.isoformat(), "reporting_currency": currency, "accounts": results,
-        "setup_required": not accounts, "risk_buckets": [] if historical_risk else [
+        "setup_required": setup_required, "risk_buckets": [] if historical_risk else [
             {"risk_level": key, "amount": money_text(value, currency),
              "percentage": str((value/assets*100).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)) if assets else None}
             for key, value in buckets.items()],

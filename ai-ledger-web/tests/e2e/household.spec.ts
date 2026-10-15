@@ -355,6 +355,136 @@ async function setup(
     },
   };
 }
+for (const width of [1366, 390, 320]) {
+  test(`wealth ownership scopes and long names fit a ${width}px viewport`, async ({
+    page,
+  }, testInfo) => {
+    await page.setViewportSize({ width, height: 900 });
+    const fixture = await setup(page, { multipleAccounts: true });
+    const name = "小林（家庭成员名称较长时仍可完整选择）";
+    await page.route("**/api/v1/household-members", (route) =>
+      route.fulfill({
+        json: {
+          items: [
+            { user_id: "one", display_name: name, status: "active" },
+            { user_id: "two", display_name: "小夏", status: "active" },
+            { user_id: "empty", display_name: "原成员", status: "disabled" },
+          ],
+          next_cursor: null,
+        },
+      }),
+    );
+    await page.route(/\/api\/v1\/reports\/wealth(?:\?|$)/, async (route) => {
+      const owner = new URL(route.request().url()).searchParams.get("owner");
+      const empty = owner === "empty",
+        missingFx = owner === "unassigned",
+        all = !owner;
+      const amount = owner === "two" ? "200.20" : all ? "300.30" : "100.10";
+      const known = empty || missingFx ? "0.00" : amount,
+        complete = !empty && !missingFx;
+      const row = (id: string, title: string) => ({
+        account_id: id,
+        name: title,
+        account_type: "savings",
+        currency: missingFx ? "USD" : "CNY",
+        balance: missingFx ? "30.00" : id === "account" ? "100.10" : "200.20",
+        converted_amount: missingFx
+          ? null
+          : id === "account"
+            ? "100.10"
+            : "200.20",
+        as_of: "2026-02-02T12:00:00+08:00",
+        age_days: 1,
+        needs_update: false,
+        very_stale: false,
+        balance_scope: title,
+      });
+      const rows = empty
+        ? []
+        : missingFx
+          ? [row("account", "未分配外币账户")]
+          : owner === "two"
+            ? [row("second-account", "小夏的储蓄账户")]
+            : all
+              ? [
+                  row("account", "小林的储蓄账户"),
+                  row("second-account", "小夏的储蓄账户"),
+                ]
+              : [row("account", "小林的储蓄账户（名称较长的账户）")];
+      await route.fulfill({
+        json: {
+          reporting_currency: "CNY",
+          setup_required: false,
+          accounts: rows,
+          total_assets: complete ? amount : null,
+          total_liabilities: complete ? "0.00" : null,
+          net_worth: complete ? amount : null,
+          known_assets: known,
+          known_liabilities: "0.00",
+          known_net_worth: known,
+          risk_buckets: [
+            {
+              risk_level: "low",
+              amount: known,
+              percentage: complete ? "100.00" : null,
+            },
+          ],
+          coverage: {
+            complete,
+            missing_account_ids: [],
+            missing_fx_currencies: missingFx ? ["USD"] : [],
+            stale_account_ids: [],
+            stale_fx_currencies: [],
+            oldest_observation_at: null,
+            newest_observation_at: null,
+          },
+        },
+      });
+    });
+    await login(page);
+    await page.goto("/#/wealth");
+    await expect(page.locator(".net-worth > span")).toContainText("家庭净资产");
+    const owner = page.getByRole("combobox", { name: "财富账户归属" });
+    await owner.selectOption("one");
+    await expect(page.locator(".net-worth > span")).toContainText(name + "净资产");
+    await expect(page.locator(".account-card")).toHaveCount(1);
+    await expect(page.locator(".section-heading .count")).toHaveText("1");
+    await expect(page.getByText("小夏的储蓄账户", { exact: true })).toHaveCount(
+      0,
+    );
+    await expect(
+      page.getByRole("heading", { name: "家庭净资产变化", exact: true }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("heading", { name: "家庭投资收益", exact: true }),
+    ).toBeVisible();
+    expect(
+      await page.evaluate(() => document.documentElement.scrollWidth),
+    ).toBeLessThanOrEqual(width);
+    const bounds = await owner.boundingBox();
+    expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(width);
+    await page.screenshot({
+      path: testInfo.outputPath(`wealth-${width}.png`),
+      fullPage: true,
+    });
+    await owner.selectOption("two");
+    await expect(page.locator(".net-worth > span")).toContainText("小夏净资产");
+    await owner.selectOption("unassigned");
+    await expect(page.locator(".net-worth > span")).toContainText("已知净资产");
+    await expect(page.getByText(/部分账户余额或汇率尚未补齐/)).toBeVisible();
+    await expect(page.getByText("100.00%", { exact: true })).toHaveCount(0);
+    await owner.selectOption("empty");
+    await expect(
+      page.getByText("当前范围没有账户", { exact: true }),
+    ).toBeVisible();
+    await expect(page.locator(".wealth-summary")).toHaveCount(0);
+    await expect(page.getByText(/部分账户余额或汇率尚未补齐/)).toHaveCount(0);
+    await owner.selectOption("");
+    await expect(page.locator(".net-worth > span")).toContainText("家庭净资产");
+    expect(fixture.writes).toEqual([]);
+  });
+}
+
 async function login(page: Page) {
   await page.goto("/");
   await page.getByLabel("邮箱", { exact: true }).fill("test@example.com");

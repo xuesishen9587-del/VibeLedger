@@ -1292,6 +1292,16 @@ dialog::backdrop {
   grid-template-columns: repeat(3, 1fr);
   gap: 18px;
 }
+.wealth-owner-filter label {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  width: min(100%, 360px);
+}
+.wealth-owner-filter select {
+  width: 100%;
+  min-width: 0;
+}
 .account-card {
   padding: 20px;
   margin-bottom: 24px;

@@ -6,8 +6,10 @@ from app.services import wealth_reports
 router = APIRouter(prefix="/api/v1/reports", tags=["Last reported wealth"])
 
 @router.get("/wealth")
-def wealth(as_of: str | None = None, actor=Depends(get_auth_context), conn=Depends(get_db_connection)):
-    return wealth_reports.report(conn, actor.household_id, as_of, historical_risk=as_of is not None)
+def wealth(as_of: str | None = None, owner: str | None = Query(default=None,
+           description="Current account owner: a household member UUID or 'unassigned'; omit for the entire household."),
+           actor=Depends(get_auth_context), conn=Depends(get_db_connection)):
+    return wealth_reports.report(conn, actor.household_id, as_of, historical_risk=as_of is not None, owner=owner)
 
 @router.get("/wealth-history")
 def history(start: date = Query(alias="from"), end: date = Query(alias="to"), actor=Depends(get_auth_context), conn=Depends(get_db_connection)):

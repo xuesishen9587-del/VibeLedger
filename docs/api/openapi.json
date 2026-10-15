@@ -5738,6 +5738,24 @@
             }
           },
           {
+            "description": "Current account owner: a household member UUID or 'unassigned'; omit for the entire household.",
+            "in": "query",
+            "name": "owner",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Current account owner: a household member UUID or 'unassigned'; omit for the entire household.",
+              "title": "Owner"
+            }
+          },
+          {
             "in": "header",
             "name": "authorization",
             "required": false,

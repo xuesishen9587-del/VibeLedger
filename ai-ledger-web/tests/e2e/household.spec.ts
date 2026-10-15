@@ -831,7 +831,6 @@ test("PDF drop-zone accepts drag and drop, rejects non-PDF, and preserves the ex
   await page.goto("/#/statement");
   const zone = page.locator(".drop-zone");
   await expect(zone).toBeVisible();
-  const file = page.getByRole("textbox", { name: "PDF 账单" });
   // Simulate a file dropped from the OS; do not trigger an import until the user confirms.
   const pdfTransfer = await page.evaluateHandle(() => {
     const transfer = new DataTransfer();

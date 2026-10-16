@@ -24,6 +24,7 @@ data class ScreenState(
     val connected: Boolean = false,
     val loading: Boolean = false,
     val imageReady: Boolean = false,
+    val imageSequence: Long = 0,
     val capture: CaptureState = CaptureState(),
     val notice: String = "",
     val storageUnavailable: Boolean = false,
@@ -55,6 +56,7 @@ class CompanionModel(private val app: Application) {
         observer?.cancel()
         val api = HttpCaptureApi(binding.origin, binding.token)
         val active = CaptureSession(api, requireNotNull(vault).pendingStore(binding))
+        if (active.state.value.pending) clearImage()
         session = active
         mutable.update { it.copy(configured = true, origin = binding.origin, connected = false,
             capture = active.state.value, otherPending = vault!!.otherPendingCount()) }
@@ -104,7 +106,7 @@ class CompanionModel(private val app: Application) {
         } catch (_: Exception) { mutable.update { it.copy(notice = "安全存储写入失败，凭据未清除。") } }
     }
 
-    private fun locked() = state.value.loading || state.value.capture.busy
+    private fun locked() = state.value.loading || session?.state?.value?.busy == true
     fun select(uri: Uri) {
         if (locked() || state.value.capture.pending || state.value.storageUnavailable) return
         mutable.update { it.copy(loading = true, notice = "") }
@@ -112,7 +114,7 @@ class CompanionModel(private val app: Application) {
             try {
                 clearImage()
                 image = ImagePreparer.jpeg(app.contentResolver, uri)
-                mutable.update { it.copy(imageReady = true) }
+                mutable.update { it.copy(imageReady = true, imageSequence = it.imageSequence + 1) }
             } catch (_: Exception) { mutable.update { it.copy(notice = "图片无法读取，请重新选择一张截图。") }
             } finally { mutable.update { it.copy(loading = false) } }
         }

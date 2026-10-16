@@ -11,6 +11,8 @@ Kotlin + Jetpack Compose 原生截图记账助手，面向 OPPO / ColorOS 的手
 
 安装 JDK 17、Android Studio 及 Android SDK Platform 35 / Build Tools 35.0.0。用 Android Studio 打开本目录；通过 IDE SDK 设置或本机 `local.properties` 指定 `sdk.dir`，不要提交该文件。固定 AGP 8.9.2、Kotlin 2.1.20 和 Compose BOM 2025.04.01，避免工具链随最新版本漂移；版本兼容参考 [AGP 8.9](https://developer.android.com/build/releases/past-releases/agp-8-9-0-release-notes) 和 [Compose BOM](https://developer.android.com/develop/ui/compose/bom)。
 
+Lint 错误会阻断 CI；SDK/依赖升级及 KTX 风格建议保留为警告。当前目标 SDK 35 在更新 Android 上采用兼容行为，尚未验证 ColorOS 17 的系统差异；升级目标 SDK 和依赖后需要重新进行真机检查。
+
 ```sh
 # macOS / Linux，在本目录
 ./gradlew :capture-core:test :app:testDebugUnitTest :app:lintDebug :app:assembleDebug

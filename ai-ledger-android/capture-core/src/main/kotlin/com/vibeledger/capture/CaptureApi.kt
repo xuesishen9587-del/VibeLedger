@@ -8,6 +8,7 @@ import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -89,7 +90,10 @@ class HttpCaptureApi(
     }
 
     /** Read-only authentication check; returns no financial data and stores no response. */
-    suspend fun checkConnection() { request("GET", arrayOf("devices")) }
+    suspend fun checkConnection() {
+        val response = json.parseToJsonElement(request("GET", arrayOf("devices"))).jsonObject
+        require(response["items"] is JsonArray)
+    }
 
     override suspend fun upload(key: String, jpeg: ByteArray, note: String): Receipt {
         require(jpeg.isNotEmpty() && jpeg.size <= 10 * 1024 * 1024 && note.length <= 2000)

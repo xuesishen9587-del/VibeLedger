@@ -23,7 +23,7 @@ iPhone Shortcut 用于消费截图；清晰证据可直接保存，不确定证�
 
 ```mermaid
 flowchart LR
-    Phone[iPhone Shortcut / 设备令牌] --> API[FastAPI]
+    Phone[iPhone Shortcut / Android App / 设备令牌] --> API[FastAPI]
     Browser[React / Supabase 登录] --> Web[Node 同源代理]
     Web --> API
     Fallback[Streamlit 备用界面] --> API

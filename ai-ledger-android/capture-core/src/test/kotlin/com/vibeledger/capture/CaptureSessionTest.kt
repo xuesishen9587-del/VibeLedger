@@ -12,6 +12,7 @@ import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertFailsWith
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -287,6 +288,17 @@ class CaptureSessionTest {
         enqueue("untrusted invalid response"); session.confirm(); request()
         assertTrue(session.state.value.pending)
         assertNull(session.state.value.receipt)
+    }
+
+    @Test fun `connection requires authenticated devices JSON rather than an HTML success page`() = runBlocking {
+        enqueue("<html>unrelated login page</html>")
+        assertFailsWith<IllegalArgumentException> { api().checkConnection() }
+        request()
+        enqueue("""{"items":[]}""")
+        api().checkConnection()
+        val check = request()
+        assertEquals("GET", check.method)
+        assertEquals("/api/v1/devices", check.path)
     }
 
     @Test fun `failed key persistence prevents any HTTP request`() = runBlocking {

@@ -21,7 +21,8 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
     kotlinOptions { jvmTarget = "17" }
-    lint { abortOnError = true; warningsAsErrors = true }
+    // Keep SDK/dependency upgrade and KTX advice visible; errors still fail CI.
+    lint { abortOnError = true }
     packaging { resources.excludes += "/META-INF/{AL2.0,LGPL2.1}" }
 }
 dependencies {

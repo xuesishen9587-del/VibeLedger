@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
@@ -51,7 +52,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.vibeledger.capture.Receipt
-import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 
 class MainActivity : ComponentActivity() {
@@ -81,14 +82,14 @@ private val Teal = Color(0xFF167D72)
 private fun CompanionScreen(model: CompanionModel) {
     val state by model.state.collectAsStateWithLifecycle()
     var settings by remember { mutableStateOf(false) }
-    var note by remember { mutableStateOf("") }
+    var note by remember(state.imageSequence) { mutableStateOf("") }
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         uri?.let { note = ""; model.select(it) }
     }
     val busy = state.loading || state.capture.busy
     MaterialTheme(colorScheme = lightColorScheme(primary = Teal, background = Color(0xFFF5F7F6))) {
         Scaffold { padding ->
-            Column(Modifier.fillMaxSize().padding(padding).verticalScroll(rememberScrollState())
+            Column(Modifier.fillMaxSize().padding(padding).imePadding().verticalScroll(rememberScrollState())
                 .padding(20.dp).widthIn(max = 600.dp), verticalArrangement = Arrangement.spacedBy(18.dp)) {
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     Text("轻记", color = Color.White, fontWeight = FontWeight.Bold,
@@ -178,8 +179,8 @@ private fun ReceiptCard(receipt: Receipt) {
             }, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = Teal)
             // The backend formats amount/currency/merchant/category/account/date/installments.
             Text(receipt.summary.ifBlank { "请查询处理结果或前往网页核对。" })
-            if (receipt.draft?.get("payment_mode")?.jsonPrimitive?.contentOrNull == "installment") {
-                val period = receipt.draft?.get("period_no")?.jsonPrimitive?.contentOrNull
+            if ((receipt.draft?.get("payment_mode") as? JsonPrimitive)?.contentOrNull == "installment") {
+                val period = (receipt.draft?.get("period_no") as? JsonPrimitive)?.contentOrNull
                 if (period != null) Text("当前期次：第 $period 期")
             }
             if (receipt.warnings.isNotEmpty()) {

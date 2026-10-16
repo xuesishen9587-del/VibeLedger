@@ -150,3 +150,36 @@ it("preserves a disabled owner and does not offer disabled members for new assig
     "修改账户",
   );
 });
+
+it.each([
+  ["ios_shortcuts", false],
+  ["android_app", true],
+])(
+  "provisions the selected device platform %s and keeps iPhone as default",
+  async (platform, change) => {
+    const { user, request } = setup();
+    await user.click(screen.getByRole("button", { name: "记账设备" }));
+    await user.click(screen.getByRole("button", { name: "添加设备" }));
+    const dialog = within(screen.getByRole("dialog"));
+    expect(dialog.getByRole("combobox", { name: "设备平台" })).toHaveValue(
+      "ios_shortcuts",
+    );
+    if (change)
+      await user.selectOptions(
+        dialog.getByRole("combobox", { name: "设备平台" }),
+        "android_app",
+      );
+    await user.type(dialog.getByLabelText("设备名称"), "合成测试手机");
+    request.mockResolvedValueOnce({
+      token: "synthetic-once-only-token",
+    } as never);
+    await user.click(dialog.getByRole("button", { name: "创建设备" }));
+    expect(request).toHaveBeenCalledWith("/devices", {
+      method: "POST",
+      body: JSON.stringify({ device_name: "合成测试手机", platform }),
+    });
+    expect(await dialog.findByLabelText("设备访问凭据")).toHaveValue(
+      "synthetic-once-only-token",
+    );
+  },
+);

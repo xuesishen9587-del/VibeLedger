@@ -17,11 +17,13 @@
 
 iPhone Shortcut 用于消费截图；清晰证据可直接保存，不确定证据进入草稿。实际导出文件的行为和限制见 [Shortcut 核对](docs/architecture/SHORTCUT_COMPATIBILITY_BOUNDARY.md)。
 
+[Android 轻记](ai-ledger-android/README.md) 提供原生 Kotlin / Compose 单图选择与系统分享入口，复用相同后端和家庭账本，使用独立设备 Token。构建、网络恢复规则及尚需真机验证的项目见其说明。
+
 ## 架构与数据流
 
 ```mermaid
 flowchart LR
-    Phone[iPhone Shortcut / 设备令牌] --> API[FastAPI]
+    Phone[iPhone Shortcut / Android App / 设备令牌] --> API[FastAPI]
     Browser[React / Supabase 登录] --> Web[Node 同源代理]
     Web --> API
     Fallback[Streamlit 备用界面] --> API

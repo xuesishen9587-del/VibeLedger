@@ -1,0 +1,9 @@
+<resources>
+    <string name="app_name">VibeLedger 轻记</string>
+    <style name="Theme.VibeLedger" parent="android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:colorAccent">#167D72</item>
+        <item name="android:windowActionModeOverlay">true</item>
+    </style>
+</resources>

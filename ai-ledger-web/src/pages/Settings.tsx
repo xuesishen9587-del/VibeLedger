@@ -38,6 +38,7 @@ import type {
 type Device = {
   device_id: string;
   device_name: string;
+  platform?: string;
   status: string;
   last_seen_at: string | null;
 };
@@ -473,7 +474,7 @@ export function SettingsPage({ onLogout }: { onLogout: () => Promise<void> }) {
           {[
             ["accounts", "账户", Wallet],
             ["categories", "分类", TagIcon],
-            ["devices", "快捷指令设备", Smartphone],
+            ["devices", "记账设备", Smartphone],
             ["preferences", "提醒与登录", SlidersHorizontal],
           ].map(([id, label, Icon]) => {
             const I = Icon as typeof Wallet;
@@ -567,7 +568,7 @@ export function SettingsPage({ onLogout }: { onLogout: () => Promise<void> }) {
           )}
           {tab === "devices" && (
             <Card
-              title="连接快捷指令的设备"
+              title="连接账本的设备"
               action={
                 <Button kind="primary" onClick={() => setDevice(true)}>
                   <Plus size={15} />
@@ -576,7 +577,8 @@ export function SettingsPage({ onLogout }: { onLogout: () => Promise<void> }) {
               }
             >
               <p className="muted">
-                这里是你自己的快捷指令设备。撤销后，该设备就不能再访问账本。
+                这里是你自己的 iPhone Shortcut 和 Android App
+                设备。每台设备使用独立凭据，撤销后就不能再访问账本。
               </p>
               <ErrorBox error={devices.error} retry={devices.reload} />
               {devices.data?.items.map((d) => (
@@ -584,6 +586,13 @@ export function SettingsPage({ onLogout }: { onLogout: () => Promise<void> }) {
                   <Smartphone size={20} />
                   <div>
                     <strong>{d.device_name}</strong>
+                    <small>
+                      {d.platform === "android_app"
+                        ? "Android App"
+                        : d.platform === "ios_shortcuts"
+                          ? "iPhone Shortcut"
+                          : "记账设备"}
+                    </small>
                     <small>最近使用：{day(d.last_seen_at)}</small>
                   </div>
                   <Tag>{d.status === "active" ? "已连接" : "已撤销"}</Tag>
@@ -669,7 +678,7 @@ export function SettingsPage({ onLogout }: { onLogout: () => Promise<void> }) {
       )}{" "}
       {device && (
         <Modal
-          title="添加快捷指令设备"
+          title="添加记账设备"
           onClose={() => {
             setDevice(false);
             setCredential("");
@@ -678,7 +687,8 @@ export function SettingsPage({ onLogout }: { onLogout: () => Promise<void> }) {
           {credential ? (
             <>
               <p>
-                设备已创建。把下面的访问凭据填入你自己的快捷指令中；关闭后不会再次显示。
+                设备已创建。把下面的访问凭据填入对应手机的快捷指令或 Android
+                App；关闭后不会再次显示。请勿与其他设备共用。
               </p>
               <textarea readOnly aria-label="设备访问凭据" value={credential} />
               <Button
@@ -701,7 +711,7 @@ export function SettingsPage({ onLogout }: { onLogout: () => Promise<void> }) {
                     method: "POST",
                     body: JSON.stringify({
                       device_name: String(f.get("name")),
-                      platform: "ios_shortcuts",
+                      platform: String(f.get("platform")),
                     }),
                   },
                 );
@@ -709,11 +719,17 @@ export function SettingsPage({ onLogout }: { onLogout: () => Promise<void> }) {
                 devices.reload();
               }}
             >
+              <Field label="设备平台">
+                <select name="platform" defaultValue="ios_shortcuts">
+                  <option value="ios_shortcuts">iPhone Shortcut</option>
+                  <option value="android_app">Android App</option>
+                </select>
+              </Field>
               <Field label="设备名称">
                 <input
                   name="name"
                   required
-                  placeholder="比如：我的 iPhone"
+                  placeholder="比如：我的 iPhone、OPPO 手机"
                   maxLength={100}
                 />
               </Field>
@@ -726,7 +742,7 @@ export function SettingsPage({ onLogout }: { onLogout: () => Promise<void> }) {
           title={"撤销 " + revoke.device_name + " 的访问？"}
           onClose={() => setRevoke(null)}
         >
-          <p>这个设备的快捷指令将无法继续读写账本。</p>
+          <p>这个设备将无法继续读写账本。</p>
           <ActionForm
             label="确认撤销"
             onSave={async () => {

@@ -50,7 +50,8 @@ class CredentialVault(context: Context) {
     }
 
     private fun load(): VaultData {
-        val raw = try { file.readFully() } catch (_: java.io.FileNotFoundException) { return VaultData() }
+        if (!file.baseFile.exists() && !File(file.baseFile.path + ".bak").exists()) return VaultData()
+        val raw = file.readFully()
         check(raw.size >= 30 && raw[0].toInt() == 1)
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
         cipher.init(Cipher.DECRYPT_MODE, key(false), GCMParameterSpec(128, raw.copyOfRange(1, 13)))

@@ -3,6 +3,7 @@ package com.vibeledger.capture
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.async
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
@@ -218,6 +219,37 @@ class CaptureSessionTest {
         assertEquals("/api/v1/ingestion-requests/$ID/reject", reject.path)
         assertEquals("3", Json.parseToJsonElement(reject.body.readUtf8()).jsonObject["expected_version"]!!.jsonPrimitive.content)
         assertNull(store.key)
+    }
+
+    @Test fun `cancel that races a commit shows saved result without claiming rollback`() = runBlocking {
+        val store = MemoryPending("original-key")
+        val session = CaptureSession(api(), store)
+        enqueue(body("committed", ready = false, action = "done"))
+        session.cancel(); request()
+        assertEquals("committed", session.state.value.receipt!!.status)
+        assertNull(store.key)
+    }
+
+    @Test fun `coroutine interruption leaves durable key and no actionable stale snapshot`() = runBlocking {
+        val store = MemoryPending()
+        val entered = CompletableDeferred<Unit>()
+        val fake = object : CaptureApi by api() {
+            override suspend fun upload(key: String, jpeg: ByteArray, note: String): Receipt {
+                // Assert durability at the boundary before any upload could be sent.
+                assertEquals(key, store.read())
+                entered.complete(Unit)
+                CompletableDeferred<Unit>().await()
+                error("unreachable")
+            }
+        }
+        val session = CaptureSession(fake, store)
+        val job = async { session.start(JPEG, "") }
+        entered.await(); job.cancelAndJoin()
+        assertNotNull(store.key)
+        assertTrue(session.state.value.pending)
+        assertFalse(session.state.value.busy)
+        assertNull(session.state.value.receipt)
+        assertEquals(0, server.requestCount)
     }
 
     @Test fun `installments and server gates prevent confirmation or mobile revision`() = runBlocking {

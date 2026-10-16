@@ -3,7 +3,7 @@ package com.vibeledger.capture
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 
 @Serializable
@@ -20,9 +20,9 @@ data class Receipt(
 ) {
     val terminal get() = status in setOf("committed", "rejected", "failed")
     val webOnly get() = nextAction == "review_in_web" ||
-        draft?.get("payment_mode")?.jsonPrimitive?.contentOrNull == "installment"
+        (draft?.get("payment_mode") as? JsonPrimitive)?.contentOrNull == "installment"
     val canConfirm get() = status == "needs_confirmation" && confirmationReady &&
-        nextAction == "confirm" && !webOnly && version != null
+        nextAction == "confirm" && !webOnly && version != null && version >= 0 && summary.isNotBlank()
     val canRevise get() = status == "needs_confirmation" && !webOnly &&
         nextAction in setOf("confirm", "supplement") && version != null
 }

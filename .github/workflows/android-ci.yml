@@ -1,7 +1,7 @@
 name: Android CI
 on:
   push:
-    branches: [main, feature/android-capture-companion]
+    branches: [main]
     paths: ['ai-ledger-android/**', '.github/workflows/android-ci.yml']
   pull_request:
     branches: [main]

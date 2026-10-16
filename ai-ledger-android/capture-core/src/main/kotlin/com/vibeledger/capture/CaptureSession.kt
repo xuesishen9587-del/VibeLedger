@@ -41,6 +41,7 @@ class CaptureSession(private val api: CaptureApi, private val store: PendingStor
             mutable.value = CaptureState(busy = true, pending = store.read() != null,
                 credentialsInvalid = failure is ApiFailure && failure.status in setOf(401, 403),
                 message = when {
+                    store.read() == null -> "未能安全保存本次请求，未上传截图。请检查设备存储并重新选择。"
                     failure is ApiFailure && failure.status in setOf(401, 403) ->
                         "设备凭据已失效或无权访问。请在设置中检查，待处理请求仍保留。"
                     failure is ApiFailure && failure.status == 409 ->

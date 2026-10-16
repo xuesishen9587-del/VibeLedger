@@ -75,6 +75,7 @@ class CompanionModel(private val app: Application) {
 
     fun bind(origin: String, token: String) {
         if (locked() || state.value.storageUnavailable) return
+        val replacingBinding = state.value.configured
         mutable.update { it.copy(loading = true, notice = "") }
         scope.launch {
             try {
@@ -82,7 +83,7 @@ class CompanionModel(private val app: Application) {
                 val api = HttpCaptureApi(origin, token.trim())
                 api.checkConnection()
                 val binding = requireNotNull(vault).bind(origin, token)
-                clearImage()
+                if (replacingBinding) clearImage()
                 activate(binding)
                 mutable.update { it.copy(connected = true, notice = "设备已连接。") }
             } catch (_: Exception) {

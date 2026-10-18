@@ -35,3 +35,13 @@ playwright-report/
 *.log
 .venv/
 *.tsbuildinfo
+
+# Android local SDK paths, caches, signing material and generated artifacts
+ai-ledger-android/.gradle/
+ai-ledger-android/.kotlin/
+ai-ledger-android/**/build/
+ai-ledger-android/local.properties
+*.apk
+*.aab
+*.jks
+*.keystore

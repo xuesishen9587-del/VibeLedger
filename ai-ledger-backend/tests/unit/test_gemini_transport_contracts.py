@@ -27,6 +27,14 @@ class GeminiTransportContractTests(unittest.TestCase):
             for rich_keyword in ("$ref", "$defs", "anyOf", "format", "additionalProperties", "default"):
                 self.assertNotIn('"' + rich_keyword + '"', encoded)
 
+    def test_expense_wire_separates_visible_evidence_from_account_selection(self):
+        properties = gemini_service._EXPENSE_EXTRACTION_TRANSPORT_SCHEMA["properties"]
+        self.assertNotIn("from_account", properties)
+        self.assertNotIn("account_candidates", properties)
+        self.assertNotIn("account", properties["field_confidence"]["properties"])
+        self.assertEqual(set(properties["account_evidence"]["properties"]),
+                         set(gemini_service.PaymentAccountEvidence.model_fields))
+
     def test_balance_uses_simplified_transport_schema(self):
         source = self._source(balance_extractor)
 

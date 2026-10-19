@@ -15,7 +15,7 @@ from app.api.routes.transactions import get_fx_provider
 from app.db import get_connection
 from app.main import create_app
 from app.repositories import simplified_schema as schema, spending as repo
-from app.services.gemini_service import ExpenseExtractionResult, GeminiService, MockGeminiService
+from app.services.gemini_service import ExpenseExtractionResult, ExpenseExtractionTransportSchema, GeminiService, MockGeminiService
 from tests.support.db_helper import BaseDbTestCase
 
 
@@ -72,6 +72,13 @@ class TestUploaderAccountMatchingDb(BaseDbTestCase):
                 "image": {"mime_type": "image/png", "base64": self.image}, "note": None, **changes}
         return self.client.post("/api/v1/expenses", headers={"Authorization": f"Bearer {self.tokens[user]}"}, json=body)
 
+    def evidence_result(self, **changes):
+        payload = self.result().model_dump(mode="json", exclude={"from_account", "account_candidates", "raw_response"})
+        payload["field_confidence"].pop("account")
+        payload["account_evidence"] = {"visible_label": "Wallet", "label_confidence": .99}
+        payload.update(changes)
+        return ExpenseExtractionResult.from_transport(ExpenseExtractionTransportSchema.model_validate(payload))
+
     def stored_account(self, response):
         self.assertEqual(response.status_code, 200, response.text)
         saved = response.json()
@@ -81,6 +88,7 @@ class TestUploaderAccountMatchingDb(BaseDbTestCase):
         return (saved["draft"]["from_account"] or {}).get("id")
 
     def test_same_image_and_key_resolve_each_real_device_user_without_bypassing_duplicates(self):
+        self.model = MockGeminiService(self.evidence_result())
         key = str(uuid4())
         with patch.object(self.model, "extract_expense", wraps=self.model.extract_expense) as extract:
             first = self.capture(0, key)
@@ -111,6 +119,53 @@ class TestUploaderAccountMatchingDb(BaseDbTestCase):
         self.assertEqual(self.model.call_count, 2)
         self.assertEqual(repo.rows(self.conn, "SELECT count(*) n FROM transactions")[0]["n"], 2)
         self.assertEqual(repo.rows(self.conn, "SELECT count(*) n FROM account_snapshots")[0]["n"], 0)
+
+    def test_visible_alias_beats_legacy_guessed_other_owner_and_low_owner_confidence(self):
+        result = self.evidence_result()
+        result.from_account = self.accounts[1]["name"]
+        result.account_candidates = [self.accounts[1]["name"]]
+        result.field_confidence["account"] = .4
+        self.model.set_next_result(result)
+        response = self.capture(0)
+        self.assertEqual(response.json()["status"], "committed", response.text)
+        self.assertEqual(self.stored_account(response), self.accounts[0]["id"])
+        self.assertNotIn("MISSING_ACCOUNT", {w["code"] for w in response.json()["warnings"]})
+
+    def test_explicit_identifier_in_new_transport_keeps_other_members_account(self):
+        self.model.set_next_result(self.evidence_result(account_evidence={
+            "visible_label": "Wallet", "label_confidence": .99,
+            "distinctive_kind": "holder_name", "distinctive_text": "Second Person",
+            "matched_account_name": self.accounts[1]["name"], "distinctive_confidence": .99}))
+        self.assertEqual(self.stored_account(self.capture(0)), self.accounts[1]["id"])
+
+    def test_unreliable_or_incomplete_new_evidence_keeps_unknown_account(self):
+        for evidence in (None, {}, {"visible_label": "Wallet", "label_confidence": .84},
+                         {"visible_label": "Unknown", "label_confidence": .99},
+                         {"visible_label": "Wallet", "label_confidence": .99,
+                          "distinctive_kind": "card_suffix", "distinctive_text": "4321"}):
+            with self.subTest(evidence=evidence):
+                self.model.set_next_result(self.evidence_result(account_evidence=evidence))
+                response = self.capture(0)
+                self.assertIsNone(self.stored_account(response))
+                self.assertIn("MISSING_ACCOUNT", {w["code"] for w in response.json()["warnings"]})
+
+    def test_new_evidence_cannot_hide_multiple_owned_accounts_or_financial_uncertainty(self):
+        spare = schema.create_account(self.conn, self.hh, "Spare Wallet", "spare", "cash", "CNY",
+                                      owner_user_id=self.users[0], opened_on=date(2026, 1, 1))
+        schema.create_alias(self.conn, self.hh, spare["id"], "Wallet")
+        self.conn.commit()
+        self.model.set_next_result(self.evidence_result())
+        response = self.capture(0)
+        self.assertIsNone(self.stored_account(response))
+        self.assertIn("MISSING_ACCOUNT", {w["code"] for w in response.json()["warnings"]})
+        for field in ("amount", "currency", "date", "intent"):
+            result = self.evidence_result()
+            result.field_confidence[field] = .4
+            self.model.set_next_result(result)
+            response = self.capture(1)
+            self.assertEqual(response.json()["status"], "needs_confirmation", response.text)
+            self.assertEqual(str(self.stored_account(response)), str(self.accounts[1]["id"]))
+        self.assertEqual(repo.rows(self.conn, "SELECT count(*) n FROM transactions")[0]["n"], 1)
 
     def test_explicit_other_member_account_is_not_overridden(self):
         self.model.set_next_result(self.result(from_account=self.accounts[1]["name"],

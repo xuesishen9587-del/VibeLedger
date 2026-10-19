@@ -17,8 +17,18 @@ _EXPENSE_EXTRACTION_TRANSPORT_SCHEMA = {
         "merchant": {"type": ["string", "null"]},
         "original_amount": {"type": ["string", "null"]},
         "original_currency": {"type": ["string", "null"]},
-        "from_account": {"type": ["string", "null"]},
-        "account_candidates": {"type": ["array", "null"], "items": {"type": "string"}},
+        "account_evidence": {
+            "type": ["object", "null"],
+            "properties": {
+                "visible_label": {"type": ["string", "null"]},
+                "label_confidence": {"type": ["number", "null"]},
+                "distinctive_kind": {"type": ["string", "null"], "enum": ["account_name", "card_suffix", "holder_name", None]},
+                "distinctive_text": {"type": ["string", "null"]},
+                "matched_account_name": {"type": ["string", "null"]},
+                "distinctive_confidence": {"type": ["number", "null"]},
+            },
+            "required": ["visible_label", "label_confidence", "distinctive_kind", "distinctive_text", "matched_account_name", "distinctive_confidence"],
+        },
         "category": {"type": ["string", "null"]},
         "payment_mode": {"type": ["string", "null"]},
         "total_amount": {"type": ["string", "null"]},
@@ -29,18 +39,17 @@ _EXPENSE_EXTRACTION_TRANSPORT_SCHEMA = {
             "properties": {
                 "amount": {"type": ["number", "null"]},
                 "currency": {"type": ["number", "null"]},
-                "account": {"type": ["number", "null"]},
                 "category": {"type": ["number", "null"]},
                 "date": {"type": ["number", "null"]},
                 "total_periods": {"type": ["number", "null"]},
                 "intent": {"type": ["number", "null"]},
             },
-            "required": ["amount", "currency", "account", "category", "date", "total_periods", "intent"],
+            "required": ["amount", "currency", "category", "date", "total_periods", "intent"],
         },
         "intent": {"type": "string", "enum": ["expense", "refund", "transfer", "repayment", "failed", "pending", "unknown"]},
         "date_evidence": {"type": "string", "enum": ["visible", "current_payment", "uncertain"]},
     },
-    "required": ["occurred_on", "merchant", "original_amount", "original_currency", "from_account", "account_candidates", "category", "payment_mode", "total_amount", "total_periods", "confidence", "field_confidence", "intent", "date_evidence"],
+    "required": ["occurred_on", "merchant", "original_amount", "original_currency", "account_evidence", "category", "payment_mode", "total_amount", "total_periods", "confidence", "field_confidence", "intent", "date_evidence"],
 }
 
 _EXPENSE_REVISION_TRANSPORT_SCHEMA = {
@@ -67,11 +76,21 @@ class ExpenseFieldConfidenceTransport(BaseModel):
     model_config = ConfigDict(extra="forbid")
     amount: Optional[float] = Field(None, ge=0, le=1)
     currency: Optional[float] = Field(None, ge=0, le=1)
-    account: Optional[float] = Field(None, ge=0, le=1)
     category: Optional[float] = Field(None, ge=0, le=1)
     date: Optional[float] = Field(None, ge=0, le=1)
     total_periods: Optional[float] = Field(None, ge=0, le=1)
     intent: Optional[float] = Field(None, ge=0, le=1)
+
+
+class PaymentAccountEvidence(BaseModel):
+    """Visible payment evidence, separate from the server's ownership decision."""
+    model_config = ConfigDict(extra="forbid")
+    visible_label: Optional[str] = Field(None, max_length=240)
+    label_confidence: Optional[float] = Field(None, ge=0, le=1)
+    distinctive_kind: Optional[Literal["account_name", "card_suffix", "holder_name"]] = None
+    distinctive_text: Optional[str] = Field(None, max_length=240)
+    matched_account_name: Optional[str] = Field(None, max_length=240)
+    distinctive_confidence: Optional[float] = Field(None, ge=0, le=1)
 
 
 class ExpenseExtractionTransportSchema(BaseModel):
@@ -83,8 +102,7 @@ class ExpenseExtractionTransportSchema(BaseModel):
     merchant: Optional[str] = None
     original_amount: Optional[Decimal] = None
     original_currency: Optional[str] = None  # MUST NOT default to "CNY"
-    from_account: Optional[str] = None
-    account_candidates: Optional[List[str]] = None
+    account_evidence: Optional[PaymentAccountEvidence] = None
     category: Optional[str] = None
     payment_mode: Optional[str] = None  # MUST NOT default to "one_off"; defaults to None
     total_amount: Optional[Decimal] = None
@@ -106,6 +124,9 @@ class ExpenseExtractionResult(BaseModel):
     original_currency: Optional[str] = None  # MUST NOT default to "CNY"
     from_account: Optional[str] = None
     account_candidates: Optional[List[str]] = None
+    # Legacy internal providers can still use from_account/candidates. Gemini always
+    # supplies an evidence object (empty when missing), never that fallback path.
+    account_evidence: Optional[PaymentAccountEvidence] = None
     category: Optional[str] = None
     payment_mode: Optional[str] = None  # MUST NOT default to "one_off"; defaults to None
     total_amount: Optional[Decimal] = None
@@ -125,7 +146,7 @@ class ExpenseExtractionResult(BaseModel):
         field_conf: Dict[str, float] = {}
         if transport.field_confidence is not None:
             fc = transport.field_confidence
-            for k in ("amount", "currency", "account", "category", "date", "total_periods", "intent"):
+            for k in ("amount", "currency", "category", "date", "total_periods", "intent"):
                 v = getattr(fc, k, None)
                 if v is not None:
                     field_conf[k] = float(v)
@@ -135,8 +156,7 @@ class ExpenseExtractionResult(BaseModel):
             merchant=transport.merchant,
             original_amount=transport.original_amount,
             original_currency=transport.original_currency,
-            from_account=transport.from_account,
-            account_candidates=transport.account_candidates,
+            account_evidence=transport.account_evidence or PaymentAccountEvidence(),
             category=transport.category,
             payment_mode=transport.payment_mode,
             total_amount=transport.total_amount,
@@ -215,9 +235,8 @@ class GeminiService:
         acc_descriptions = []
         for a in accounts:
             aliases_str = f" (aliases: {', '.join(a.get('aliases', []))})" if a.get('aliases') else ""
-            ownership = a.get("ownership", "unknown")
             owner_name = json.dumps(a.get("owner_name"), ensure_ascii=False)
-            acc_descriptions.append(f"- {a['name']} [{a['account_type']}, {a['currency']}]{aliases_str} (balance scope: {a.get('balance_scope') or 'unspecified'}) (ownership: {ownership}; owner name: {owner_name})")
+            acc_descriptions.append(f"- {a['name']} [{a['account_type']}, {a['currency']}]{aliases_str} (balance scope: {a.get('balance_scope') or 'unspecified'}) (owner name: {owner_name})")
 
         cat_descriptions = [f"- {c['name']}: {c.get('description') or ''}" for c in categories if c.get("category_type") == "expense"]
 
@@ -243,26 +262,32 @@ EXTRACTION RULES:
 2. merchant: The store, vendor, platform, or payee name.
 3. original_amount: The exact total consumption amount charged, as a decimal string.
 4. original_currency: 3-letter currency code (e.g. CNY, USD, JPY, EUR). If currency is not explicitly clear, set to null. DO NOT default to CNY.
-5. from_account: The payment account label visible in the screenshot, or a canonical account name ONLY when distinctive evidence identifies it.
-   A clearly readable card suffix or holder name that uniquely identifies a configured account should yield its canonical name in from_account.
-   from_account must match a configured name or alias; candidate names alone, with null or an unrecognized label, cannot identify an account.
-   account_candidates: List ALL compatible canonical account names supported by screenshot evidence (names, aliases, card suffixes, holder names).
-   A shared label/alias or similar names without distinguishing evidence must retain all plausible accounts; never invent a unique canonical name.
-   Ownership is server-provided context: uploader/other_member/unassigned/unknown. It is NOT screenshot evidence.
-   The server prefers a unique uploader-owned candidate only to break an otherwise ambiguous match.
-   Explicit screenshot evidence for another member's account takes priority; do not add the uploader's account just because they uploaded.
-   Unassigned accounts remain eligible. Multiple similar uploader-owned accounts must stay ambiguous.
-   With no reliable account evidence return from_account=null and account_candidates=[]; do not infer an account from identity alone.
-   field_confidence.account measures confidence in the observed label/candidate evidence, not certainty of a unique owner; ownership must not inflate it.
+5. account_evidence: Extract payment evidence; the server selects the account and resolves ownership.
+   visible_label: Copy the payment-method/account text actually visible in the screenshot, such as 零钱.
+   NEVER replace a generic visible label with a configured account name. Account lists are context, not screenshot evidence.
+   label_confidence: Confidence in reading that label, NOT confidence in identifying its owner.
+   A clear 零钱 label remains high confidence even when several configured accounts share that alias.
+   Do not select a wallet based on the platform, merchant, account order, or an assumed uploader.
+   distinctive_kind/text: Only when the screenshot ALSO shows a distinguishing account name, card suffix or holder name,
+   set kind to account_name/card_suffix/holder_name and copy that distinguishing text exactly.
+   matched_account_name: A configured canonical name ONLY if that distinctive text uniquely identifies it.
+   distinctive_confidence: Confidence that the visible distinctive text uniquely identifies that account.
+   A generic payment label such as 零钱 is NEVER distinctive account-name or holder evidence.
+   If there is no distinctive evidence, set all four distinctive fields to null, even if an account seems likely.
+   If distinguishing text is present but cannot be mapped reliably, retain its kind/text and leave matched_account_name null.
+   Explicit screenshot evidence for another member's account takes priority over uploader ownership.
+   Owner names are reference data, never evidence unless actually visible. The server does not expose uploader identity here.
+   If no payment evidence is readable, return account_evidence=null; do not invent evidence from identity or category.
 6. category: The best matching expense category name from the available categories.
 7. payment_mode: Set to "installment" if the receipt explicitly shows a credit card installment purchase (e.g. 分期, split into N periods/months); otherwise "one_off". If unclear, use null.
 8. If payment_mode is "installment":
    - total_amount: Total principal amount to be amortized, as a decimal string.
    - total_periods: Total number of installment months/periods (e.g. 3, 6, 12, 24). Must be null if not explicitly stated.
    - merchant: Merchant name.
-   - from_account: Paying credit card account name.
+   - account_evidence: Visible paying credit card evidence, using rule 5.
 9. confidence: Overall extraction confidence score between 0.0 and 1.0.
-10. field_confidence: Object containing confidence scores (0.0 to 1.0) for individual fields: amount, currency, account, category, date, total_periods.
+10. field_confidence: Object containing confidence scores (0.0 to 1.0) for amount, currency, category, date, total_periods, intent.
+    Payment label and distinctive account evidence have their own separate confidence scores in account_evidence.
 """
 
     def extract_expense(

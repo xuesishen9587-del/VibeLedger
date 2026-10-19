@@ -88,9 +88,63 @@ def confidence(draft, name):
     return isinstance(value, (float, int)) and math.isfinite(value) and .85 <= value <= 1
 
 
+def match_account_evidence(evidence, accounts, uploader_user_id=None):
+    """Resolve visible labels locally; only explicit identifying evidence can narrow them."""
+    def reliable(value):
+        return type(value) in (int, float) and math.isfinite(value) and .85 <= value <= 1
+
+    def normalize(value):
+        return (value or "").strip().casefold()
+
+    label = evidence.get("visible_label")
+    label_confidence = evidence.get("label_confidence")
+    kind = evidence.get("distinctive_kind")
+    text = evidence.get("distinctive_text")
+    name = evidence.get("matched_account_name")
+    distinctive_confidence = evidence.get("distinctive_confidence")
+    if any(value is not None for value in (kind, text, name, distinctive_confidence)):
+        # Possible distinguishing evidence must not silently fall back to the uploader
+        # when it is incomplete, uncertain, contradictory or names an unknown account.
+        if (kind not in ("account_name", "card_suffix", "holder_name") or not normalize(text)
+                or not normalize(name) or not reliable(distinctive_confidence)):
+            return None, 0
+        matches = [a for a in accounts if normalize(a["name"]) == normalize(name)]
+        if len(matches) != 1:
+            return None, 0
+        account = matches[0]
+        # A generic alias masquerading as distinctive evidence must not pick one owner.
+        text_matches = [a for a in accounts if normalize(text) in
+                        (normalize(a["name"]), *(normalize(v) for v in a.get("aliases", [])))]
+        if text_matches and (len(text_matches) != 1 or account not in text_matches):
+            return None, 0
+        if kind == "account_name" and not text_matches:
+            return None, 0
+        label_matches = [a for a in accounts if normalize(label) and normalize(label) in
+                         (normalize(a["name"]), *(normalize(v) for v in a.get("aliases", [])))]
+        if label_matches and account not in label_matches:
+            return None, 0
+        if kind == "holder_name":
+            holder_matches = [a for a in accounts if normalize(a.get("owner_name")) == normalize(text)]
+            if holder_matches:
+                if label_matches:
+                    holder_matches = [a for a in holder_matches if a in label_matches]
+                if len(holder_matches) != 1 or account not in holder_matches:
+                    return None, 0
+        return account, distinctive_confidence
+    if not reliable(label_confidence):
+        return None, 0
+    # All configured matches participate. AI candidate omissions or a guessed canonical
+    # name cannot override the literal label or hide a second uploader-owned account.
+    return match_account(label, accounts, uploader_user_id), label_confidence
+
+
 def initial_draft(result, captured_at, household, accounts, categories, uploader_user_id=None, *, note=None):
     data = result.model_dump(mode="json", exclude={"raw_response"})
-    account = match_account(data.get("from_account"), accounts, uploader_user_id, data.get("account_candidates"))
+    field_confidence = dict(data.get("field_confidence") or {})
+    if data.get("account_evidence") is not None:
+        account, field_confidence["account"] = match_account_evidence(data["account_evidence"], accounts, uploader_user_id)
+    else:
+        account = match_account(data.get("from_account"), accounts, uploader_user_id, data.get("account_candidates"))
     category = match(data.get("category"), categories)
     observed_date = data.get("occurred_on")
     date_source = "receipt"
@@ -104,7 +158,7 @@ def initial_draft(result, captured_at, household, accounts, categories, uploader
         "payment_mode": data.get("payment_mode"), "total_periods": data.get("total_periods"),
         "remarks": (note or "").strip() or None, "intent": data.get("intent", "unknown"), "date_source": date_source,
         "date_evidence": data.get("date_evidence", "uncertain"), "field_confidence": {
-            k: v for k, v in (data.get("field_confidence") or {}).items()
+            k: v for k, v in field_confidence.items()
             if k in ("amount", "currency", "date", "account", "category", "intent", "total_periods")
             and isinstance(v, (float, int)) and math.isfinite(v) and 0 <= v <= 1},
         "user_fields": [], "duplicate_ids": [], "action": None}

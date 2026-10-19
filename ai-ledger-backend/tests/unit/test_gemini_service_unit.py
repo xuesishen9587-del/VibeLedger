@@ -88,7 +88,7 @@ class TestGeminiServiceUnit(unittest.TestCase):
             "merchant": "FairPrice Finest",
             "original_amount": "45.80",
             "original_currency": "SGD",
-            "from_account": "DBS Multiplier",
+            "account_evidence": {"visible_label": "DBS Multiplier", "label_confidence": 0.90},
             "category": "Groceries",
             "payment_mode": "one_off",
             "total_amount": "45.80",
@@ -97,7 +97,6 @@ class TestGeminiServiceUnit(unittest.TestCase):
             "field_confidence": {
                 "amount": 0.99,
                 "currency": 0.95,
-                "account": 0.90,
                 "category": 0.85,
                 "date": 0.99,
                 "total_periods": None
@@ -111,7 +110,9 @@ class TestGeminiServiceUnit(unittest.TestCase):
         self.assertEqual(result.merchant, "FairPrice Finest")
         self.assertEqual(result.original_amount, Decimal("45.80"))
         self.assertEqual(result.original_currency, "SGD")
-        self.assertEqual(result.from_account, "DBS Multiplier")
+        self.assertEqual(result.account_evidence.visible_label, "DBS Multiplier")
+        self.assertEqual(result.account_evidence.label_confidence, 0.90)
+        self.assertIsNone(result.from_account)
         self.assertEqual(result.category, "Groceries")
         self.assertEqual(result.payment_mode, "one_off")
         self.assertEqual(result.total_amount, Decimal("45.80"))
@@ -120,7 +121,6 @@ class TestGeminiServiceUnit(unittest.TestCase):
         self.assertEqual(result.field_confidence, {
             "amount": 0.99,
             "currency": 0.95,
-            "account": 0.90,
             "category": 0.85,
             "date": 0.99
         })
@@ -181,14 +181,13 @@ class TestGeminiServiceUnit(unittest.TestCase):
             "merchant": "Mock Shop",
             "original_amount": "12.50",
             "original_currency": "CNY",
-            "from_account": "Alipay",
+            "account_evidence": {"visible_label": "Alipay", "label_confidence": 0.90},
             "category": "Snacks",
             "payment_mode": "one_off",
             "confidence": 0.95,
             "field_confidence": {
                 "amount": 0.95,
                 "currency": 0.95,
-                "account": 0.90,
                 "category": 0.85,
                 "date": 0.95
             }
@@ -223,7 +222,9 @@ class TestGeminiServiceUnit(unittest.TestCase):
             self.assertEqual(result.original_currency, "CNY")
             self.assertEqual(result.field_confidence.get("amount", 0.0), 0.95)
             self.assertEqual(result.field_confidence.get("currency", 0.0), 0.95)
-            self.assertEqual(result.field_confidence.get("account", 0.0), 0.90)
+            self.assertNotIn("account", result.field_confidence)
+            self.assertEqual(result.account_evidence.visible_label, "Alipay")
+            self.assertEqual(result.account_evidence.label_confidence, 0.90)
             self.assertEqual(result.field_confidence.get("category", 0.0), 0.85)
             self.assertEqual(result.field_confidence.get("date", 0.0), 0.95)
             self.assertEqual(result.field_confidence.get("total_periods", 0.0), 0.0)

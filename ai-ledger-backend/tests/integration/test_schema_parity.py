@@ -320,6 +320,13 @@ EXPECTED_TABLE_CONTRACTS = {
     },
 }
 
+for content_table in ("transactions", "spending_schedules", "schedule_occurrences"):
+    EXPECTED_TABLE_CONTRACTS[content_table]["columns"].update({
+        "expense_content": {"type": "character varying", "length": 160, "nullable": "YES"},
+        "expense_content_source": {"type": "text", "nullable": "YES"},
+    })
+
+
 class TestSchemaParity(BaseDbTestCase):
     def test_database_schema_strict_parity(self):
         """

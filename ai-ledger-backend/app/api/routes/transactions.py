@@ -6,6 +6,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, StrictStr
 from app.api.deps import get_db_connection, get_auth_context, require_idempotency_key
 from app.domain.spending import fail
+from app.domain.expense_content import command_payload
 from app.repositories import spending as repo
 from app.services import spending_service as service
 from app.services.reference_fx_service import FrankfurterFxProvider
@@ -24,6 +25,7 @@ class CreateTransactionRequest(BaseModel):
     category_id: UUID
     account_id: Optional[UUID] = None
     merchant: Optional[str] = Field(None, max_length=240)
+    expense_content: Optional[str] = Field(None, max_length=160)
     remarks: Optional[str] = Field(None, max_length=2000)
     refund_of_transaction_id: Optional[UUID] = None
     account_review_acknowledged: bool = False
@@ -37,6 +39,7 @@ class PatchTransactionRequest(BaseModel):
     category_id: Optional[UUID] = None
     account_id: Optional[UUID] = None
     merchant: Optional[str] = Field(None, max_length=240)
+    expense_content: Optional[str] = Field(None, max_length=160)
     remarks: Optional[str] = Field(None, max_length=2000)
     refund_of_transaction_id: Optional[UUID] = None
     account_review_acknowledged: Optional[bool] = None
@@ -69,18 +72,19 @@ def list_transactions(from_date: Optional[date] = Query(None, alias="from"),
     transaction_type: Optional[Literal["expense", "refund", "cash_income"]] = None,
     account_id: Optional[UUID] = None, category_id: Optional[UUID] = None,
     merchant: Optional[str] = None, status: Literal["committed", "voided"] = "committed",
+    q: Optional[str] = Query(None, max_length=240), missing_content: Optional[bool] = None,
     missing_account: Optional[bool] = None, category_uncertain: Optional[bool] = None,
     needs_metadata_review: Optional[bool] = None, cursor: Optional[str] = None,
     limit: int = Query(50, ge=1, le=200), actor=Depends(get_auth_context), conn=Depends(get_db_connection)):
     return page(conn, actor.household_id, {"from": from_date, "to": to_date,
         "transaction_type": transaction_type, "account_id": account_id, "category_id": category_id,
-        "merchant": merchant, "status": status, "missing_account": missing_account,
+        "merchant": merchant, "q": q, "missing_content": missing_content, "status": status, "missing_account": missing_account,
         "category_uncertain": category_uncertain, "needs_metadata_review": needs_metadata_review}, cursor, limit)
 
 @router.post("")
 def create_transaction(payload: CreateTransactionRequest, key=Depends(require_idempotency_key),
     actor=Depends(get_auth_context), conn=Depends(get_db_connection), provider=Depends(get_fx_provider)):
-    result, code = service.command(conn, actor, key, "create", payload.model_dump(mode="json"), provider=provider)
+    result, code = service.command(conn, actor, key, "create", command_payload(payload), provider=provider)
     return JSONResponse(result, status_code=code)
 
 @router.get("/{transaction_id}")

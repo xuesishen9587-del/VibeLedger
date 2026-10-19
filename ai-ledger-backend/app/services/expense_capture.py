@@ -10,6 +10,7 @@ from app.services.gemini_diagnostics import request_context, log_failure
 from app.domain.transactions import GeminiDependencyError
 from app.domain.capture_images import decode_image
 from app.domain.capture_edits import ReviseRequestPayload
+from app.domain.expense_content import content_fields, extracted_content
 from pydantic import ValidationError
 from app.domain.spending import fail, money, business_date, money_text
 from app.repositories import spending as repo, simplified_schema as schema
@@ -151,7 +152,7 @@ def initial_draft(result, captured_at, household, accounts, categories, uploader
     if not observed_date and data.get("date_evidence") == "current_payment":
         observed_date = captured_at.astimezone(ZoneInfo(household["timezone"])).date().isoformat()
         date_source = "capture_date"
-    return {"occurred_on": observed_date, "merchant": (data.get("merchant") or "")[:240] or None,
+    return {**extracted_content(data, note=note), "occurred_on": observed_date, "merchant": (data.get("merchant") or "")[:240] or None,
         "original_amount": data.get("original_amount"), "original_currency": data.get("original_currency"),
         "from_account": {"id": str(account["id"]), "name": account["name"]} if account else None,
         "category": {"id": str(category["id"]), "name": category["name"]} if category else None,
@@ -213,6 +214,7 @@ def validate_draft(conn, actor, draft, request_row, *, confirming=False):
     fields = {"transaction_type": "expense", "occurred_on": draft.get("occurred_on"),
         "original_amount": draft.get("original_amount"), "original_currency": draft.get("original_currency"),
         "category_id": str(category["id"]), "account_id": str(account["id"]) if account else None,
+        "expense_content": draft.get("expense_content"), "expense_content_source": draft.get("expense_content_source"),
         "merchant": draft.get("merchant"), "merchant_normalized": " ".join(draft["merchant"].casefold().split()) if draft.get("merchant") else None,
         "remarks": draft.get("remarks"), "payment_mode": draft.get("payment_mode")}
     # Only valid facts can participate in a duplicate lookup.
@@ -271,7 +273,7 @@ def finalize(conn, actor, row, proposed, confirming=False):
     # A selected schedule period can already exist. Summarize the actual record,
     # including its references/remarks, rather than the attempted draft values.
     display = {**draft, **{key: saved.get(key) for key in (
-        "original_amount", "original_currency", "merchant", "occurred_on", "remarks", "payment_mode")}}
+        "original_amount", "original_currency", "merchant", "expense_content", "expense_content_source", "occurred_on", "remarks", "payment_mode")}}
     for key, field, getter in (("category_id", "category", schema.get_category),
                                ("account_id", "from_account", schema.get_account)):
         identity = saved.get(key)
@@ -394,6 +396,13 @@ def revise(factory, actor, identity, changes, model=None):
                 with request_context(row["id"]):
                     log_failure("expense_revise", "domain_validation", exc)
             fail("CAPTURE_DEPENDENCY_UNAVAILABLE", "Draft revision unavailable; the saved draft is unchanged.", 503)
+        evidence = patch.pop("expense_content_evidence", None)
+        if "expense_content" in patch:
+            content = extracted_content({"expense_content": patch.pop("expense_content"),
+                "expense_content_source": "user_note", "expense_content_evidence": evidence,
+                "expense_content_confidence": 1}, note=note)
+            if content["expense_content"]:
+                patch["expense_content"] = content["expense_content"]
         for source, target, refs in (("from_account", "from_account_id", accounts), ("category", "category_id", categories)):
             if source in patch:
                 selected = match(patch.pop(source), refs)
@@ -429,6 +438,8 @@ def revise(factory, actor, identity, changes, model=None):
                 user_fields.add({"original_amount": "amount", "original_currency": "currency", "occurred_on": "date"}.get(key, key))
             if key == "occurred_on":
                 draft["date_source"] = "manual"
+        if "expense_content" in patch:
+            draft.update(content_fields(patch["expense_content"], "user_note" if note else "manual"))
         draft["user_fields"] = sorted(user_fields)
         draft, _, _ = validate_draft(conn, actor, draft, current)
         return receipts.response(receipts.draft(conn, actor, current, draft))

@@ -68,7 +68,9 @@ def review(section: Literal["transaction", "draft", "schedule", "investment"] = 
         if section == "draft":
             query = "SELECT id,request_kind,draft_payload,row_version,created_at FROM ingestion_requests"
         else:
-            query = "SELECT * FROM schedule_occurrences"
+            query = ("SELECT schedule_occurrences.*, (SELECT s.merchant FROM spending_schedules s "
+                     "WHERE s.household_id=schedule_occurrences.household_id AND s.id=schedule_occurrences.schedule_id) AS merchant "
+                     "FROM schedule_occurrences")
         records = repo.rows(conn, query + " WHERE household_id=%s AND status='needs_confirmation' "
                            "AND (%s::uuid IS NULL OR id>%s) ORDER BY id LIMIT %s", (hh, position, position, limit+1))
         result = {"items": json.loads(json.dumps(records[:limit], default=str)),

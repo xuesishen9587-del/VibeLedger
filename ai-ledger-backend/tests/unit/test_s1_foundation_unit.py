@@ -98,15 +98,15 @@ class TestS1DatabaseBaselineAndLineage(unittest.TestCase):
         self.assertEqual(legacy_files[0], "0001_extensions.sql")
         self.assertEqual(legacy_files[-1], "0009_indexes.sql")
 
-        # Simplified lineage returns only 0001_simplified.sql
+        # Simplified lineage includes additive migrations.
         simplified_files = get_migration_files(lineage=LINEAGE_SIMPLIFIED)
-        self.assertEqual(simplified_files, ["0001_simplified.sql"])
+        self.assertEqual(simplified_files, ["0001_simplified.sql", "0002_expense_content.sql"])
 
     def test_default_lineage_is_simplified(self):
         """Verify default runner lineage is simplified."""
         self.assertEqual(DEFAULT_LINEAGE, LINEAGE_SIMPLIFIED)
         files = get_migration_files()
-        self.assertEqual(files, ["0001_simplified.sql"])
+        self.assertEqual(files, ["0001_simplified.sql", "0002_expense_content.sql"])
 
     def test_runner_rejects_schema_with_legacy_lineage(self):
         """Verify running simplified migrations on a schema with legacy migrations raises LegacyMigrationLineageDetectedError."""
@@ -155,6 +155,14 @@ class TestS1DatabaseBaselineAndLineage(unittest.TestCase):
 
         mock_cur.fetchone.return_value = [True]
         mock_cur.fetchall.return_value = [("0001_simplified.sql", correct_checksum)]
+        is_ok, reason = verify_schema_lineage(mock_conn, lineage=LINEAGE_SIMPLIFIED)
+        self.assertFalse(is_ok)  # Old deployments must apply the additive migration.
+        self.assertEqual(reason, "schema_not_ready")
+        content_path = os.path.join(MIGRATIONS_SIMPLIFIED_DIR, "0002_expense_content.sql")
+        with open(content_path, "rb") as f:
+            content_checksum = hashlib.sha256(f.read()).hexdigest()
+        mock_cur.fetchall.return_value = [("0001_simplified.sql", correct_checksum),
+                                           ("0002_expense_content.sql", content_checksum)]
         is_ok, reason = verify_schema_lineage(mock_conn, lineage=LINEAGE_SIMPLIFIED)
         self.assertTrue(is_ok)
         self.assertEqual(reason, "ok")

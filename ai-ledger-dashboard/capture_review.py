@@ -13,7 +13,7 @@ def render(client, save, accounts, categories):
     else:
         lookup = {item["request_id"]: item for item in drafts}
         selected = st.selectbox("选择截图草稿", list(lookup), format_func=lambda key:
-            f"{lookup[key]['draft'].get('occurred_on') or '日期待定'} · {lookup[key]['draft'].get('merchant') or '商户待定'} · {key[:8]}")
+            f"{lookup[key]['draft'].get('occurred_on') or '日期待定'} · {lookup[key]['draft'].get('expense_content') or '用途待补充'} · {lookup[key]['draft'].get('merchant') or '商户待定'} · {key[:8]}")
         item = lookup[selected]
         draft = item["draft"]
         base = "/api/v1/ingestion-requests/" + selected
@@ -27,6 +27,8 @@ def render(client, save, accounts, categories):
             occurred = date.fromisoformat(draft["occurred_on"]) if draft.get("occurred_on") else None
             occurred = st.date_input("截图发生日期", value=occurred)
             merchant = st.text_input("截图商户", draft.get("merchant") or "")
+            content = st.text_input("消费内容", draft.get("expense_content") or "", max_chars=160)
+            remarks = st.text_input("备注", draft.get("remarks") or "", max_chars=2000)
             intents = ["expense", "refund", "transfer", "repayment", "failed", "pending", "unknown"]
             intent = st.selectbox("款项性质", intents, index=intents.index(draft.get("intent") or "unknown"))
             modes = [None, "one_off", "installment"]
@@ -40,6 +42,8 @@ def render(client, save, accounts, categories):
                 result = save("draft_" + selected, "PATCH", base + "/draft", {
                     "expected_version": item["row_version"], "original_amount": amount or None,
                     "original_currency": currency, "occurred_on": str(occurred) if occurred else None,
+                    **({"expense_content": content or None} if (content or None) != draft.get("expense_content") else {}),
+                    "remarks": remarks or None,
                     "merchant": merchant or None, "intent": intent, "payment_mode": mode,
                     "from_account_id": account, "category_id": category})
                 if result:

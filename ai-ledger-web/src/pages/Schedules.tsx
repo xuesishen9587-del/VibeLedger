@@ -26,6 +26,7 @@ export type SourceDraft = {
   request_id: string;
   row_version: number;
   merchant?: string;
+  expense_content?: string | null;
   currency?: string;
   category_id?: string;
   account_id?: string;
@@ -134,6 +135,13 @@ export function ScheduleEditor({
                 kind === "installment" ? Number(f.get("periods")) : null,
               start_month: String(f.get("month")) + "-01",
               day_of_month: Number(f.get("day")),
+              ...((String(f.get("expense_content")).trim() || null) !==
+              ((item || replacement || sourceDraft)?.expense_content || null)
+                ? {
+                    expense_content:
+                      String(f.get("expense_content")).trim() || null,
+                  }
+                : {}),
               merchant: String(f.get("merchant")),
               category_id: String(f.get("category")),
               account_id: String(f.get("account")) || null,
@@ -243,7 +251,22 @@ export function ScheduleEditor({
               />
             </Field>
           </div>
-          <Field label="商户 / 用途">
+          <Field label="消费内容">
+            <input
+              name="expense_content"
+              aria-label="消费内容"
+              maxLength={160}
+              placeholder="例如：房租、视频会员"
+              defaultValue={saved(
+                "expense_content",
+                (item || replacement || sourceDraft)?.expense_content || "",
+              )}
+            />
+            <small>
+              修改后仅用于未来新生成的期数，已有记录和待确认期数保持原用途。
+            </small>
+          </Field>
+          <Field label="商户">
             <input
               name="merchant"
               required

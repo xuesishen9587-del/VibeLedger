@@ -190,6 +190,8 @@ def render(client,review_only=False):
                     kind=st.selectbox("性质",[None,"expense","refund"],index=[None,"expense","refund"].index(row.get("transaction_type")),key=prefix+"kind")
                     category=st.selectbox("支出分类",list(category_names),index=list(category_names).index(row["category_id"]) if row.get("category_id") in category_names else 0,
                         format_func=category_names.get,key=prefix+"category")
+                    content=st.text_input("消费内容",row.get("expense_content") or "",max_chars=160,key=prefix+"content")
+                    merchant=st.text_input("商户",row.get("merchant") or "",max_chars=240,key=prefix+"merchant")
                     note=st.text_input("备注／未关联退款说明",row.get("remarks") or "",key=prefix+"note")
                     reason=st.text_input("跳过原因",row.get("reason") or "",key=prefix+"reason")
                     target=st.selectbox("关联已记录支出或退款",[None,*targets],index=[None,*targets].index(row.get("transaction_id")) if row.get("transaction_id") in targets else 0,
@@ -203,6 +205,10 @@ def render(client,review_only=False):
                         "occurred_on":str(day) if day else None,"transaction_type":kind,"remarks":note or None,"reason":reason or None,
                         "transaction_id":target or None,"expected_transaction_version":version if target else None,
                         "schedule_id":schedule or None,"period_no":period if schedule else None,"expected_schedule_version":schedule_version if schedule else None}
+                    if (content or None)!=row.get("expense_content"):
+                        edited["expense_content"]=content or None
+                    if (merchant or None)!=row.get("merchant"):
+                        edited["merchant"]=merchant or None
                     # Unchanged AI fallback does not silently become a user-confirmed category.
                     confirmed_category=st.checkbox("确认此分类",key=prefix+"confirm_category")
                     if category!=row.get("category_id") or confirmed_category:

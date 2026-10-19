@@ -8,6 +8,7 @@ from fastapi import HTTPException
 from app.domain.spending import fail, money, business_date
 from app.domain.statement_import import StatementExtraction
 from app.domain.statement_amounts import statement_amount
+from app.domain.expense_content import content_fields, extracted_content
 from app.repositories import spending as repo, simplified_schema as schema
 from app.services import capture_receipts as receipts, balance_service as balances, balance_capture
 from app.services import spending_service as spending, spending_schedules as schedules
@@ -97,7 +98,7 @@ def prepare(conn,actor,row,data,account,categories,head,namespace=None):
         uncertain=category is None or extracted["confidence"]["category"]<.85
         category=fallback if uncertain else category
         excluded=extracted["kind"] in ("transfer","repayment","income","opening_balance","investment_trade")
-        line={"row_id":str(identity),"row_no":number,"action":"skip" if excluded else "create",
+        line={**extracted_content(extracted, source="statement"), "row_id":str(identity),"row_no":number,"action":"skip" if excluded else "create",
             "occurred_on":extracted["occurred_on"],"original_amount":statement_amount(extracted["amount"],extracted["kind"]),"original_currency":extracted["currency"],
             "merchant":extracted["merchant"],"transaction_type":"refund" if extracted["kind"]=="refund" else "expense" if extracted["kind"] in ("expense","fee") else None,
             "category_id":str(category["id"]),"category_uncertain":uncertain,
@@ -320,6 +321,8 @@ def revise(factory,actor,identity,data):
             confirmed = line.get("confirm_facts",False)
             edited={**previous,**line,"requires_review":False if confirmed else previous["requires_review"],
                     "explicit_create":line["action"]=="create" and (confirmed or previous.get("explicit_create",False))}
+            if "expense_content" in line:
+                edited.update(content_fields(line["expense_content"]))
             if "category_id" in line:
                 edited["category_uncertain"]=False
             revised.append(edited)
@@ -412,7 +415,7 @@ def confirm(factory,actor,identity,version,provider=None):
                 elif action=="link_existing":
                     transaction=repo.get(conn,actor.household_id,line["transaction_id"])
                 elif action!="skip":
-                    fields={k:line.get(k) for k in ("transaction_type","occurred_on","original_amount","original_currency","merchant","category_id","remarks")}
+                    fields={k:line.get(k) for k in ("transaction_type","occurred_on","original_amount","original_currency","merchant","expense_content","expense_content_source","category_id","remarks")}
                     fields.update(account_id=str(row["statement_account_id"]),payment_mode="one_off" if fields["transaction_type"]=="expense" else None)
                     if action=="use_schedule_period":
                         transaction=schedules.bind_capture_period(conn,actor,row["id"],{**line,"date_source":"statement"},fields,

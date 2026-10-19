@@ -1,3 +1,4 @@
+import { expenseTitle } from "../components/ExpenseLabel";
 import { useEffect, useRef, useState, type DragEvent } from "react";
 import {
   FileUp,
@@ -64,9 +65,14 @@ function StatementUpload() {
   const [dragging, setDragging] = useState(false);
   const [selectedFile, setSelectedFile] = useState("");
   function validatePdf(file?: File): string | null {
-    if (!file || !file.size || file.size > 20 * 1024 * 1024 ||
-        !file.name.toLowerCase().endsWith(".pdf") ||
-        (file.type && !["application/pdf", "application/octet-stream"].includes(file.type))) {
+    if (
+      !file ||
+      !file.size ||
+      file.size > 20 * 1024 * 1024 ||
+      !file.name.toLowerCase().endsWith(".pdf") ||
+      (file.type &&
+        !["application/pdf", "application/octet-stream"].includes(file.type))
+    ) {
       return "请选择一份 20 MiB 以内的 PDF 账单。";
     }
     return null;
@@ -384,7 +390,9 @@ function StatementDetail({
   ];
   return (
     <Modal
-      title={row.merchant || `第 ${row.row_no} 笔交易`}
+      title={
+        expenseTitle(row) + " · " + (row.merchant || `第 ${row.row_no} 笔交易`)
+      }
       onClose={() => {
         if (!busy) onClose();
       }}
@@ -567,6 +575,23 @@ function StatementDetail({
             </Field>
           </>
         )}
+        <Field label="消费内容">
+          <input
+            value={row.expense_content || ""}
+            maxLength={160}
+            placeholder="用途待补充"
+            onChange={(e) =>
+              onChange({ expense_content: e.target.value || null })
+            }
+          />
+        </Field>
+        <Field label="商户">
+          <input
+            value={row.merchant || ""}
+            maxLength={240}
+            onChange={(e) => onChange({ merchant: e.target.value || null })}
+          />
+        </Field>
         <Field label="备注">
           <input
             value={row.remarks || ""}
@@ -792,7 +817,9 @@ export function StatementWorkspace({
     (r) =>
       (filter === "all" || needs(r)) &&
       (!search ||
-        (r.merchant || "").toLowerCase().includes(search.toLowerCase())),
+        [r.expense_content, r.merchant].some((v) =>
+          (v || "").toLowerCase().includes(search.toLowerCase()),
+        )),
   );
   const row = draft.lines.find((r) => r.row_id === selected);
   const account = accounts.find((a) => a.id === draft.account_id);
@@ -1073,8 +1100,8 @@ export function StatementWorkspace({
           <label className="search">
             <Search size={15} />
             <input
-              aria-label="搜索账单商户"
-              placeholder="搜索商户"
+              aria-label="搜索账单消费内容或商户"
+              placeholder="搜索消费内容或商户"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
             />
@@ -1087,7 +1114,7 @@ export function StatementWorkspace({
                 <tr>
                   <th className="row-number">#</th>
                   <th>日期</th>
-                  <th>商户 / 用途</th>
+                  <th>消费内容 / 商户</th>
                   <th>性质</th>
                   <th>分类</th>
                   <th className="amount">金额</th>
@@ -1116,7 +1143,18 @@ export function StatementWorkspace({
                         }
                       />
                     </td>
-                    <td>
+                    <td className="statement-description">
+                      <input
+                        aria-label={`第 ${r.row_no} 笔消费内容`}
+                        value={r.expense_content || ""}
+                        maxLength={160}
+                        placeholder="用途待补充"
+                        onChange={(e) =>
+                          update(r.row_id, {
+                            expense_content: e.target.value || null,
+                          })
+                        }
+                      />
                       <input
                         aria-label={`第 ${r.row_no} 笔商户`}
                         value={r.merchant || ""}

@@ -32,9 +32,9 @@ test("browser → same-origin proxy → JWT-protected API → PostgreSQL writes 
   await editor
     .getByRole("combobox", { name: "账户", exact: true })
     .selectOption(fixture.account_id);
-  await editor
-    .getByLabel("商户 / 用途", { exact: true })
-    .fill("真实接口测试晚餐");
+  await editor.getByLabel("消费内容", { exact: true }).fill("真实接口测试晚餐");
+  await editor.getByLabel("商户", { exact: true }).fill("验收餐厅");
+  await editor.getByLabel("备注（可选）", { exact: true }).fill("家庭聚餐");
   await editor.getByRole("button", { name: "保存记录", exact: true }).click();
   await expect(editor).toHaveCount(0);
   await page.goto("/#/wealth");
@@ -69,6 +69,22 @@ test("browser → same-origin proxy → JWT-protected API → PostgreSQL writes 
     await request.get("/api/v1/transactions?limit=100", { headers })
   ).json();
   expect(records.items).toHaveLength(42);
+  expect(
+    records.items.find((r: { merchant: string }) => r.merchant === "验收餐厅"),
+  ).toMatchObject({
+    expense_content: "真实接口测试晚餐",
+    expense_content_source: "manual",
+    merchant: "验收餐厅",
+    remarks: "家庭聚餐",
+  });
+  const matching = await (
+    await request.get(
+      "/api/v1/transactions?q=" + encodeURIComponent("测试晚餐"),
+      { headers },
+    )
+  ).json();
+  expect(matching.items).toHaveLength(1);
+  expect(matching.items[0].merchant).toBe("验收餐厅");
   // The UI uses the household date while the PDF fixture uses UTC. Cover both
   // actual business dates, including runs after midnight in Asia/Singapore.
   const dates = records.items

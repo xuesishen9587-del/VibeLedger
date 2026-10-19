@@ -1,3 +1,4 @@
+import { ExpenseLabel } from "../components/ExpenseLabel";
 import {
   ArrowUpRight,
   FileUp,
@@ -154,7 +155,7 @@ export function Home() {
                     <ArrowUpRight size={17} />
                   </span>
                   <div>
-                    <strong>{t.merchant || "日常记录"}</strong>
+                    <ExpenseLabel row={t} />
                     <small>
                       {day(t.occurred_on)} ·{" "}
                       {accounts.find((a) => a.id === t.account_id)?.name ||

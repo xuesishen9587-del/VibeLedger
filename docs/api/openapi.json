@@ -731,6 +731,18 @@
             ],
             "title": "Expected Transaction Version"
           },
+          "expense_content": {
+            "anyOf": [
+              {
+                "maxLength": 160,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expense Content"
+          },
           "kind": {
             "enum": [
               "recurring",
@@ -832,6 +844,18 @@
             "format": "uuid",
             "title": "Category Id",
             "type": "string"
+          },
+          "expense_content": {
+            "anyOf": [
+              {
+                "maxLength": 160,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expense Content"
           },
           "merchant": {
             "anyOf": [
@@ -1484,6 +1508,18 @@
             "title": "Expected Version",
             "type": "integer"
           },
+          "expense_content": {
+            "anyOf": [
+              {
+                "maxLength": 160,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expense Content"
+          },
           "kind": {
             "anyOf": [
               {
@@ -1611,6 +1647,18 @@
             "minimum": 0.0,
             "title": "Expected Version",
             "type": "integer"
+          },
+          "expense_content": {
+            "anyOf": [
+              {
+                "maxLength": 160,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expense Content"
           },
           "merchant": {
             "anyOf": [
@@ -1972,6 +2020,18 @@
             ],
             "title": "Expected Version"
           },
+          "expense_content": {
+            "anyOf": [
+              {
+                "maxLength": 160,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expense Content"
+          },
           "from_account_id": {
             "anyOf": [
               {
@@ -2045,8 +2105,8 @@
               {
                 "enum": [
                   "CNY",
-                  "USD",
                   "SGD",
+                  "USD",
                   "EUR",
                   "JPY"
                 ],
@@ -2172,6 +2232,18 @@
             "minimum": 1.0,
             "title": "Day Of Month",
             "type": "integer"
+          },
+          "expense_content": {
+            "anyOf": [
+              {
+                "maxLength": 160,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expense Content"
           },
           "kind": {
             "enum": [
@@ -2489,6 +2561,18 @@
               }
             ],
             "title": "Expected Transaction Version"
+          },
+          "expense_content": {
+            "anyOf": [
+              {
+                "maxLength": 160,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expense Content"
           },
           "merchant": {
             "anyOf": [
@@ -7033,6 +7117,39 @@
               ],
               "title": "Status",
               "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "q",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 240,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Q"
+            }
+          },
+          {
+            "in": "query",
+            "name": "missing_content",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Missing Content"
             }
           },
           {

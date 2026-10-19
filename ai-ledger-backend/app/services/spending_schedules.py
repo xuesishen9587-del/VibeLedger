@@ -7,6 +7,7 @@ from app.auth.context import SystemCommandActor
 from psycopg2 import sql
 from app.domain.spending import fail, money, money_text, local_today
 from app.domain.spending_schedules import due_date, due_periods
+from app.domain.expense_content import content_fields
 from app.repositories import spending as repo, simplified_schema as settings, audit
 from app.services import spending_service as spending
 from app.services.durable_commands import execute_durable_command, get_audit_actor_info
@@ -92,6 +93,7 @@ def expense_data(conn, schedule, occurrence):
     return {"transaction_type": "expense", "occurred_on": occurrence["due_on"],
         "original_amount": occurrence["amount"], "original_currency": occurrence["currency"],
         "category_id": category["id"], "account_id": account["id"] if account and account["status"] == "active" else None,
+        **content_fields(occurrence.get("expense_content"), "schedule"),
         "merchant": schedule["merchant"], "merchant_normalized": " ".join(schedule["merchant"].casefold().split()),
         "payment_mode": "installment" if schedule["kind"] == "installment" else "one_off"}, uncertain
 
@@ -120,6 +122,7 @@ def materialize_period(conn, actor, rid, schedule, number, day):
     if existing:
         return existing[0]
     occurrence = {"id": uuid4(), "household_id": actor.household_id, "schedule_id": schedule["id"],
+        **content_fields(schedule.get("expense_content"), "schedule"),
         "period_no": number, "due_on": day, "amount": schedule["amount_per_period"],
         "currency": schedule["currency"], "category_id": schedule["category_id"], "account_id": schedule["account_id"],
         "status": "skipped" if schedule["status"] == "paused" else "needs_confirmation",
@@ -200,6 +203,9 @@ def create(conn, actor, key, data, provider=None):
             if values["kind"] != "installment" or prior["transaction_type"] != "expense" or prior["schedule_occurrence_id"] or prior["original_currency"] != values["currency"] or prior["original_amount"] != values["amount_per_period"] * values["period_count"]:
                 fail("INVALID_SCHEDULE", "The upfront expense must match the full installment total and currency.")
             spending.void_record(c, actor, rid, replaced, {"expected_version": data["expected_transaction_version"], "delete_reason": "Converted to monthly spending schedule"})
+        inherited = source["draft_payload"] if source else prior if replaced else {}
+        values.update(content_fields(data["expense_content"]) if "expense_content" in data else
+                      content_fields(inherited.get("expense_content"), inherited.get("expense_content_source") or "manual"))
         values.update(id=uuid4(), household_id=actor.household_id, created_by_user_id=actor.user_id,
                       created_by_device_id=actor.device_id, source_request_id=rid)
         schedule = insert(c, "spending_schedules", values)
@@ -298,6 +304,8 @@ def change(conn, actor, key, identity, action, data, provider=None):
             if combined["period_count"] is not None and combined["period_count"] < occurrences:
                 fail("INVALID_SCHEDULE", "Period count cannot remove an existing period.")
             changes = {k: combined[k] for k in changes}
+            if "expense_content" in changes:
+                changes.update(content_fields(changes["expense_content"]))
             audit_action = "update"
         else:
             required = "paused" if action == "resume" else "active" if action == "pause" else before["status"]
@@ -409,6 +417,7 @@ def bind_capture_period(conn, actor, receipt_id, draft, fields, *, source="short
         day = due_date(schedule["start_month"], schedule["day_of_month"], number)
         expected_amount = schedule["amount_per_period"]
         occurrence = insert(conn, "schedule_occurrences", {"id": uuid4(), "household_id": actor.household_id,
+            **content_fields(schedule.get("expense_content"), "schedule"),
             "schedule_id": schedule["id"], "period_no": number, "due_on": day, "amount": expected_amount,
             "currency": schedule["currency"], "category_id": schedule["category_id"], "account_id": schedule["account_id"],
             "status": "needs_confirmation"})

@@ -100,29 +100,34 @@ def render(client, review_only=False):
                 category = st.selectbox("分类", list(category_names), format_func=category_names.get)
                 account = st.selectbox("账户", list(account_names), format_func=account_names.get)
                 merchant = st.text_input("商户")
+                expense_content = st.text_input("消费内容", max_chars=160)
                 remarks = st.text_input("备注（未关联退款必填）")
                 refund_id = st.text_input("关联原支出 ID（仅退款，可留空）")
                 if st.form_submit_button("保存记录"):
                     result = save("create_transaction", "POST", "/api/v1/transactions", {
                         "transaction_type": kind, "occurred_on": str(day), "original_amount": amount,
                         "original_currency": currency, "category_id": category, "account_id": account,
-                        "merchant": merchant or None, "remarks": remarks or None,
+                        "merchant": merchant or None, "expense_content": expense_content or None, "remarks": remarks or None,
                         "refund_of_transaction_id": refund_id or None})
                     if result:
                         st.rerun()
         _schedules(client, save, expense_categories, account_names)
 
-    choice = st.selectbox("筛选", ["待修正", "账户缺失", "分类不确定", "全部"] if review_only else ["全部", "待修正", "账户缺失", "分类不确定"])
+    choice = st.selectbox("筛选", ["待修正", "账户缺失", "分类不确定", "用途待补充", "全部"] if review_only else ["全部", "待修正", "账户缺失", "分类不确定", "用途待补充"])
     filters = {"待修正": {"needs_metadata_review": True}, "账户缺失": {"missing_account": True},
-               "分类不确定": {"category_uncertain": True}, "全部": {}}
+               "分类不确定": {"category_uncertain": True}, "用途待补充": {"missing_content": True}, "全部": {}}
+    search = st.text_input("搜索消费内容或商户")
+    filters[choice] = {**filters[choice], "q": search}
+    filter_identity = (choice, search)
     page_key = "review_cursor" if review_only else "spending_cursor"
-    if st.session_state.get(page_key + "_filter") != choice:
+    if st.session_state.get(page_key + "_filter") != filter_identity:
         st.session_state[page_key] = None
-        st.session_state[page_key + "_filter"] = choice
+        st.session_state[page_key + "_filter"] = filter_identity
     response = client.request("GET", "/api/v1/transactions", params={**filters[choice], "limit": 50, "cursor": st.session_state.get(page_key)})
     for row in response["items"]:
         badges = " · ".join({"MISSING_ACCOUNT": "账户未知", "CATEGORY_UNCERTAIN": "分类不确定"}[r] for r in row["review_reasons"])
-        with st.expander(f"{row['occurred_on']} · {row['original_amount']} {row['original_currency']} · {row.get('merchant') or '支出'} · {badges}"):
+        with st.expander(f"{row['occurred_on']} · {row['original_amount']} {row['original_currency']} · {row.get('expense_content') or '用途待补充'} · {badges}"):
+            st.caption("商户：" + (row.get("merchant") or "未填写"))
             st.caption("已保存并计入支出 · " + row["id"])
             if st.button("查看修改历史", key="history_" + row["id"]):
                 history = client.request("GET", "/api/v1/history", params={"entity_type": "transaction", "entity_id": row["id"]})
@@ -137,8 +142,14 @@ def render(client, review_only=False):
                 category = st.selectbox("分类", list(category_options), index=list(category_options).index(row["category_id"]), format_func=category_options.get)
                 confirm_category = st.checkbox("确认当前分类（包括 Other）", value=False)
                 acknowledge = st.checkbox("暂时保留账户未知", value=row["account_review_acknowledged"])
+                content = st.text_input("消费内容", row.get("expense_content") or "", max_chars=160)
+                merchant = st.text_input("商户", row.get("merchant") or "", max_chars=240)
+                remarks = st.text_input("备注", row.get("remarks") or "", max_chars=2000)
                 if st.form_submit_button("保存修正"):
                     body = {"expected_version": row["row_version"]}
+                    for field, value in (("expense_content", content), ("merchant", merchant), ("remarks", remarks)):
+                        if (value or None) != row.get(field):
+                            body[field] = value or None
                     if account != row["account_id"]:
                         body["account_id"] = account
                     if category != row["category_id"] or confirm_category:
@@ -205,6 +216,7 @@ def _schedules(client, save, categories, accounts, source_draft=None):
             start = st.date_input("起始月份", value=get_dashboard_today().replace(day=1))
             day = st.number_input("每月几号", min_value=1, max_value=31, value=1, step=1)
             merchant = st.text_input("计划商户")
+            content = st.text_input("计划消费内容（留空沿用转换来源）", max_chars=160)
             category = st.selectbox("计划分类", list(names), format_func=names.get)
             account = st.selectbox("计划账户", list(accounts), format_func=accounts.get)
             if st.form_submit_button("预览日期和金额"):
@@ -234,6 +246,8 @@ def _schedules(client, save, categories, accounts, source_draft=None):
                     body = {"name": name, "kind": kind, "amount_per_period": amount, "currency": currency,
                             "period_count": count or None, "start_month": str(start.replace(day=1)),
                             "day_of_month": day, "merchant": merchant, "category_id": category, "account_id": account}
+                    if content.strip():
+                        body["expense_content"] = content.strip()
                     try:
                         preview = client.request("POST", "/api/v1/spending-schedules/preview", json_data=dict(body))
                         if source_draft:

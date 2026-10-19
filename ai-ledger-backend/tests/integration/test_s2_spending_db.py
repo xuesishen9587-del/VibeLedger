@@ -16,6 +16,63 @@ from tests.support.db_helper import BaseDbTestCase
 
 
 class TestS2SpendingDb(BaseDbTestCase):
+    def test_content_search_manual_clear_and_duplicate_identity(self):
+        first = self.post({"expense_content": "牛奶、纸巾", "merchant": "京东平台商户", "remarks": "周末采购"}).json()
+        legacy = self.post({"merchant": "Another"}).json()
+        self.assertEqual(first["expense_content_source"], "manual")
+        self.assertIsNone(legacy["expense_content"])
+        for text in ("牛奶", "京东"):
+            result = self.client.get("/api/v1/transactions", params={"q": text}).json()
+            self.assertEqual([r["id"] for r in result["items"]], [first["id"]])
+        self.assertEqual(self.client.get("/api/v1/transactions", params={"merchant": "京东"}).json()["items"], [])
+        self.assertEqual(len(self.client.get("/api/v1/transactions", params={"merchant": "京东平台商户"}).json()["items"]), 1)
+        self.assertEqual([r["id"] for r in self.client.get("/api/v1/transactions?missing_content=true").json()["items"]], [legacy["id"]])
+        before = repo.get(self.conn, self.hh, first["id"])
+        expected = [r["id"] for r in repo.duplicate_candidates(self.conn, self.hh, before)]
+        self.conn.commit()
+        edited = self.change(first["id"], {"expected_version": 0, "expense_content": "办公用品"}).json()
+        self.assertEqual((edited["merchant"], edited["remarks"]), (first["merchant"], first["remarks"]))
+        self.assertEqual(edited["reporting_fx_locked_at"], first["reporting_fx_locked_at"])
+        self.assertEqual([r["id"] for r in repo.duplicate_candidates(self.conn, self.hh, before)], expected)
+        self.conn.commit()
+        cleared = self.change(first["id"], {"expected_version": 1, "expense_content": None}).json()
+        self.assertIsNone(cleared["expense_content_source"])
+        self.assertEqual(self.change(first["id"], {"expected_version": 1, "expense_content": "过时"}).status_code, 409)
+        self.assertEqual(self.post({"expense_content_source": "screenshot"}).status_code, 422)
+        self.actor = AuthContext("browser", self.user, uuid4(), "owner")
+        self.assertEqual(self.client.get("/api/v1/transactions?q=Another&missing_content=true").json()["items"], [])
+
+    def test_pending_period_keeps_content_snapshot_after_plan_edit(self):
+        self.post({"merchant": "Laptop shop", "original_amount": "50.00", "occurred_on": "2026-01-31"})
+        plan = self.schedule(expense_content="笔记本电脑")
+        pending = self.client.get(f"/api/v1/spending-schedules/{plan['id']}").json()["occurrences"][0]
+        self.assertEqual(pending["status"], "needs_confirmation")
+        with patch("app.services.spending_schedules.local_today", return_value=date(2026, 2, 1)):
+            response = self.client.patch(f"/api/v1/spending-schedules/{plan['id']}",
+                json={"expected_version": plan["row_version"], "expense_content": "电脑及配件"},
+                headers={"Idempotency-Key": str(uuid4())})
+        self.assertEqual(response.status_code, 200, response.text)
+        result = self.client.post(f"/api/v1/schedule-occurrences/{pending['id']}/resolve",
+            json={"expected_version": pending["row_version"], "action": "record_separately", "reason": "另一笔购买"},
+            headers={"Idempotency-Key": str(uuid4())})
+        self.assertEqual(result.status_code, 200, result.text)
+        self.catch_up(date(2026, 2, 28))
+        records = repo.rows(self.conn, "SELECT * FROM transactions WHERE schedule_occurrence_id IS NOT NULL ORDER BY occurred_on")
+        self.assertEqual([r["expense_content"] for r in records], ["笔记本电脑", "电脑及配件"])
+        self.assertEqual([r["expense_content_source"] for r in records], ["schedule", "schedule"])
+
+    def test_converted_plan_inherits_content_when_legacy_client_omits_it(self):
+        purchase = self.post({"expense_content": "手机"}).json()
+        body = {"name": "手机分期", "kind": "installment", "amount_per_period": "50.00", "currency": "CNY",
+                "period_count": 2, "start_month": "2026-01-01", "day_of_month": 31, "merchant": "Lunch",
+                "category_id": str(self.category), "acknowledged_due_through": "2026-01-31",
+                "replaces_transaction_id": purchase["id"], "expected_transaction_version": 0}
+        with patch("app.services.spending_schedules.local_today", return_value=date(2026, 1, 31)):
+            response = self.client.post("/api/v1/spending-schedules", json=body, headers={"Idempotency-Key": str(uuid4())})
+        self.assertEqual(response.status_code, 201, response.text)
+        plan = response.json()
+        self.assertEqual((plan["expense_content"], plan["expense_content_source"]), ("手机", "manual"))
+
     def test_daily_interruption_retries_and_reads_do_not_materialize(self):
         from app.services import spending_schedules as schedules
         self.schedule(today=date(2026, 1, 1))

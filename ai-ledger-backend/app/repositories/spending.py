@@ -50,7 +50,12 @@ def list_records(conn, household_id, filters, cursor=None, limit=50):
     if filters.get("merchant") is not None:
         predicates.append("merchant_normalized=%s")
         params.append(" ".join(filters["merchant"].casefold().split()))
+    if filters.get("q") and filters["q"].strip():
+        predicates.append("(strpos(lower(COALESCE(expense_content, '')),lower(%s))>0 OR "
+                          "strpos(lower(COALESCE(merchant, '')),lower(%s))>0)")
+        params.extend([filters["q"].strip()] * 2)
     for key, predicate in (
+        ("missing_content", "expense_content IS NULL"),
         ("missing_account", "account_id IS NULL"),
         ("category_uncertain", "category_uncertain"),
         ("needs_metadata_review", "((account_id IS NULL AND NOT account_review_acknowledged) OR category_uncertain)"),

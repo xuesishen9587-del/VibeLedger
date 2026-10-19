@@ -1,3 +1,4 @@
+import { ExpenseLabel, contentSource } from "../components/ExpenseLabel";
 import { useEffect, useState } from "react";
 import { Plus, FileUp, Pencil, Search } from "lucide-react";
 import { useApp, useResource, navigate } from "../lib/context";
@@ -71,6 +72,13 @@ export function TransactionEditor({
               original_currency: String(f.get("currency")),
               category_id: String(f.get("category")),
               account_id: String(f.get("account")) || null,
+              ...((String(f.get("expense_content")).trim() || null) !==
+              (record?.expense_content || null)
+                ? {
+                    expense_content:
+                      String(f.get("expense_content")).trim() || null,
+                  }
+                : {}),
               merchant: String(f.get("merchant")).trim() || null,
               remarks: String(f.get("remarks")).trim() || null,
               account_review_acknowledged: f.get("unknown_account") === "on",
@@ -144,12 +152,27 @@ export function TransactionEditor({
                 </select>
               </Field>
             </div>
-            <Field label="商户 / 用途">
+            <Field label="消费内容">
+              <input
+                name="expense_content"
+                aria-label="消费内容"
+                maxLength={160}
+                defaultValue={record?.expense_content || ""}
+                placeholder="例如：牛奶、纸巾"
+              />
+              <small>
+                {record && contentSource(record)
+                  ? contentSource(record) + " · "
+                  : ""}
+                可留空，之后再补充
+              </small>
+            </Field>
+            <Field label="商户">
               <input
                 name="merchant"
                 maxLength={240}
                 defaultValue={record?.merchant || ""}
-                placeholder="比如：晚餐"
+                placeholder="例如：京东、附近的餐厅"
               />
             </Field>
             <div className="form-grid">
@@ -223,6 +246,7 @@ export function SpendingPage() {
     [category, setCategory] = useState(""),
     [account, setAccount] = useState(""),
     [search, setSearch] = useState(""),
+    [missingContent, setMissingContent] = useState(false),
     [cursor, setCursor] = useState<string | null>(null),
     [edit, setEdit] = useState<Transaction | true | null>(
       location.hash.includes("/new") ? true : null,
@@ -239,7 +263,8 @@ export function SpendingPage() {
             ...range,
             category_id: category,
             account_id: account,
-            merchant: search,
+            q: search,
+            missing_content: missingContent ? true : undefined,
             cursor,
             limit: 30,
           })
@@ -362,7 +387,7 @@ export function SpendingPage() {
               <label className="search">
                 <Search size={16} />
                 <input
-                  aria-label="搜索商户"
+                  aria-label="搜索消费内容或商户"
                   value={search}
                   onChange={(e) => change(() => setSearch(e.target.value))}
                   placeholder="找一笔消费…"
@@ -393,6 +418,16 @@ export function SpendingPage() {
                 ))}
               </select>
             </div>
+            <label className="check">
+              <input
+                type="checkbox"
+                checked={missingContent}
+                onChange={(e) =>
+                  change(() => setMissingContent(e.target.checked))
+                }
+              />
+              用途待补充
+            </label>
             {records.loading ? (
               <Loading />
             ) : records.error ? (
@@ -404,7 +439,7 @@ export function SpendingPage() {
                     <thead>
                       <tr>
                         <th>日期</th>
-                        <th>商户 / 用途</th>
+                        <th>消费内容 / 商户</th>
                         <th>分类</th>
                         <th>账户</th>
                         <th className="amount">金额</th>
@@ -418,9 +453,7 @@ export function SpendingPage() {
                         <tr key={t.id}>
                           <td className="muted">{day(t.occurred_on)}</td>
                           <td>
-                            <strong>
-                              {t.merchant || kindLabel[t.transaction_type]}
-                            </strong>
+                            <ExpenseLabel row={t} />
                             {t.transaction_type !== "expense" && (
                               <Tag>{kindLabel[t.transaction_type]}</Tag>
                             )}

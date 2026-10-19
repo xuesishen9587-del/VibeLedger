@@ -146,8 +146,8 @@ class TestS1SimplifiedPostgresIntegration(unittest.TestCase):
                 # 2. Verify schema_migrations record
                 cur.execute("SELECT migration_name, checksum_sha256 FROM schema_migrations;")
                 rows = cur.fetchall()
-                self.assertEqual(len(rows), 1)
-                self.assertEqual(rows[0][0], "0001_simplified.sql")
+                self.assertEqual(len(rows), 2)
+                self.assertEqual({r[0] for r in rows}, {"0001_simplified.sql", "0002_expense_content.sql"})
                 self.assertEqual(len(rows[0][1]), 64)
         finally:
             conn.close()
@@ -165,7 +165,7 @@ class TestS1SimplifiedPostgresIntegration(unittest.TestCase):
             with conn.cursor() as cur:
                 cur.execute("SELECT COUNT(*) FROM schema_migrations;")
                 count = cur.fetchone()[0]
-                self.assertEqual(count, 1)
+                self.assertEqual(count, 2)
         finally:
             conn.close()
 

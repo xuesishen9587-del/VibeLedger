@@ -1125,6 +1125,7 @@ test("100 rows retain inline edits across filters and reload; confirmation uses 
   await login(page);
   await page.goto("/#/statement/statement");
   await page.getByLabel("第 2 笔金额", { exact: true }).fill("88.80");
+  await page.getByLabel("第 2 笔消费内容", { exact: true }).fill("牛奶、纸巾");
   await page.getByRole("button", { name: "只看待检查 1" }).click();
   await expect(page.getByTestId("statement-row")).toHaveCount(1);
   await page.getByRole("button", { name: "检查", exact: true }).click();
@@ -1134,6 +1135,9 @@ test("100 rows retain inline edits across filters and reload; confirmation uses 
     "88.80",
   );
   await page.reload();
+  await expect(page.getByLabel("第 2 笔消费内容", { exact: true })).toHaveValue(
+    "牛奶、纸巾",
+  );
   await expect(page.getByLabel("第 2 笔金额", { exact: true })).toHaveValue(
     "88.80",
   );
@@ -1142,6 +1146,8 @@ test("100 rows retain inline edits across filters and reload; confirmation uses 
   const patch = state.writes.find((w) => w.path.endsWith("/draft"))!;
   expect(patch.body.lines[0].confirm_facts).toBe(true);
   expect(patch.body.lines[1].original_amount).toBe("88.80");
+  expect(patch.body.lines[1].expense_content).toBe("牛奶、纸巾");
+  expect(patch.body.lines[1]).not.toHaveProperty("merchant");
   expect(patch.body.lines[2].confirm_facts).toBeUndefined();
   expect(
     state.writes.find((w) => w.path.endsWith("/confirm"))!.body

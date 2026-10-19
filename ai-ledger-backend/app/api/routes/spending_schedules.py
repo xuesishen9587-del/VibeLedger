@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field, StrictStr, model_validator
 from app.api.deps import get_db_connection, require_browser_auth, require_idempotency_key
 from app.api.routes.transactions import get_fx_provider
 from app.domain.spending import fail
+from app.domain.expense_content import command_payload
 from app.repositories import spending as repo
 from app.services import spending_schedules as service
 
@@ -23,6 +24,7 @@ class ScheduleTerms(BaseModel):
     start_month: date
     day_of_month: int = Field(ge=1, le=31)
     merchant: str = Field(min_length=1, max_length=240)
+    expense_content: Optional[str] = Field(None, max_length=160)
     category_id: UUID
     account_id: Optional[UUID] = None
 
@@ -60,12 +62,13 @@ class PatchSchedule(ChangeSchedule):
     start_month: Optional[date] = None
     day_of_month: Optional[int] = Field(None, ge=1, le=31)
     merchant: Optional[str] = Field(None, min_length=1, max_length=240)
+    expense_content: Optional[str] = Field(None, max_length=160)
     category_id: Optional[UUID] = None
     account_id: Optional[UUID] = None
 
     @model_validator(mode="after")
     def required_terms(self):
-        for name in self.model_fields_set - {"account_id", "period_count", "reason"}:
+        for name in self.model_fields_set - {"account_id", "period_count", "reason", "expense_content"}:
             if getattr(self, name) is None:
                 raise ValueError(f"{name} cannot be cleared.")
         return self
@@ -106,7 +109,7 @@ def list_schedules(cursor: Optional[UUID] = None, limit: int = Query(50, ge=1, l
 
 @router.post("/spending-schedules")
 def create(payload: CreateSchedule, actor=Depends(require_browser_auth), conn=Depends(get_db_connection), key=Depends(require_idempotency_key), provider=Depends(get_fx_provider)):
-    result, code = service.create(conn, actor, key, payload.model_dump(mode="json"), provider)
+    result, code = service.create(conn, actor, key, command_payload(payload), provider)
     return JSONResponse(result, status_code=code)
 
 

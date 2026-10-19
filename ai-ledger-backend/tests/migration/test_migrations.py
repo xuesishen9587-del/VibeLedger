@@ -46,8 +46,8 @@ class TestMigrations(unittest.TestCase):
             with conn.cursor() as cur:
                 cur.execute("SELECT migration_name, checksum_sha256 FROM schema_migrations ORDER BY migration_name;")
                 rows = cur.fetchall()
-                self.assertEqual(len(rows), 1)
-                self.assertEqual(rows[0][0], "0001_simplified.sql")
+                self.assertEqual(len(rows), 2)
+                self.assertEqual({r[0] for r in rows}, {"0001_simplified.sql", "0002_expense_content.sql"})
                 for filename, checksum in rows:
                     self.assertEqual(len(checksum), 64) # SHA256 hex string length
                 
@@ -78,7 +78,7 @@ class TestMigrations(unittest.TestCase):
         try:
             with conn.cursor() as cur:
                 cur.execute("SELECT COUNT(*) FROM schema_migrations;")
-                self.assertEqual(cur.fetchone()[0], 1)
+                self.assertEqual(cur.fetchone()[0], 2)
         finally:
             conn.close()
 

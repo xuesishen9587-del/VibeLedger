@@ -40,6 +40,28 @@ export const draft = (lines: StatementLine[]): StatementDraft => ({
   warnings: [],
 });
 describe("statement decisions", () => {
+  it("sends only explicit content edits and can clear content without changing merchant identity", () => {
+    const original = draft([
+      line(1, {
+        expense_content: "视频会员",
+        expense_content_source: "statement",
+      }),
+    ]);
+    const changed = draft([
+      line(1, { expense_content: null, expense_content_source: "statement" }),
+    ]);
+    const edits = statementEdit(
+      original,
+      changed,
+      1,
+      new Set(),
+      new Set(),
+    ).lines;
+    expect(edits).toEqual([
+      { row_id: "row-1", action: "create", expense_content: null },
+    ]);
+    expect(statementSummary(changed).review).toBe(0);
+  });
   it("keeps global and orphaned blockers distinct from actionable rows", () => {
     const d = draft([line(1), line(2, { action: "skip" })]);
     d.warnings = [

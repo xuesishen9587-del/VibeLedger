@@ -10,8 +10,9 @@ class ReviseRequestPayload(BaseModel):
     correction_note: Optional[str] = Field(None, min_length=1, max_length=2000)
     occurred_on: Optional[date] = None
     merchant: Optional[str] = Field(None, max_length=240)
+    expense_content: Optional[str] = Field(None, max_length=160)
     original_amount: Optional[StrictStr] = Field(None, max_length=80)
-    original_currency: Optional[Literal["CNY", "USD", "SGD", "EUR", "JPY"]] = None
+    original_currency: Optional[Literal["CNY", "SGD", "USD", "EUR", "JPY"]] = None
     from_account_id: Optional[UUID] = None
     category_id: Optional[UUID] = None
     payment_mode: Optional[Literal["one_off", "installment"]] = None

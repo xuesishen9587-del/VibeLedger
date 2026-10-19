@@ -1,3 +1,8 @@
+import {
+  ExpenseLabel,
+  expenseTitle,
+  contentSource,
+} from "../components/ExpenseLabel";
 import { useState } from "react";
 import {
   Inbox,
@@ -46,6 +51,8 @@ type ExpenseDraft = {
   original_currency: string;
   occurred_on: string;
   merchant: string;
+  expense_content?: string | null;
+  expense_content_source?: string | null;
   from_account?: { id: string };
   category?: { id: string };
   remarks?: string;
@@ -82,6 +89,7 @@ function CaptureEditor({
           request_id: current.request_id,
           row_version: current.row_version,
           merchant: d.merchant,
+          expense_content: d.expense_content,
           currency: d.original_currency,
           category_id: d.category?.id,
           account_id: d.from_account?.id,
@@ -154,6 +162,13 @@ function CaptureEditor({
                   original_amount: String(f.get("amount")),
                   original_currency: String(f.get("currency")),
                   occurred_on: String(f.get("date")),
+                  ...((String(f.get("expense_content")).trim() || null) !==
+                  (d.expense_content || null)
+                    ? {
+                        expense_content:
+                          String(f.get("expense_content")).trim() || null,
+                      }
+                    : {}),
                   merchant: String(f.get("merchant")),
                   from_account_id: String(f.get("account")) || null,
                   category_id: String(f.get("category")) || null,
@@ -375,6 +390,16 @@ function CaptureEditor({
                 </select>
               </Field>
             </div>
+            <Field label="消费内容">
+              <input
+                name="expense_content"
+                aria-label="消费内容"
+                maxLength={160}
+                defaultValue={d.expense_content || ""}
+                placeholder="用途待补充"
+              />
+              <small>{contentSource(d)}</small>
+            </Field>
             <Field label="商户">
               <input name="merchant" defaultValue={d.merchant || ""} />
             </Field>
@@ -422,6 +447,8 @@ function CaptureEditor({
 type Occurrence = {
   id: string;
   schedule_id: string;
+  expense_content?: string | null;
+  merchant?: string | null;
   period_no: number;
   due_on: string;
   amount: string;
@@ -461,6 +488,9 @@ function OccurrenceEditor({
   );
   return (
     <Modal title="这期消费是否已经记过？" onClose={onClose}>
+      <p>
+        <ExpenseLabel row={{ ...item, merchant: schedule.data?.merchant }} />
+      </p>
       <p>
         {schedule.data?.name || "月度计划"} · 第 {item.period_no} 期 ·{" "}
         {day(item.due_on)} · {money(item.amount, item.currency)}
@@ -508,7 +538,7 @@ function OccurrenceEditor({
                   <option value="">请选择日期、金额和币种一致的消费</option>
                   {choices.map((t) => (
                     <option key={t.id} value={t.id}>
-                      {t.merchant || "日常消费"} ·{" "}
+                      {expenseTitle(t)} · {t.merchant || "商户未填写"} ·{" "}
                       {money(t.original_amount, t.original_currency)}
                     </option>
                   ))}
@@ -640,9 +670,13 @@ export function ReviewPage({ identity }: { identity?: string }) {
                             )?.name || "账户") + "账单"
                           : balance
                             ? "截图里的账户余额"
-                            : (r.draft as ExpenseDraft).merchant ||
-                              "一笔待保存的消费"}
+                            : expenseTitle(r.draft as ExpenseDraft)}
                       </strong>
+                      {!statement && !balance && (
+                        <small>
+                          {(r.draft as ExpenseDraft).merchant || "商户未填写"}
+                        </small>
+                      )}
                       <small>
                         {statement
                           ? `${(r.draft as StatementDraft).lines.length} 笔交易，核对后整单导入`
@@ -665,10 +699,8 @@ export function ReviewPage({ identity }: { identity?: string }) {
                 >
                   <Inbox />
                   <div>
-                    <strong>
-                      {t.merchant || "日常消费"} ·{" "}
-                      {money(t.original_amount, t.original_currency)}
-                    </strong>
+                    <ExpenseLabel row={t} />
+                    <span>{money(t.original_amount, t.original_currency)}</span>
                     <small>
                       {[
                         !t.account_id && !t.account_review_acknowledged
@@ -712,9 +744,10 @@ export function ReviewPage({ identity }: { identity?: string }) {
                 >
                   <CalendarDays />
                   <div>
-                    <strong>
+                    <ExpenseLabel row={o} />
+                    <span>
                       第 {o.period_no} 期 · {money(o.amount, o.currency)}
-                    </strong>
+                    </span>
                     <small>{day(o.due_on)} 到期，可能与已有消费重复</small>
                   </div>
                   <ChevronRight size={18} />

@@ -10,6 +10,30 @@ from app.repositories import spending as repo, simplified_schema as schema
 
 
 class TestS3StatementDb(BaseDbTestCase):
+    def test_statement_content_edit_and_link_preserve_manual_description(self):
+        extracted = self.extraction([self.line(provider_transaction_id="content-1", expense_content="视频会员",
+            expense_content_evidence="视频会员月费", expense_content_confidence=.99)])
+        draft = self.upload(extracted).json()
+        line = draft["draft"]["lines"][0]
+        self.assertEqual(line["expense_content_source"], "statement")
+        edited = self.edit(draft, [{"row_id": line["row_id"], "action": "create", "expense_content": "家庭视频会员"}])
+        self.assertEqual(edited["draft"]["lines"][0]["expense_content_source"], "manual")
+        saved = self.confirm(edited).json()
+        transaction_id = saved["lines"][0]["transaction_id"]
+        row = repo.get(self.conn, self.hh, transaction_id)
+        self.assertEqual((row["expense_content"], row["expense_content_source"]), ("家庭视频会员", "manual"))
+        self.conn.commit()
+        repeated = self.upload(extracted).json()
+        self.assertEqual(repeated["draft"]["lines"][0]["action"], "link_existing")
+        self.assertEqual(self.confirm(repeated).json()["counts"], {"create": 0, "link": 1, "skip": 0})
+        self.assertEqual(repo.get(self.conn, self.hh, transaction_id)["expense_content"], "家庭视频会员")
+
+    def test_statement_missing_content_does_not_add_review_requirement(self):
+        draft = self.upload().json()
+        self.assertIsNone(draft["draft"]["lines"][0]["expense_content"])
+        self.assertFalse(draft["draft"]["lines"][0]["requires_review"])
+        self.assertEqual(self.confirm(draft).json()["status"], "committed")
+
     def seed_test_data(self):
         setup.TestS3BalancesDb.seed_test_data(self)
         with self.conn.cursor() as cur:

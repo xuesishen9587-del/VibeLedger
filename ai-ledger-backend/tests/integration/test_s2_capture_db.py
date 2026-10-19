@@ -18,6 +18,39 @@ from tests.integration import test_s2_spending_db as spending_tests
 
 
 class TestS2CaptureDb(BaseDbTestCase):
+    def test_content_is_optional_and_low_confidence_never_blocks_financial_save(self):
+        self.model.set_next_result(self.result(expense_content="手机", expense_content_source="screenshot",
+            expense_content_evidence="手机", expense_content_confidence=.4))
+        saved = self.capture().json()
+        self.assertEqual(saved["status"], "committed")
+        self.assertIn("用途待补充", saved["display_summary"])
+        row = repo.get(self.conn, self.hh, saved["transaction_id"])
+        self.assertIsNone(row["expense_content"])
+
+    def test_capture_content_note_and_manual_revision_are_independent(self):
+        self.model.set_next_result(self.result(expense_content="西少爷（新辰里店）", expense_content_source="screenshot",
+            expense_content_evidence="西少爷（新辰里店）-美团App-261019112007000001", expense_content_confidence=.99))
+        saved = self.capture(note="周一午餐").json()
+        row = repo.get(self.conn, self.hh, saved["transaction_id"])
+        self.assertEqual((row["expense_content"], row["expense_content_source"], row["remarks"]),
+                         ("西少爷（新辰里店）", "screenshot", "周一午餐"))
+        self.conn.commit()
+        draft = self.draft(merchant="Draft store")
+        edited = self.edit(draft["request_id"], expected_version=draft["row_version"], expense_content="手动用途").json()
+        self.model.set_next_revision_result(ExpenseRevisionResult(payment_mode="one_off", expense_content="错误覆盖"))
+        revised = self.client.post(f"/api/v1/ingestion-requests/{draft['request_id']}/revise", json={
+            "expected_version": edited["row_version"], "correction_note": "一次性付款"}).json()
+        self.assertEqual(revised["draft"]["expense_content"], "手动用途")
+        self.assertEqual(revised["draft"]["expense_content_source"], "manual")
+        self.model.set_next_revision_result(ExpenseRevisionResult(expense_content="家用路由器", expense_content_evidence="家用路由器"))
+        revised = self.client.post(f"/api/v1/ingestion-requests/{draft['request_id']}/revise", json={
+            "expected_version": revised["row_version"], "correction_note": "用途改为家用路由器"}).json()
+        self.assertEqual(revised["draft"]["expense_content_source"], "user_note")
+        committed = self.client.post(f"/api/v1/ingestion-requests/{draft['request_id']}/confirm",
+            json={"expected_version": revised["row_version"]}).json()
+        self.assertEqual(committed["status"], "committed")
+        self.assertIn("消费内容：家用路由器", committed["display_summary"])
+
     def seed_test_data(self):
         spending_tests.TestS2SpendingDb.seed_test_data(self)
         self.browser = self.actor

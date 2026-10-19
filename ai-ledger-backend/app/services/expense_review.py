@@ -18,6 +18,7 @@ def summary(draft, *, saved=False):
         payment = "付款方式：未识别"
     lines = ["已保存" if saved else "请核对本笔消费",
         f"金额：{text(draft.get('original_amount'))} {text(draft.get('original_currency'), '币种未识别')}",
+        f"消费内容：{text(draft.get('expense_content'), '用途待补充')}",
         f"商户：{text(draft.get('merchant'))}",
         f"分类：{text((draft.get('category') or {}).get('name'))}",
         f"支付账户：{text((draft.get('from_account') or {}).get('name'))}",

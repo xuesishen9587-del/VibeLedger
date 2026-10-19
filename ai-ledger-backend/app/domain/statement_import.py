@@ -3,6 +3,7 @@ from typing import Literal
 from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, StrictStr
 from app.domain.balance_capture import ExtractedBalance, BalanceDraftRow
+from app.domain.expense_content import ExtractedContent, ContentEvidence
 
 
 class StatementConfidence(BaseModel):
@@ -20,6 +21,9 @@ class StatementReferenceLine(BaseModel):
     amount: StrictStr | None = Field(None,max_length=80)
     currency: str | None = Field(None,max_length=3)
     merchant: str | None = Field(None,max_length=240)
+    expense_content: ExtractedContent = None
+    expense_content_evidence: ContentEvidence = None
+    expense_content_confidence: float = Field(0,ge=0,le=1)
     kind: Literal["expense","refund","fee","transfer","repayment","income","opening_balance","investment_trade","unknown"]
     provider_reference: str | None = Field(None,max_length=200)
     category: str | None = Field(None,max_length=120)
@@ -58,6 +62,7 @@ class StatementLineEdit(BaseModel):
     original_amount: StrictStr | None = Field(None,max_length=80)
     original_currency: str | None = Field(None,max_length=3)
     merchant: str | None = Field(None,max_length=240)
+    expense_content: str | None = Field(None,max_length=160)
     transaction_type: Literal["expense","refund"] | None = None
     category_id: UUID | None = None
     remarks: str | None = Field(None,max_length=2000)

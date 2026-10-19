@@ -6,6 +6,7 @@ from uuid import uuid4
 from app.domain.spending import fail, money, money_text, business_date, metadata_reasons
 from app.repositories import spending as repo, simplified_schema as settings
 from app.repositories import audit
+from app.domain.expense_content import content_fields
 from app.services.durable_commands import execute_durable_command, get_audit_actor_info
 
 FX_FIELDS = ("reporting_amount", "reporting_currency", "reporting_fx_rate",
@@ -108,6 +109,7 @@ def conversion(conn, household, values):
 def create_record(conn, actor, receipt_id, data, *, source="dashboard_manual", date_source="manual", item_key="single", category_uncertain=False, occurrence_id=None):
     values = {key: data.get(key) for key in ("transaction_type", "occurred_on", "original_amount",
         "original_currency", "category_id", "account_id", "merchant", "remarks", "refund_of_transaction_id")}
+    values.update(content_fields(data.get("expense_content"), data.get("expense_content_source") or "manual"))
     if values.get("refund_of_transaction_id"):
         parent = require_record(conn, actor.household_id, values["refund_of_transaction_id"])
         values["category_id"] = parent["category_id"]
@@ -135,6 +137,8 @@ def patch_record(conn, actor, receipt_id, transaction_id, data):
         changes["category_uncertain"] = False
     if "account_id" in changes:
         changes["account_review_acknowledged"] = changes.get("account_review_acknowledged", False)
+    if "expense_content" in changes:
+        changes.update(content_fields(changes["expense_content"]))
     values = {**before, **changes}
     household = validate_record(conn, actor.household_id, values, before)
     changes["merchant_normalized"] = values["merchant_normalized"]

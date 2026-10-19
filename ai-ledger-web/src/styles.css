@@ -1183,6 +1183,20 @@ dialog::backdrop {
   border-color: #dbe4d1;
   background: #fff;
 }
+.statement-table .statement-description input {
+  display: block;
+  height: 18px;
+  min-height: 18px;
+  padding: 0 4px;
+  line-height: 16px;
+}
+.statement-table .statement-description input:first-child {
+  font-weight: 600;
+}
+.statement-table .statement-description input + input {
+  font-size: 10px;
+  color: #657265;
+}
 .statement-table tr.needs-review {
   background: #fffaee;
 }

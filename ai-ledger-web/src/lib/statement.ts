@@ -7,6 +7,7 @@ const editable = [
   "original_amount",
   "original_currency",
   "merchant",
+  "expense_content",
   "transaction_type",
   "remarks",
   "transaction_id",

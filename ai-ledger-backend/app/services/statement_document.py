@@ -10,7 +10,7 @@ from app.domain.statement_import import StatementDocumentExtraction
 from app.domain.spending import fail
 
 MAX_BYTES=20*1024*1024
-PARSER_VERSION="simplified-statement-v2-references"
+PARSER_VERSION="simplified-statement-v3-content"
 
 
 _STATEMENT_TRANSPORT_SCHEMA = {
@@ -51,6 +51,9 @@ _STATEMENT_TRANSPORT_SCHEMA = {
                     "merchant": {
                         "type": ["string", "null"],
                     },
+                    "expense_content": {"type": ["string", "null"]},
+                    "expense_content_evidence": {"type": ["string", "null"]},
+                    "expense_content_confidence": {"type": "number"},
                     "kind": {
                         "type": "string",
                         "enum": [
@@ -94,7 +97,7 @@ _STATEMENT_TRANSPORT_SCHEMA = {
                     "posted_on",
                     "amount",
                     "currency",
-                    "merchant",
+                    "merchant", "expense_content", "expense_content_evidence", "expense_content_confidence",
                     "kind",
                     "provider_reference",
                     "category",
@@ -278,6 +281,13 @@ different amounts and identical-looking purchases. Never merge rows or append
 suffixes to merchant names. Never guess dates, account identity or missing lines. Fees are expenses; transfers, repayments, opening balances and
 trades are not spending. Return processed page numbers, expected line count and
 honest completeness.
+Extract optional expense_content (up to 160 characters) separately from merchant, from actual
+product/order items or service descriptions in that row only. Never infer from merchant or category.
+Remove order identifiers, marketing and redundant specs; preserve meaningful product/service differences.
+Use a count such as 牛奶、纸巾等3件商品 only when the evidence explicitly states 3件.
+expense_content_evidence must quote the supporting document text exactly; provide independent
+expense_content_confidence. If there is only a generic platform/payee, leave content and evidence null
+and confidence zero. Missing content does not reduce financial confidence.
 For transaction amounts, return positive absolute decimal strings; determine kind
 from the transaction meaning, debit/credit columns and labels, never from a plus
 or minus sign alone. Banks use opposite sign conventions for card purchases and

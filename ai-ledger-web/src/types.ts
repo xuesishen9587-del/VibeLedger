@@ -64,6 +64,8 @@ export type Transaction = {
   category_id: string;
   account_id: string | null;
   merchant: string | null;
+  expense_content?: string | null;
+  expense_content_source?: string | null;
   remarks: string | null;
   row_version: number;
   category_uncertain: boolean;
@@ -86,6 +88,8 @@ export type StatementLine = {
   category_id: string | null;
   category_uncertain: boolean;
   merchant: string | null;
+  expense_content?: string | null;
+  expense_content_source?: string | null;
   remarks: string | null;
   reason?: string | null;
   kind?: string;
@@ -233,4 +237,6 @@ export type Schedule = {
   category_id: string;
   account_id: string | null;
   merchant: string | null;
+  expense_content?: string | null;
+  expense_content_source?: string | null;
 };

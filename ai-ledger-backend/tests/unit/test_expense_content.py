@@ -12,7 +12,7 @@ from app.services.gemini_service import ExpenseExtractionResult, ExpenseExtracti
 
 class ExpenseContentTests(TestCase):
     def extraction(self, **changes):
-        return {"expense_content": "西少爷（新辰里店）-261019112007000001",
+        return {"expense_content": "西少爷（新辰里店）-美团App-261019112007000001",
                 "expense_content_evidence": "西少爷（新辰里店）-美团App-261019112007000001",
                 "expense_content_source": "screenshot", "expense_content_confidence": .99, **changes}
 
@@ -34,6 +34,10 @@ class ExpenseContentTests(TestCase):
         self.assertEqual(extracted_content(data)["expense_content"], "牛奶、纸巾")
         data["expense_content_evidence"] = "共3件：牛奶、纸巾、洗手液"
         self.assertEqual(extracted_content(data)["expense_content"], "牛奶、纸巾等3件商品")
+        data["expense_content_evidence"] = "共13件：牛奶、纸巾"
+        self.assertEqual(extracted_content(data)["expense_content"], "牛奶、纸巾")
+        data["expense_content"] = "牛奶3件"
+        self.assertEqual(extracted_content(data)["expense_content"], "牛奶")
 
     def test_note_source_requires_quote_from_actual_note(self):
         data = self.extraction(expense_content="家用路由器", expense_content_source="user_note",

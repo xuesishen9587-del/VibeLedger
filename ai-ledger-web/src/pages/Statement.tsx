@@ -1101,7 +1101,7 @@ export function StatementWorkspace({
             <Search size={15} />
             <input
               aria-label="搜索账单消费内容或商户"
-              placeholder="搜索商户"
+              placeholder="搜索消费内容或商户"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
             />

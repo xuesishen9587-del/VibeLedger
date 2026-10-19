@@ -39,9 +39,9 @@ def extracted_content(data, *, source=None, note=None):
                  "消费", "购物", "商品", "付款", "支付"} or len(value) > 160:
         value = None
     # An item count is accepted only when the evidence actually states that count.
-    count = re.search(r"(?:等|共|合计)\s*(\d+)\s*件", value or "")
-    if count and not re.search(rf"{re.escape(count[1])}\s*件", evidence):
-        value = re.sub(r"(?:等|共|合计)\s*\d+\s*件(?:商品)?", "", value).strip(" 、，")
+    for count in re.findall(r"(?<!\d)(\d+)\s*件", value or ""):
+        if not re.search(rf"(?<!\d){re.escape(count)}\s*件", evidence):
+            value = re.sub(rf"(?:等|共|合计)?\s*(?<!\d){re.escape(count)}\s*件(?:商品)?", "", value).strip(" 、，")
     return content_fields(value, origin)
 
 

@@ -156,6 +156,12 @@ class PaymentAccountEvidenceTests(TestCase):
             {"timezone": "Asia/Singapore"}, self.accounts, [], self.first)
         self.assertIsNone(draft["from_account"])
 
+    def test_empty_identifier_confidence_is_not_an_ownership_decision(self):
+        for value in (None, 0, .4, .99):
+            draft = self.draft({**self.label, "distinctive_confidence": value})
+            self.assertEqual(draft["from_account"]["id"], str(self.accounts[0]["id"]))
+            self.assertEqual(draft["field_confidence"]["account"], .99)
+
     def test_explicit_other_member_identifier_takes_priority(self):
         for kind, text in (("card_suffix", "尾号4321"), ("holder_name", "Second Person"),
                            ("account_name", "Wallet-B")):

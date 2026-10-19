@@ -102,7 +102,7 @@ def match_account_evidence(evidence, accounts, uploader_user_id=None):
     text = evidence.get("distinctive_text")
     name = evidence.get("matched_account_name")
     distinctive_confidence = evidence.get("distinctive_confidence")
-    if any(value is not None for value in (kind, text, name, distinctive_confidence)):
+    if kind is not None or normalize(text) or normalize(name):
         # Possible distinguishing evidence must not silently fall back to the uploader
         # when it is incomplete, uncertain, contradictory or names an unknown account.
         if (kind not in ("account_name", "card_suffix", "holder_name") or not normalize(text)
